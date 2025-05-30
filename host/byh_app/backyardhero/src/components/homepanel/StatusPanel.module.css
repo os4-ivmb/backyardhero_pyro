@@ -1,0 +1,94 @@
+@keyframes animateOutline {
+    0% {
+      outline-width: 1px;
+      outline-offset: 0;
+      outline-color: rgba(0, 130, 206, 0);
+    }
+  
+    10% {
+      outline-color: rgba(0, 174, 49, 0.75);
+    }
+  
+    /* The animation finishes at 50% */
+    50% {
+      outline-width: 7px;
+      outline-offset: 4px;
+      outline-color: rgba(0, 130, 206, 0);
+    }
+  
+    100% {
+      outline-width: 7px;
+      outline-offset: 4px;
+      outline-color: rgba(102, 102, 102, 0);
+    }
+  }
+
+.pushy_green_border {
+    outline-width: 1px;
+    outline-offset: 0;
+    background-color:rgba(0, 174, 49, 0.75);
+    outline-color: rgba(0, 174, 49, 0.75);
+    outline-style: solid;
+    animation: animateOutline 1s ease infinite;
+    cursor: pointer;
+  }
+
+  .pushy_green_border_slow {
+    outline-width: 1px;
+    outline-offset: 0;
+    background-color:rgba(0, 174, 49, 0.75);
+    outline-color: rgba(0, 174, 49, 0.75);
+    outline-style: solid;
+    animation: animateOutline 3s ease infinite;
+    cursor: none;
+  }
+
+  .pushy_green_border_slowest {
+    outline-width: 1px;
+    outline-offset: 0;
+    background-color:rgba(0, 174, 49, 0.75);
+    outline-color: rgba(0, 174, 49, 0.75);
+    outline-style: solid;
+    animation: animateOutline 5s ease infinite;
+    cursor: none;
+  }
+
+  .pushy_green_border:hover {
+    background-color:rgba(0, 79, 22, 0.75);
+  }
+
+  .rotating_border_fast {
+
+    border: 2px solid #0000;
+    border-radius: 4px;
+    background: linear-gradient(#131219, #121917) padding-box, linear-gradient(
+          var(--angle),
+          #070707,
+          #00ff55
+        ) border-box;
+    animation: 1s rotate linear infinite;
+  }
+  
+  .rotating_border {
+
+    border: 2px solid #0000;
+    border-radius: 4px;
+    background: linear-gradient(#131219, #121917) padding-box, linear-gradient(
+          var(--angle),
+          #070707,
+          #00ff55
+        ) border-box;
+    animation: 4s rotate linear infinite;
+  }
+  
+  @keyframes rotate {
+    to {
+      --angle: 360deg;
+    }
+  }
+  
+  @property --angle {
+    syntax: "<angle>";
+    initial-value: 0deg;
+    inherits: false;
+  }

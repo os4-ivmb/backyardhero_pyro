@@ -1,0 +1,36 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+host/data/log/*
+host/data/backyardhero.db
+host/data/ledstate
+host/data/state
+host/data/leddata
+
+**/.DS_Store
+
+
+# Next.js
+.next/
+node_modules/
+.env.local
+.env.development.local
+.env.production.local
+.env.test.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+out/
+*/.DS_Store
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Thumbs.db (Windows)
+Thumbs.db
+ehthumbs.db
