@@ -8,74 +8,74 @@
     },
 
     "receivers": {
-        "RX116": {
+        "116_BYH": {
             "label": "BYH v0.2 RCV 2",
             "type":"BKYD_TS_24_1",
             "cues": {
-                "RX116": [1, 2, 3, 4, 5, 6, 7, 8]
+                "116": [1, 2, 3, 4, 5, 6, 7, 8]
             }
         },
-        "RX117": {
+        "117_BYH": {
             "label": "BYH v0.2 RCV 2",
             "type":"BKYD_TS_24_1",
             "cues": {
-                "RX117": [1, 2, 3, 4, 5, 6, 7, 8]
+                "117": [1, 2, 3, 4, 5, 6, 7, 8]
             }
         },
-        "RX118": {
+        "118_BYH": {
             "label": "BYH v0.2 RCV 2",
             "type":"BKYD_TS_24_1",
             "cues": {
-                "RX118": [1, 2, 3, 4, 5, 6, 7, 8]
+                "118": [1, 2, 3, 4, 5, 6, 7, 8]
             }
         },
-        "RX119": {
+        "119_BYH": {
             "label": "BYH v0.2 RCV 2",
             "type":"BKYD_TS_24_1",
             "cues": {
-                "RX119": [1, 2, 3, 4, 5, 6, 7, 8]
+                "119": [1, 2, 3, 4, 5, 6, 7, 8]
             }
         },
-        "RX120": {
+        "120_BYH": {
             "label": "BYH v0.2 RCV 2",
             "type":"BKYD_TS_24_1",
             "cues": {
-                "RX120": [1, 2, 3, 4, 5, 6, 7, 8]
+                "120": [1, 2, 3, 4, 5, 6, 7, 8]
             }
         },
-        "RX121": {
+        "121_BYH": {
             "label": "BYH v0.2 RCV 2",
             "type":"BKYD_TS_24_1",
             "cues": {
-                "RX121": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+                "121": [1, 2, 3, 4, 5, 6, 7, 8]
             }
         },
-        "RX122": {
+        "122_BYH": {
             "label": "BYH v0.2 RCV 2",
             "type":"BKYD_TS_24_1",
             "cues": {
-                "RX122": [1, 2, 3, 4, 5, 6, 7, 8]
+                "b22": [1, 2, 3, 4, 5, 6, 7, 8]
             }
         },
-        "RX123": {
+        "123_BYH": {
             "label": "BYH v0.2 RCV 2",
             "type":"BKYD_TS_24_1",
             "cues": {
-                "RX123": [1, 2, 3, 4, 5, 6, 7, 8]
+                "b23": [1, 2, 3, 4, 5, 6, 7, 8]
             }
         },
-        "RX124": {
+        "124_BYH": {
             "label": "BYH v0.2 RCV 2",
             "type":"BKYD_TS_24_1",
             "cues": {
-                "RX124": [1, 2, 3, 4, 5, 6, 7, 8]
+                "b24": [1, 2, 3, 4, 5, 6, 7, 8]
             }
         },
-        "RX125": {
+        "125_BYH": {
             "label": "BYH v0.2 RCV 2",
             "type":"BKYD_TS_24_1",
             "cues": {
-                "RX125": [1, 2, 3, 4, 5, 6, 7, 8]
+                "b25": [1, 2, 3, 4, 5, 6, 7, 8]
             }
         },
        "BILUSOCN1": {
@@ -95,6 +95,78 @@
             "cues": {
                 "1": [9, 10, 11, 12]
             }
+        },
+        "BILUSOCN4": {
+            "type":"BILUSOCN_433_TX_ONLY",
+            "cues": {
+                "2": [1, 2, 3, 4]
+            }
+        },
+        "BILUSOCN5": {
+            "type":"BILUSOCN_433_TX_ONLY",
+            "cues": {
+                "2": [5, 6, 7, 8]
+            }
+        },
+        "BILUSOCN6": {
+            "type":"BILUSOCN_433_TX_ONLY",
+            "cues": {
+                "2": [9, 10, 11, 12]
+            }
+        },
+        "BILUSOCN7": {
+            "type":"BILUSOCN_433_TX_ONLY",
+            "cues": {
+                "3": [1, 2, 3, 4]
+            }
+        },
+        "BILUSOCN8": {
+            "type":"BILUSOCN_433_TX_ONLY",
+            "cues": {
+                "3": [5, 6, 7, 8]
+            }
+        },
+        "BILUSOCN9": {
+            "type":"BILUSOCN_433_TX_ONLY",
+            "cues": {
+                "3": [9, 10, 11, 12]
+            }
+        },
+        "BILUSOCN10": {
+            "type":"BILUSOCN_433_TX_ONLY",
+            "cues": {
+                "4": [1, 2, 3, 4]
+            }
+        },
+        "BILUSOCN11": {
+            "type":"BILUSOCN_433_TX_ONLY",
+            "cues": {
+                "4": [5, 6, 7, 8]
+            }
+        },
+        "BILUSOCN12": {
+            "type":"BILUSOCN_433_TX_ONLY",
+            "cues": {
+                "4": [9, 10, 11, 12]
+            }
+        },
+        "BILUSOCN13": {
+            "type":"BILUSOCN_433_TX_ONLY",
+            "cues": {
+                "5": [1, 2, 3, 4]
+            }
+        },
+        "BILUSOCN14": {
+            "type":"BILUSOCN_433_TX_ONLY",
+            "cues": {
+                "5": [5, 6, 7, 8]
+            }
+        },
+        "BILUSOCN15": {
+            "type":"BILUSOCN_433_TX_ONLY",
+            "cues": {
+                "5": [9, 10, 11, 12]
+            }
         }
     },
 
@@ -105,7 +177,7 @@
             "label": "Backyard Hero v0.1",
             "config": {
                 "min_battery_to_fire_pct": 30,
-                "require_continuity": true
+                "require_continuity": false
             }
         }
     },

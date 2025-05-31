@@ -34,6 +34,7 @@ class START_SEQUENCE_STEPS(Enum):
     START_CONFIRMED = 5
     STARTED = 6
     ABORTED = 7
+    STOPPED = 8
 
 class BSCFireTranslator:
     def translate_zone_target_to_tx_pkg(zone, target, repetition=8):
@@ -177,7 +178,7 @@ class BYHProtocolHandler:
         self.updateRelevantStates()
 
     def process_serial_in(self, msg):
-        if(DEBUG):
+        if(self.parent.debug_mode):
             print("BYH handler got message to look at")
             print(msg)
         if(msg[0] == '{'):
@@ -414,8 +415,9 @@ class BYHProtocolHandler:
             # --- Continuity check (only if async and required) ---
             if require_cont and entry.get('async_fire'):
                 cont_arr = status.get('continuity', [])
+                print(cont_arr)
                 # continuity is a 4-item array of 64-bit bitmasks
-                if not isinstance(cont_arr, (list, tuple)) or len(cont_arr) != 4:
+                if not isinstance(cont_arr, (list, tuple)) or len(cont_arr) != 2:
                     errors.append(
                         f"Precheck: Invalid continuity data for receiver '{dev_id}'."
                     )
@@ -455,7 +457,9 @@ class BYHProtocolHandler:
         self.parent.led_handler.update("show_run_state", RUN_STATE.PRECHECK.value)
         print("Checking battery and continuity states")
         if(self.run_precheck()):
-            print("Precheck failed.")
+            self.parent.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
+            self.status = START_SEQUENCE_STEPS.ABORTED
+            self.parent.write_error("Precheck failed. Aborting show.")
             return
 
         self.show_start_time = round(time.time()*1000)+(SHOW_START_TIME_SECONDS*1000)
@@ -494,7 +498,13 @@ class BYHProtocolHandler:
             while(time.time()*1000 < self.show_start_time):
                 self.send_to_active_nodes("play", " 0", 5, self.async_load_targets)
                 time.sleep(3)
-                pass
+                if self.schedule_stop_event.is_set():
+                    print("Schedule stopped signaling nodes.")
+                    self.running_show = False
+                    self.status = START_SEQUENCE_STEPS.ABORTED
+                    self.parent.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
+                    self.send_to_active_nodes("stop", " 0", 5)
+                    return
             self.status = START_SEQUENCE_STEPS.STARTED
             self.parent.led_handler.update("show_run_state", RUN_STATE.RUNNING.value)
             print("Started show!")
@@ -511,6 +521,7 @@ class BYHProtocolHandler:
                     if self.schedule_stop_event.is_set():
                         print("Schedule stopped signaling nodes.")
                         self.running_show = False
+                        self.status = START_SEQUENCE_STEPS.ABORTED
                         self.parent.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
                         self.send_to_active_nodes("stop", " 0", 5)
                         return
@@ -523,6 +534,7 @@ class BYHProtocolHandler:
                             if self.schedule_stop_event.is_set():
                                 print("Schedule stopped.")
                                 self.send_to_active_nodes("stop", " 0", 5)
+             
                                 self.parent.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
                                 self.running_show = False
                                 return

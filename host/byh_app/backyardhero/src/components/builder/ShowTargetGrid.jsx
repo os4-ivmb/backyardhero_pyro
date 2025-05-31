@@ -36,9 +36,6 @@ export default function ShowTargetGrid(props) {
         return;
       }
 
-      console.log(activeItem);
-      console.log(over);
-      console.log(items)
       const updatedItems = items.map((item) =>
         item.id === activeItem.id
           ? { ...item, zone: newZone, target: parseInt(newTarget) }

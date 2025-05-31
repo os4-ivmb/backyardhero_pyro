@@ -277,12 +277,12 @@ export default function StatusPanel(props) {
                                 (stateData.fw_state?.dstc && stateData.fw_state?.waiting_for_client_start || handlerInStartPhase) && (
                                     <div>
                                     { stateData.fw_state?.show_running ||  handlerInStartPhase ? (
-                                        <div 
-                                            className={`flex items-center text-lg leading-[3rem] text-center font-semibold ml-6 px-4 bg-red-900 border border-red-800`}
+                                        <div
+                                            className={`flex items-center text-lg leading-[3rem] text-center font-semibold ml-6 px-4 bg-red-600 hover:bg-red-500 text-white font-bold rounded cursor-pointer border border-red-500`}
                                             onClick={()=> delegatedShowAction('stop')}
                                         >
-                                            <FaX className="mr-2"/> Abort 
-                                        </div>  
+                                            <FaX className="mr-2"/> Abort
+                                        </div>
                                     ): (
                                         <div 
                                             className={`flex items-center text-lg leading-[3rem] text-center font-semibold ml-6 px-4 ${styles.pushy_green_border}`}

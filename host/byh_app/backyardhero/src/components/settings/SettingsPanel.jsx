@@ -1,6 +1,7 @@
 import BrightnessSlider from "./BrightnessSlider";
 import TransmitRepetitionCount from "./TransmitRepetitionCount";
 import TxConfig from "./TxConfig";
+import DaemonSettings from "./DaemonSettings";
 
 export default function SettingsPanel(props) {
   return (
@@ -14,8 +15,11 @@ export default function SettingsPanel(props) {
       <div className="w-full border-b pb-6 border-gray-500">
         <TransmitRepetitionCount />
       </div>
-      <div className="w-full">
+      <div className="w-full border-b pb-6 border-gray-500">
         <TxConfig/>    
+      </div>
+      <div className="w-full">
+        <DaemonSettings />
       </div>
     </div>
   );

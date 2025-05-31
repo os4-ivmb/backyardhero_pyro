@@ -269,7 +269,7 @@ export default function ReceiverDisplay() {
     }, [systemConfig.receivers, stagedShow, stateData.fw_state?.active_protocol, stateData.fw_state?.receivers]);
 
     return (
-        <div className="w-full flex flex-wrap gap-5 p-4">
+        <div className="w-full flex flex-wrap gap-5 p-4 justify-center">
         {Object.keys(receivers).map((rcv_key, i) => (
             <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]}  showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id}/>
         ))}

@@ -1,0 +1,23 @@
+version: '3'
+
+services:
+  firework-system:
+    build: .
+    container_name: firework-system
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+      - ./config:/config
+      - ./pythings:/app/pythings
+      - ./byh_app/backyardhero:/app/byh_app/
+      - ./supervisord.dev.conf:/etc/supervisor/conf.d/supervisord.conf
+    ports:
+      - "1776:1776"  # Next.js app port
+      - "8090:8090" #WS
+    environment:
+      - SERIAL_PORT=/dev/tty.usbmodem01
+      - SERIAL_BAUD=115200
+      - LED_STATE_FILE=/data/ledstate
+      - NODE_ENV=development
+    # Uncomment the privileged line below if you have permission issues with the serial port
+    privileged: true

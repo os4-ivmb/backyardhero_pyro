@@ -96,13 +96,9 @@ export default function Status() {
 
         return () => clearInterval(intervalId); // Cleanup interval on component unmount
     }, [stateData]);
-    const almClass = " basis-1/5 flex items-center text-xs justify-center text-sm shadow-lg p-2 ml-2"
-    let recentError = stateData.fw_d_error ? stateData.fw_d_error[0] : false
-    if(recentError){
-        if(!checkIfLogIsRecent(recentError)){
-            recentError=""
-        }
-    }
+
+    // Define base classes for status items for better consistency
+    const statusItemBaseClass = "flex-1 flex items-center justify-center text-xs font-medium shadow-md rounded-md px-2 py-1 min-w-[80px]";
 
     let showRunClass = "bg-gray-800"
     let showRunLabel = "No Show"
@@ -115,56 +111,61 @@ export default function Status() {
     let txLabel = "No TX Conn"
     if(stateData.fw_state?.device_running){
         if(stateData.fw_state?.active_protocol){
-            txClass = "bg-green-800"
+            txClass = "bg-green-700"
             txLabel = stateData.fw_state?.active_protocol
         }else{
-            txClass = "bg-yellow-800"
+            txClass = "bg-yellow-600"
             txLabel = "Unknown TX"
         }
+    } else {
+        txClass = "bg-red-700";
     }
 
     return (
-        <div className="w-full items-center justify-center">
-            <div className="text-xs flex flex-row ">
-                <div className="basis-2/5">
-                    <span className="bg-gray-600 mr-2">System Status: </span>
-                    <span><b>Temp:</b> {stateData.fw_system?.temp}F  </span>
-                    <span><b>CPU:</b> {stateData.fw_system?.usage?.cpu_percent}%  </span>
-                    <span><b>Memory:</b> {stateData.fw_system?.usage?.cpu_percent}%  </span>
+        <div className="w-full items-center justify-center p-2 space-y-2">
+            {/* Top Row: System Status & Errors - REMOVED */}
+            {/* <div className="text-xs flex flex-row items-center gap-x-4">
+                <div className="flex items-center gap-x-2 flex-wrap">
+                    <span className="font-semibold text-gray-700 dark:text-gray-300 mr-1">System:</span>
+                    <span className="text-gray-600 dark:text-gray-400"><b>Temp:</b> {stateData.fw_system?.temp}°F</span>
+                    <span className="text-gray-600 dark:text-gray-400"><b>CPU:</b> {stateData.fw_system?.usage?.cpu_percent}%</span>
+                    <span className="text-gray-600 dark:text-gray-400"><b>Mem:</b> {stateData.fw_system?.usage?.memory_percent}%</span>
                 </div>
-                <div className="basis-4/5 text-right">
-                    <span className="ml-8 text-red-700">{recentError ? recentError : ''}</span>
+                <div className="flex-grow text-right">
+                    <span className="ml-4 text-red-500 dark:text-red-400">{recentError ? recentError : ''}</span>
                 </div>
-            </div>
-            <div className={`flex flex-row w-full ${stateData.fw_state?.daemon_active ? '' : 'opacity-60'}`}>
-                <div className="flex flex-row basis-1/2">
-                    <div className={`${almClass} ${isConnected ? 'bg-green-800' : 'bg-red-800'}`}>
-                        <button
-                        onClick={() => {
-                            if (isConnected) {
-                                disconnectWebSocket();
-                            } else {
-                                connectWebSocket();
-                            }
-                        }}
-                        >
-                            {isConnected ? (<span>Connected</span> ) : <span className="text-xs">Click to Reconnect</span>}
-                        </button>
-                    </div>
-                    <div className={`${almClass} ${stateData.fw_state?.daemon_active ? 'bg-green-800' : 'bg-red-800'}`}>{stateData.fw_state?.daemon_active ? "Daemon Active" : "Daemon Down"}</div>
-                    <div className={`${almClass} group text-xs ${txClass}`}>
-                        <div className="group-hover:hidden">{txLabel}</div>
-                        <div className="hidden group-hover:block">{`${stateData.fw_state?.settings?.rf?.addr}@${stateData.fw_state?.settings?.rf?.baud}`}</div>
-                    </div>
-                    <div className={`${almClass} ${stateData.fw_state?.manual_fire_active ? 'bg-yellow-800' : 'bg-green-800'}`}>{stateData.fw_state?.manual_fire_active ? "Manual Fire" : "MF Disarm"}</div>
-                    <div className={`${almClass} ${stateData.fw_state?.device_is_armed ? 'bg-green-800' : 'bg-red-800'}`}>{stateData.fw_state?.device_is_armed ? "ARMED" : "DISARMED"}</div>
+            </div> */}
+
+            {/* Bottom Row: Main Status Indicators - All items in a single wrapping container */}
+            <div className={`flex flex-row flex-wrap w-full gap-2 ${stateData.fw_state?.daemon_active ? '' : 'opacity-60'}`}>
+                {/* All status items will now be direct children here */}
+                <button
+                    onClick={() => {
+                        if (isConnected) {
+                            disconnectWebSocket();
+                        } else {
+                            connectWebSocket();
+                        }
+                    }}
+                    className={`${statusItemBaseClass} ${isConnected ? 'bg-green-600 text-white' : 'bg-red-600 text-white hover:bg-red-700'}`}
+                >
+                    {isConnected ? (<span>Connected</span> ) : <span className="flex items-center"><MdRefresh className="mr-1" /> Reconnect</span>}
+                </button>
+                <div className={`${statusItemBaseClass} ${stateData.fw_state?.daemon_active ? 'bg-green-600 text-white' : 'bg-red-600 text-white'}`}>{stateData.fw_state?.daemon_active ? "Daemon Active" : "Daemon Down"}</div>
+                <div className={`${statusItemBaseClass} group ${txClass} ${txClass.includes('yellow') ? 'text-yellow-900' : 'text-white'}`}>
+                    <div className="group-hover:hidden">{txLabel}</div>
+                    <div className="hidden group-hover:block text-xs p-1">{`${stateData.fw_state?.settings?.rf?.addr}@${stateData.fw_state?.settings?.rf?.baud}`}</div>
                 </div>
-                <div className="flex flex-row basis-1/2">
-                    <div className={`${almClass} ${stateData.fw_state?.loaded_show_name ? 'bg-green-800' : 'bg-gray-800'}`}>{stateData.fw_state?.loaded_show_name ? `${stateData.fw_state?.loaded_show_name} loaded`: `No show loaded`}</div>
-                    <div className={`${almClass} ${stateData.fw_state?.device_is_transmitting ? 'bg-yellow-800' : 'bg-gray-800'}`}>{stateData.fw_state?.device_is_transmitting ? "TX ACTIVE": "NO TX"}</div>
-                    <div className={`${almClass} p-0 bg-${stateData.fw_cursor >= 0 ? 'green' : 'blue'}-800`}><div className="text-xs">Cursor @</div><b>{stateData.fw_cursor}</b></div>
-                    <div className={`${almClass} ${showRunClass}`}>{showRunLabel}</div>
+                <div className={`${statusItemBaseClass} ${stateData.fw_state?.manual_fire_active ? 'bg-yellow-500 text-yellow-900' : 'bg-green-600 text-white'}`}>{stateData.fw_state?.manual_fire_active ? "Manual Fire" : "MF Disarm"}</div>
+                <div className={`${statusItemBaseClass} ${stateData.fw_state?.device_is_armed ? 'bg-red-600 text-white' : 'bg-gray-500 text-white'}`}>{stateData.fw_state?.device_is_armed ? "ARMED" : "DISARMED"}</div>
+                
+                <div className={`${statusItemBaseClass} ${stateData.fw_state?.loaded_show_name ? 'bg-blue-600 text-white' : 'bg-gray-400 text-gray-800'}`}>{stateData.fw_state?.loaded_show_name ? `${stateData.fw_state?.loaded_show_name} loaded`: `No show loaded`}</div>
+                <div className={`${statusItemBaseClass} ${stateData.fw_state?.device_is_transmitting ? 'bg-yellow-500 text-yellow-900' : 'bg-gray-400 text-gray-800'}`}>{stateData.fw_state?.device_is_transmitting ? "TX ACTIVE": "NO TX"}</div>
+                <div className={`${statusItemBaseClass} ${(stateData.fw_cursor >= 0 ? 'bg-green-600' : 'bg-blue-600')} text-white flex flex-col items-center justify-center`}>
+                    <span className="text-xxs -mb-0.5 leading-tight">Cursor @</span>
+                    <b className="text-sm leading-tight">{stateData.fw_cursor}</b>
                 </div>
+                <div className={`${statusItemBaseClass} ${showRunClass.replace('-800', '-600').replace('-500', '-600')} text-white`}>{showRunLabel}</div>
             </div>
         </div>
     );

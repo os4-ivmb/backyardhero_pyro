@@ -4,8 +4,8 @@ import axios from "axios";
 const PROTOCOLS = ["BKYD_TS_HYBRID"]
 
 export default function TxConfig() {
-  const [rfSerialAddr, setRFSerialAddr] = useState("/dev/ttyUSB1");
-  const [rfSerialBaud, setRFSerialBaud] = useState(19200);
+  const [rfSerialAddr, setRFSerialAddr] = useState("/dev/tty.usbmodem01");
+  const [rfSerialBaud, setRFSerialBaud] = useState(115200);
   const [rfProtocol, setRFProtocol] = useState(PROTOCOLS[0]);
 
   const updateRFFrontend = async (evt) => {

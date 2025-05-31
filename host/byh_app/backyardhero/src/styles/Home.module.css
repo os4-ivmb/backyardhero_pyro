@@ -1,27 +1,27 @@
 .page {
-  --gray-rgb: 0, 0, 0;
+  /* --gray-rgb: 0, 0, 0;
   --gray-alpha-200: rgba(var(--gray-rgb), 0.08);
-  --gray-alpha-100: rgba(var(--gray-rgb), 0.05);
+  --gray-alpha-100: rgba(var(--gray-rgb), 0.05); */
 
-  --button-primary-hover: #383838;
-  --button-secondary-hover: #f2f2f2;
+  --button-primary-hover: #2563eb; /* Darker shade of primary accent */
+  --button-secondary-hover: #e5e7eb; /* Lighter gray for secondary hover */
 
   display: grid;
   grid-template-rows: 20px 1fr 20px;
   min-height: 100svh;
   padding-top:0px;
   gap: 0px;
-  font-family: var(--font-geist-sans);
+  /* font-family: var(--font-geist-sans); Removed to use global font */
 }
 
 @media (prefers-color-scheme: dark) {
   .page {
-    --gray-rgb: 255, 255, 255;
+    /* --gray-rgb: 255, 255, 255;
     --gray-alpha-200: rgba(var(--gray-rgb), 0.145);
-    --gray-alpha-100: rgba(var(--gray-rgb), 0.06);
+    --gray-alpha-100: rgba(var(--gray-rgb), 0.06); */
 
-    --button-primary-hover: #ccc;
-    --button-secondary-hover: #1a1a1a;
+    --button-primary-hover: #93c5fd; /* Lighter shade for dark mode primary accent hover */
+    --button-secondary-hover: #374151; /* Darker gray for dark mode secondary hover */
   }
 }
 
@@ -34,7 +34,7 @@
 }
 
 .main ol {
-  font-family: var(--font-geist-mono);
+  /* font-family: var(--font-geist-mono); Removed to use global font */
   padding-left: 0;
   margin: 0;
   font-size: 14px;
@@ -43,13 +43,18 @@
   list-style-position: inside;
 }
 
-
 .main code {
   font-family: inherit;
-  background: var(--gray-alpha-100);
+  background: theme('colors.gray.100'); /* Using Tailwind gray */
   padding: 2px 4px;
   border-radius: 4px;
   font-weight: 600;
+}
+
+@media (prefers-color-scheme: dark) {
+  .main code {
+    background: theme('colors.gray.700'); /* Darker Tailwind gray for dark mode */
+  }
 }
 
 .ctas {
@@ -76,29 +81,56 @@
 }
 
 a.primary {
-  background: var(--foreground);
-  color: var(--background);
+  background: var(--primary-accent);
+  color: var(--background); /* This should be a light color for contrast with accent */
   gap: 8px;
 }
 
+/* Add a specific color for text on primary button in dark mode if needed */
+@media (prefers-color-scheme: dark) {
+  a.primary {
+    color: var(--foreground); /* Ensure text is readable on accent bg */
+  }
+}
+
 a.secondary {
-  border-color: var(--gray-alpha-200);
+  border-color: theme('colors.gray.300'); /* Using Tailwind gray */
   min-width: 180px;
+  color: var(--foreground); /* Text color for secondary button */
+}
+
+@media (prefers-color-scheme: dark) {
+  a.secondary {
+    border-color: theme('colors.gray.600'); /* Darker Tailwind gray for dark mode border */
+  }
 }
 
 .footer {
   grid-row-start: 3;
   display: flex;
   gap: 24px;
+  padding: 16px 0; /* Add some padding */
+  align-items: center; /* Align items vertically */
+  justify-content: center; /* Center content horizontally */
+  border-top: 1px solid theme('colors.gray.200'); /* Add a subtle top border */
+}
+
+@media (prefers-color-scheme: dark) {
+  .footer {
+    border-top-color: theme('colors.gray.700'); /* Darker border for dark mode */
+  }
 }
 
 .footer a {
-  display: absolute;
-  bottom:0px;
-  height: 80px;
-  background-color:#000;
+  /* display: absolute; Removed */
+  /* bottom:0px; Removed */
+  /* height: 80px; Removed */
+  /* background-color:#000; Removed */
+  color: var(--foreground); /* Use foreground color for text */
+  display: flex; /* Make links flex containers for icon + text */
   align-items: center;
   gap: 8px;
+  text-decoration: none; /* Ensure no default underline */
 }
 
 .footer img {

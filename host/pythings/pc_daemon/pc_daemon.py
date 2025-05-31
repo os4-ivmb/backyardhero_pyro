@@ -10,11 +10,11 @@ from led_control import *
 import socket
 import select
 
-from protocol_handler.BSCProtocolHandler import BSCProtocolHandler
 from protocol_handler.BYHProtocolHandler import BYHProtocolHandler
 
 # Configuration
 LED_FILE_PATH = "/data/ledstate"
+LED_FILE_PATH_WEB = "/data/webactstate"
 COMMAND_DIR = "/tmp/d_cmd"
 CURSOR_FILE = "/tmp/fw_cursor"
 SERIAL_PORT = "/dev/ttyACM0"
@@ -46,7 +46,6 @@ LOW=0
 def get_handler_cls_for_msg(line_token):
     print(line_token)
     token_to_handler = {
-        "O": BSCProtocolHandler,
         "{": BYHProtocolHandler
     }
 
@@ -74,6 +73,9 @@ class LEDHandler:
         self.parent = parent
         self._load_persisted_states()
 
+    def debug_enabled(self):
+        return self.led_states.get("debug_mode", 0) == 1
+
     def _load_persisted_states(self):
         try:
             if os.path.exists(LED_DATA_PATH):
@@ -89,6 +91,7 @@ class LEDHandler:
                     print(f"LED states loaded from {LED_DATA_PATH}")
             else:
                 # If file doesn't exist, persist the default states
+                print(f"No LED states found at {LED_DATA_PATH}, using defaults")
                 self._persist_led_states()
         except (FileNotFoundError, json.JSONDecodeError, TypeError) as e:
             print(f"Error loading LED states from {LED_DATA_PATH}, using defaults: {e}")
@@ -173,12 +176,19 @@ class FireworkDaemon:
         self.waiting_for_client_start = False
         self.fire_check_failures = []
         self.tcp_buffer = ""
+        self.receiver_timeout_ms = 30000
+        self.command_response_timeout_ms = 100
+        self.clock_sync_interval_ms = 2000
+        self.debug_mode = 0
 
         self.led_handler = LEDHandler(self)
 
         self.load_config()
         
         self.clear_states()
+
+    def debug_enabled(self):
+        return self.led_handler.debug_enabled()
 
     def load_config(self):
         try:
@@ -196,10 +206,14 @@ class FireworkDaemon:
         except (FileNotFoundError, json.JSONDecodeError):
             print("Could not initialize from config. Oh well.")
 
+    def _init_blank_webact_file(self):
+        with open(LED_FILE_PATH_WEB, 'w') as file:
+            file.write('0')
+
     def load_webact_state_and_settings(self):
         try:
             # Try to open and read the file
-            with open(LED_FILE_PATH, 'r') as file:
+            with open(LED_FILE_PATH_WEB, 'r') as file:
                 content = file.read().strip()
                 try:
                     state = int(content)
@@ -207,12 +221,12 @@ class FireworkDaemon:
                 except ValueError:
                     print(f"Error: File content '{content}' is not a valid integer")
                     # Reset to default if content is invalid
-                    self._reset_to_default_state()
+                    self._init_blank_webact_file()
         except FileNotFoundError:
-            print(f"File {LED_FILE_PATH} not found, creating with default state 0")
-            self._reset_to_default_state()
+            print(f"File {LED_FILE_PATH_WEB} not found, creating with default state 0")
+            self._init_blank_webact_file()
         except PermissionError:
-            print(f"Error: No permission to read {LED_FILE_PATH}")
+            print(f"Error: No permission to read {LED_FILE_PATH_WEB}")
         except Exception as e:
             print(f"Error loading LED state: {e}")
 
@@ -281,12 +295,13 @@ class FireworkDaemon:
                                             if('error' in tcpsrvmsg):
                                                 self.write_error(tcpsrvmsg.get('error'))
                                             if('serial_config' in tcpsrvmsg and tcpsrvmsg['tcpstatus']):
-                                                print("Acked serial set")
+                                                if(self.debug_enabled()):
+                                                    print("Acked serial set")
                                                 self.serial_addr = tcpsrvmsg['serial_config'].get('port')
                                                 self.serial_baud = tcpsrvmsg['serial_config'].get('baud')
                                                 self.protocol_handler = BYHProtocolHandler(self)
                                         elif('gpio' in tcpsrvmsg):
-                                            if DEBUG:
+                                            if(self.debug_enabled()):
                                                 print("GPIO set")
                                                 print(tcpsrvmsg)
                                             gpio_handler.set_gpio({
@@ -298,16 +313,19 @@ class FireworkDaemon:
                                             bypass = False
 
                                     except Exception as e:
-                                        print("Could not process assumedly TCP. Building backup buffer")
+                                        if(self.debug_enabled()):
+                                            print("Could not process assumedly TCP. Building backup buffer")
                                         self.tcp_buffer = (self.tcp_buffer or "") + line
                                 elif line[-1] == '}' and self.tcp_buffer:
                                     line = self.tcp_buffer + line 
-                                    print("End fragment detected - reassembling JSON message from buffer")
-                                    print(f"Line: '{line}'")
+                                    if(self.debug_enabled()):
+                                        print("End fragment detected - reassembling JSON message from buffer")
+                                        print(f"Line: '{line}'")
                                     self.tcp_buffer = "" 
                                 elif self.tcp_buffer:
-                                    print("TCP buffer set but no end fragment. Clearing buffer")
-                                    print(f"Line was '{line}'")
+                                    if(self.debug_enabled()):
+                                        print("TCP buffer set but no end fragment. Clearing buffer")
+                                        print(f"Line was '{line}'")
                                     self.tcp_buffer = "" 
                                 if not bypass:
                                     if not self.protocol_handler:
@@ -335,7 +353,8 @@ class FireworkDaemon:
             try:
                 wd=(data + '\n').encode('utf-8')
                 self.tcp_socket.sendall((data + '\n').encode('utf-8'))
-                print(f"Sent to serial via TCP: '{wd}'")
+                if(self.debug_enabled()):
+                    print(f"Sent to serial via TCP: '{wd}'")
                 self.last_serial_sent = datetime.now()
                 self.led_handler.update("tx_active", TX_ACTIVE_STATE.TRANSMITTING.value)
             except Exception as e:
@@ -547,12 +566,13 @@ class FireworkDaemon:
                 self.led_brightness = brightness
                 self.led_handler.update("led_brightness", int(brightness))
             elif command['type'] == 'set_receiver_timeout':
-                self.receiver_timeout_ms = int(command.get('timeout_ms', 30000))
+                self.led_handler.update("receiver_timeout_ms", int(command.get('timeout_ms', 30000)))
             elif command['type'] == 'set_command_response_timeout':
-                self.command_response_timeout_ms = int(command.get('timeout_ms', 100))
+                self.led_handler.update("command_response_timeout_ms", int(command.get('timeout_ms', 100)))
             elif command['type'] == 'set_clock_sync_interval':
-                self.clock_sync_interval_ms = int(command.get('interval_ms', 2000))
+                self.led_handler.update("clock_sync_interval_ms", int(command.get('interval_ms', 2000)))
             elif command['type'] == 'set_debug_mode':
+                self.led_handler.update("debug_mode", int(command.get('debug_mode', 0)))
                 self.debug_mode = int(command.get('debug_mode', 0))
             elif command['type'] == 'set_fire_repeat':
                 repeat_ct = int(command.get('repeat_ct', 6))
@@ -571,42 +591,6 @@ class FireworkDaemon:
         else:
             print("Cannot identify protocol handler class")
 
-    # def send_serial_command(self, data):
-    #     """Send a command over the serial connection."""
-    #     if self.serial_connection:
-    #         try:
-    #             self.serial_connection.write((data + '\n').encode('utf-8'))
-    #             print(f"Sent to serial: {data}")
-    #             self.last_serial_sent = datetime.now()
-    #             self.led_handler.update("tx_active", TX_ACTIVE_STATE.TRANSMITTING.value)
-    #         except Exception as e:
-    #             print(f"Error sending to serial: {e}")
-
-    # def listen_serial(self):
-    #     """Listen for data on the serial connection."""
-    #     while self.running:
-    #         try:
-    #             if self.serial_connection and self.serial_connection.in_waiting:
-    #                 line = self.serial_connection.readline().decode('utf-8').strip()
-    #                 if(DEBUG):
-    #                     print(line)
-    #                 if(not self.protocol_handler):
-    #                     if(line[0] == '{' or line[0] == ''):
-    #                         self.bad_serial_ct = 0
-    #                         self.led_handler.update("tx_active", TX_ACTIVE_STATE.CONNECTED.value)
-    #                         print("Got a state but no protocol handler. Attempting to assign")
-    #                         self.assign_handler_class(line)
-
-    #                 else:
-    #                     if(not self.protocol_handler.process_serial_in(line)):
-    #                         self.bad_serial_ct = self.bad_serial_ct + 1
-    #                 self.last_serial_received = datetime.now()
-    #         except Exception as e:
-    #             self.bad_serial_ct = self.bad_serial_ct + 1
-    #             if(self.bad_serial_ct > BAD_TX_THRESHOLD):
-    #                 self.write_error(f"Error reading from serial: {e}")
-    #                 self.led_handler.update("tx_active",TX_ACTIVE_STATE.DEVICE_ERROR.value)
-    #             print(f"Error reading from serial: {e}")
 
     def query_database(self, query):
         """Execute a query on the SQLite database."""
@@ -814,6 +798,10 @@ class FireworkDaemon:
             "settings": {
                 "led_brightness": self.led_brightness,
                 "fire_repeat_ct": self.fire_repetition,
+                "receiver_timeout_ms": self.led_handler.led_states.get("receiver_timeout_ms", 30000),
+                "command_response_timeout_ms": self.led_handler.led_states.get("command_response_timeout_ms", 100),
+                "clock_sync_interval_ms": self.led_handler.led_states.get("clock_sync_interval_ms", 2000),
+                "debug_mode": self.led_handler.led_states.get("debug_mode", 0),
                 "rf": {
                     "addr": self.serial_addr,
                     "baud": self.serial_baud

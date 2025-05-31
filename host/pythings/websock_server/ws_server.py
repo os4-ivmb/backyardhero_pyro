@@ -8,7 +8,7 @@ from datetime import datetime
 
 from enum import Enum
 
-LED_FILE_PATH = "/data/ledstate"
+LED_FILE_PATH = "/data/webactstate"
 
 
 class WEB_ACT_STATE(Enum):
@@ -80,13 +80,11 @@ def get_fw_state():
         with open("/data/state", "r") as state_file:
             state_content = state_file.read().strip()
             fw_state = json.loads(state_content)
-            if(not (datetime.now().timestamp() - (int(fw_state["daemon_lup"]) / 1000) > DAEMON_INAC_SECONDS)):
-                print(f"{datetime.now().timestamp()} > {(int(fw_state['daemon_lup']) / 1000)}")
             fw_state["daemon_active"] = not (
                 datetime.now().timestamp() - (int(fw_state["daemon_lup"]) / 1000) > DAEMON_INAC_SECONDS
             )
     else:
-        print("NE")
+  
         fw_state = {}
 
     return fw_state
