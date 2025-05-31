@@ -54,6 +54,8 @@ Each directory contains firmware, enclosure CAD files, and PCB design details.
 
 ### Custom Hardware
 
+<img width="877" alt="Screenshot 2025-05-31 at 12 44 57 AM" src="https://github.com/user-attachments/assets/bb48a74f-5aa2-4f0e-ae83-d2522101d64a" />
+
 The custom 2.4GHz hardware platform offers significant advantages:
 
 *   **Mesh Networking:** Receivers form a mesh network, enabling virtually unlimited range as long as nodes are within ~1500ft of each other.
@@ -70,6 +72,10 @@ The custom 2.4GHz hardware platform offers significant advantages:
     *   A complete 2-receiver, 32-cue system can be built for around $110 USD. Prices are above are what you need in materials to finish completed components
 
 ### Software Platform
+
+<img width="1505" alt="Screenshot 2025-05-30 at 11 52 02 PM" src="https://github.com/user-attachments/assets/9a83c09d-44af-48cf-8c6c-f5aba1b6c320" />
+<img width="1498" alt="Screenshot 2025-05-30 at 11 57 14 PM" src="https://github.com/user-attachments/assets/fd7106fc-35a3-48ba-9a0c-b3b035291548" />
+<img width="1503" alt="Screenshot 2025-05-30 at 11 57 54 PM" src="https://github.com/user-attachments/assets/4901cc4c-44f1-44a5-907c-4c39fc08a5f8" />
 
 The local web application, runnable on a laptop or a dedicated device like a Raspberry Pi, offers:
 
