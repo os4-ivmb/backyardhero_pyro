@@ -91,8 +91,6 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId }) {
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold">{rcv_name}</h2>
 
-        <span className="text-sm text-gray-400">{(lfx > 100 ? 'X' : `${lfx}(${txmtLatency})`)}</span>
-
         {isConnectionGood ? (
         <div className="flex items-center gap-2">
             
@@ -196,6 +194,16 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId }) {
           >
             Close
           </button>
+        </div>
+      )}
+
+      {/* New Latency Display Section */}
+      {isConnectionGood && (
+        <div className="text-sm text-gray-400 mt-auto pt-2 border-t border-gray-700">
+          <div className="flex items-center justify-center gap-1">
+            <MdAccessTime />
+            <span>Latency: {lfx}s (RTT: {txmtLatency}ms)</span>
+          </div>
         </div>
       )}
     </div>
