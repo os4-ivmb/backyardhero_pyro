@@ -1,4 +1,5 @@
 # Backyard Hero: An excessively DIY Firework Control System
+I had AI turn a good chunk of this doc out. Because im lazy. 
 
 ## Overview
 
@@ -53,6 +54,8 @@ Each directory contains firmware, enclosure CAD files, and PCB design details.
 ## System Capabilities
 
 ### Custom Hardware
+
+<img width="1035" alt="Screenshot 2025-05-31 at 12 47 47 AM" src="https://github.com/user-attachments/assets/8dd0c612-ff6d-4304-90a7-f4c803a880c1" />
 
 <img width="877" alt="Screenshot 2025-05-31 at 12 44 57 AM" src="https://github.com/user-attachments/assets/bb48a74f-5aa2-4f0e-ae83-d2522101d64a" />
 
