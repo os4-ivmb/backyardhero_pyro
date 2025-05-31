@@ -100,7 +100,7 @@ The system follows a lifecycle for show execution. I learned it from launching r
 4.  **Arming the System:** Before starting, the physical 'start/stop' switch on the dongle must be moved to the 'start' position. (Shows will not load if the switch is not in 'stop').
 5.  **Pre-Launch & Execution:**
     *   Pressing 'Play' in the UI triggers pre-launch checks (continuity, battery levels) on all receivers.
-    *   If checks pass, a synchronized start time (typically T-20 minutes) is sent to all receivers.
+    *   If checks pass, a synchronized start time (typically T-20 seconds) is sent to all receivers.
     *   Upon confirmation, the host issues 'play' commands, and the custom receivers take over autonomous execution. This ensures highly precise timing, independent of potential RF interference with the host.
 6.  **Show Monitoring & Safety Abort:**
     *   The show runs according to the programmed sequence.
