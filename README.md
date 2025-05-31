@@ -1,5 +1,5 @@
 # Backyard Hero: An excessively DIY Firework Control System
-I had AI turn a good chunk of this doc out. Because im lazy. 
+I had AI turn a good chunk of this doc out. Because im lazy. Some early progress doc stuff [here](https://blog.oneseventyfour.com/projects/backyard-hero-pyro)
 
 ## Overview
 
