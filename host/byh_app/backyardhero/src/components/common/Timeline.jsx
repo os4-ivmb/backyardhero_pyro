@@ -51,7 +51,9 @@ const Timeline = memo((props) => {
       e.clientX - timelineRef.current.getBoundingClientRect().left + timelineOffset;
     const timelineWidth = timelineRef.current.scrollWidth;
     const cursorTime = (clickX / timelineWidth) * 3600;
-    props.setTimeCursor(cursorTime)
+    if (props.setTimeCursor && isFinite(cursorTime) && cursorTime >= 0) {
+      props.setTimeCursor(cursorTime);
+    }
   }
 
   const handleTimelineClick = (e) => {

@@ -19,6 +19,7 @@
     "zustand": "^5.0.3",
     "axios": "1.7.9",
     "framer-motion": "12.0.5",
+    "wavesurfer.js": "*",
     "@dnd-kit/core": "6.3.1"
   },
   "devDependencies": {

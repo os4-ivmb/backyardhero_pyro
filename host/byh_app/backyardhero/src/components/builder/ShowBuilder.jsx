@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import Timeline from "../common/Timeline";
 import useAppStore from '@/store/useAppStore';
 import FusedLineBuilderModal from "./FusedLineBuilderModal";
 import ShowTargetGrid from "./ShowTargetGrid";
 import ShowStateHeader from "./ShowStateHeader";
 import VideoPreviewPopup from "../common/VideoPreviewPopup";
+import WaveSurfer from 'wavesurfer.js';
 
 export const mergeCues = (receivers) => {
   const mergedCues = {};
@@ -374,6 +375,203 @@ const ChainTimingModal = ({ isOpen, onClose, onApply, selectedItems }) => {
   );
 };
 
+const AudioWaveform = ({ onTimeUpdate, currentTime, duration, isPlaying, onPlayPause, onAudioFileChange }) => {
+  const waveformRef = useRef(null);
+  const wavesurferRef = useRef(null);
+  const [audioFile, setAudioFile] = useState(null);
+  const [isReady, setIsReady] = useState(false);
+  const [localDuration, setLocalDuration] = useState(0);
+  const lastUpdateRef = useRef(0);
+  const throttleInterval = 100; // Update every 100ms instead of every frame
+
+  useEffect(() => {
+    if (waveformRef.current && !wavesurferRef.current) {
+      wavesurferRef.current = WaveSurfer.create({
+        container: waveformRef.current,
+        waveColor: '#4F46E5',
+        progressColor: '#7C3AED',
+        cursorColor: '#EF4444',
+        barWidth: 2,
+        barRadius: 3,
+        cursorWidth: 1,
+        height: 80,
+        barGap: 3,
+        responsive: true,
+        normalize: true,
+      });
+
+      // Set up event listeners
+      wavesurferRef.current.on('ready', () => {
+        console.log('WaveSurfer ready');
+        setIsReady(true);
+        setLocalDuration(wavesurferRef.current.getDuration());
+      });
+
+      wavesurferRef.current.on('audioprocess', (currentTime) => {
+        // Throttle updates to improve performance
+        const now = Date.now();
+        if (now - lastUpdateRef.current >= throttleInterval) {
+          console.log('Audio process:', currentTime);
+          if (onTimeUpdate) {
+            onTimeUpdate(currentTime);
+          }
+          lastUpdateRef.current = now;
+        }
+      });
+
+      wavesurferRef.current.on('seek', (progress) => {
+        // Throttle seek updates
+        const now = Date.now();
+        if (now - lastUpdateRef.current >= throttleInterval) {
+          console.log('Seek:', progress);
+          const time = progress * wavesurferRef.current.getDuration();
+          if (onTimeUpdate) {
+            onTimeUpdate(time);
+          }
+          lastUpdateRef.current = now;
+        }
+      });
+
+      wavesurferRef.current.on('play', () => {
+        console.log('Play event');
+        if (onPlayPause) {
+          onPlayPause(true);
+        }
+      });
+
+      wavesurferRef.current.on('pause', () => {
+        console.log('Pause event');
+        if (onPlayPause) {
+          onPlayPause(false);
+        }
+      });
+
+      wavesurferRef.current.on('finish', () => {
+        console.log('Finish event');
+        if (onPlayPause) {
+          onPlayPause(false);
+        }
+      });
+
+      wavesurferRef.current.on('error', (error) => {
+        console.error('WaveSurfer error:', error);
+      });
+    }
+
+    return () => {
+      if (wavesurferRef.current) {
+        wavesurferRef.current.destroy();
+        wavesurferRef.current = null;
+      }
+    };
+  }, []); // Remove dependencies to prevent re-creation
+
+  useEffect(() => {
+    if (wavesurferRef.current && isReady) {
+      console.log('Attempting to play/pause:', isPlaying);
+      if (isPlaying) {
+        wavesurferRef.current.play();
+      } else {
+        wavesurferRef.current.pause();
+      }
+    }
+  }, [isPlaying, isReady]);
+
+  useEffect(() => {
+    if (wavesurferRef.current && isReady && currentTime !== undefined) {
+      const duration = wavesurferRef.current.getDuration();
+      if (duration && duration > 0 && isFinite(currentTime) && currentTime >= 0) {
+        // Only seek if audio is not playing to avoid stuttering
+        if (!isPlaying) {
+          const progress = Math.min(1, Math.max(0, currentTime / duration));
+          console.log('Seeking to:', progress, 'at time:', currentTime);
+          wavesurferRef.current.seekTo(progress);
+        }
+      }
+    }
+  }, [currentTime, isReady, isPlaying]);
+
+  const handleFileUpload = (event) => {
+    const file = event.target.files[0];
+    if (file && file.type.startsWith('audio/')) {
+      console.log('Loading file:', file.name);
+      setAudioFile(file);
+      const url = URL.createObjectURL(file);
+      if (wavesurferRef.current) {
+        wavesurferRef.current.load(url);
+      }
+      
+      // Notify parent component about the audio file
+      if (onAudioFileChange) {
+        onAudioFileChange({
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          lastModified: file.lastModified
+        });
+      }
+    }
+  };
+
+  const handlePlayPause = () => {
+    console.log('Play/Pause button clicked');
+    if (wavesurferRef.current && isReady) {
+      wavesurferRef.current.playPause();
+    }
+  };
+
+  const formatTime = (seconds) => {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = Math.floor(seconds % 60);
+    return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+  };
+
+  return (
+    <div className="mb-4 p-4 bg-gray-800 rounded-lg border border-gray-700">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-lg font-semibold text-white">Audio Timeline</h3>
+        <div className="flex items-center gap-2">
+          <input
+            type="file"
+            accept="audio/*"
+            onChange={handleFileUpload}
+            className="text-sm text-gray-300 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700"
+          />
+          {isReady && (
+            <>
+              <button
+                onClick={handlePlayPause}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded"
+              >
+                {isPlaying ? 'Pause' : 'Play'}
+              </button>
+              <span className="text-sm text-gray-300">
+                {formatTime(currentTime || 0)} / {formatTime(localDuration || 0)}
+              </span>
+            </>
+          )}
+        </div>
+      </div>
+      
+      <div 
+        ref={waveformRef} 
+        className="w-full bg-gray-900 rounded"
+      />
+      
+      {!audioFile && (
+        <div className="text-center text-gray-400 text-sm mt-2">
+          Upload an MP3 file to sync with your timeline
+        </div>
+      )}
+      
+      {/* Debug info */}
+      <div className="text-xs text-gray-500 mt-2">
+        Ready: {isReady.toString()}, Playing: {isPlaying.toString()}, Duration: {localDuration.toFixed(2)}s
+      </div>
+    </div>
+  );
+};
+
 const ShowBuilder = (props) => {
   const { inventory, inventoryById, stagedShow, setStagedShow, systemConfig } = useAppStore();
   const [items, setItems] = useState([]);
@@ -386,6 +584,11 @@ const ShowBuilder = (props) => {
   const [showMetadata, setShowMetadata] = useState({});
   const [availableDevices, setAvailableDevices] = useState({});
   const [isChainTimingModalOpen, setIsChainTimingModalOpen] = useState(false);
+  
+  // Audio state
+  const [audioCurrentTime, setAudioCurrentTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
+  const [isAudioPlaying, setIsAudioPlaying] = useState(false);
 
   const [isInitialized, setIsInitialized] = useState(false);
 
@@ -511,6 +714,16 @@ const ShowBuilder = (props) => {
     setSelectedItems([]);
   };
 
+  const handleAudioTimeUpdate = (time) => {
+    if (isFinite(time) && time >= 0) {
+      setAudioCurrentTime(time);
+    }
+  };
+
+  const handleAudioPlayPause = (playing) => {
+    setIsAudioPlaying(playing);
+  };
+
   return (
     <div className="p-4">
       <h1 className="text-xl mb-4">Show Editor</h1>
@@ -526,6 +739,18 @@ const ShowBuilder = (props) => {
       />
       {availableDevices ? (
         <div>
+          {/* Audio Waveform */}
+          <AudioWaveform
+            onTimeUpdate={handleAudioTimeUpdate}
+            currentTime={audioCurrentTime}
+            duration={audioDuration}
+            isPlaying={isAudioPlaying}
+            onPlayPause={handleAudioPlayPause}
+            onAudioFileChange={(fileInfo) => {
+              // Handle audio file change
+            }}
+          />
+          
           {/* Chain Timing Button */}
           {selectedItems.length >= 2 && (
             <div className="mb-4 p-3 bg-blue-900 rounded-lg border border-blue-700">
@@ -551,6 +776,8 @@ const ShowBuilder = (props) => {
             selectedItems={selectedItems}
             onItemSelect={handleItemSelect}
             clearSelection={clearSelection}
+            timeCursor={audioCurrentTime}
+            setTimeCursor={setAudioCurrentTime}
           />
           <AddItemModal
             isOpen={isAddModalOpen}
