@@ -12,11 +12,29 @@ const Timeline = memo((props) => {
 
   const handleWheel = (e) => {
     e.preventDefault();
+    e.stopPropagation();
     setZoom((prevZoom) => Math.max(0.1, prevZoom - e.deltaY * (prevZoom*0.001))); // Zoom with mouse wheel
   };
 
-  const handleDragStart = (e, id) => {
+  const handleZoomIn = () => {
+    setZoom((prevZoom) => Math.min(200, prevZoom * 1.2));
+  };
 
+  const handleZoomOut = () => {
+    setZoom((prevZoom) => Math.max(0.1, prevZoom / 1.2));
+  };
+
+  const handleTouchStart = (e) => {
+    // Prevent default touch behavior to avoid window scrolling
+    e.preventDefault();
+  };
+
+  const handleTouchMove = (e) => {
+    // Prevent default touch behavior to avoid window scrolling
+    e.preventDefault();
+  };
+
+  const handleDragStart = (e, id) => {
     e.dataTransfer.setData("id", id);
     e.dataTransfer.setData("clx", e.clientX);
     e.dataTransfer.setData("xEvtOffset", (e.clientX - e.target.getBoundingClientRect().left));
@@ -34,6 +52,20 @@ const Timeline = memo((props) => {
     const timelineWidth = timelineRef.current.scrollWidth;
     const cursorTime = (clickX / timelineWidth) * 3600;
     props.setTimeCursor(cursorTime)
+  }
+
+  const handleTimelineClick = (e) => {
+    // If clicking on the timeline background (not on an item), clear selection
+    if (e.target === e.currentTarget || e.target.className.includes('border-l')) {
+      if (props.clearSelection) {
+        props.clearSelection();
+      }
+    }
+    
+    // Handle time cursor if enabled
+    if (props.setTimeCursor) {
+      handleTimeCursorClick(e);
+    }
   }
 
   const handleDoubleClick = (e) => {
@@ -56,19 +88,37 @@ const Timeline = memo((props) => {
       e.clientX - timelineRef.current.getBoundingClientRect().left + timelineOffset - evtXoffset;
 
     if (timelineRef.current) {
-
       const timelineWidth = timelineRef.current.scrollWidth;
       const xform = (delta / timelineWidth) * MAX_SHOW_TIME_SEC
       const dropTime = (dropX / timelineWidth) * MAX_SHOW_TIME_SEC; // Drop time in seconds
 
-      // Update item's start time based on drop position
-      setItems((prevItems) =>
-        prevItems.map((item) =>
-          item.id === parseInt(id)
-            ? { ...item, startTime: item.startTime + (xform*2) }
-            : item
-        )
-      );
+      // Check if the dragged item is part of a multi-selection
+      const selectedItems = props.selectedItems || [];
+      const isMultiSelectDrag = selectedItems.some(item => item.id === parseInt(id));
+      
+      if (isMultiSelectDrag && selectedItems.length > 1) {
+        // Handle multi-item drag - maintain relative timing
+        const draggedItem = selectedItems.find(item => item.id === parseInt(id));
+        const timeOffset = xform * 2; // Same calculation as single item
+        
+        setItems((prevItems) =>
+          prevItems.map((item) => {
+            if (selectedItems.some(selected => selected.id === item.id)) {
+              return { ...item, startTime: item.startTime + timeOffset };
+            }
+            return item;
+          })
+        );
+      } else {
+        // Single item drag (existing behavior)
+        setItems((prevItems) =>
+          prevItems.map((item) =>
+            item.id === parseInt(id)
+              ? { ...item, startTime: item.startTime + (xform*2) }
+              : item
+          )
+        );
+      }
     }
   };
 
@@ -130,8 +180,46 @@ const Timeline = memo((props) => {
 
   const tickInterval = zoom >= 3 ? (zoom >= 40 ? (zoom >= 200 ? 0.5 : 1) : 10) : 60; // Use 10-second ticks at high zoom, 1-minute ticks at low zoom
 
+  const handleItemClick = (e, item) => {
+    if (isReadOnly) return;
+    
+    const isCommandClick = e.metaKey || e.ctrlKey; // Command on Mac, Ctrl on Windows/Linux
+    
+    if (isCommandClick) {
+      // Multi-select mode
+      e.preventDefault();
+      e.stopPropagation();
+      props.onItemSelect?.(item, true);
+    } else {
+      // Single select mode
+      props.setSelectedItem?.(item);
+      // Clear multi-selection when single clicking
+      if (props.clearSelection) {
+        props.clearSelection();
+      }
+    }
+  };
+
   return (
     <div className="w-full container">
+      {/* Zoom Controls */}
+      <div className="flex items-center mb-2 gap-2">
+        <button
+          className="bg-gray-700 text-white px-2 py-1 rounded hover:bg-gray-600"
+          onClick={handleZoomOut}
+          title="Zoom Out"
+        >
+          -
+        </button>
+        <span className="text-xs text-gray-300">Zoom: {zoom.toFixed(1)}x</span>
+        <button
+          className="bg-gray-700 text-white px-2 py-1 rounded hover:bg-gray-600"
+          onClick={handleZoomIn}
+          title="Zoom In"
+        >
+          +
+        </button>
+      </div>
       {/* Ticks container */}
       { isReadOnly ? '' : (
         <div 
@@ -183,7 +271,7 @@ const Timeline = memo((props) => {
         onDrop={isReadOnly ? (()=>{}) : handleDrop}
         onScroll={handleScroll}
         onDoubleClick={isReadOnly ? (()=>{}) : handleDoubleClick}
-        onClick={props.setTimeCursor ? handleTimeCursorClick : ()=>{}}
+        onClick={handleTimelineClick}
       >
         {/* Timeline background */}
         <div
@@ -223,11 +311,16 @@ const Timeline = memo((props) => {
               stack.includes(item)
             );
 
+            // Check if item is selected
+            const selectedItems = props.selectedItems || [];
+            const isSelected = selectedItems.some(selected => selected.id === item.id);
 
             return (
               <div
                 key={item.id}
-                className={`absolute text-white text-xs rounded px-2 py-1 cursor-move drop-shadow-xs`}
+                className={`absolute text-white text-xs rounded px-2 py-1 cursor-move drop-shadow-xs ${
+                  isSelected ? 'ring-2 ring-blue-400 ring-opacity-75' : ''
+                }`}
                 style={{
                   left: `${start}%`,
                   width: `${width}%`,
@@ -235,16 +328,12 @@ const Timeline = memo((props) => {
                   transform: `scaleX(1)`, // Adjust width scaling with zoom
                   transformOrigin: "left center",
                   backgroundColor: INV_COLOR_CODE[item.type]+"CC",
-                  textShadow: "0px 0px 3px black"
+                  textShadow: "0px 0px 3px black",
+                  border: isSelected ? '2px solid #60A5FA' : 'none'
                 }}
                 draggable
                 onDragStart={(e) => (isReadOnly ? (()=>{}) : handleDragStart(e, item.id))}
-                onClick={(e) => {
-                    if(isReadOnly) return;
-                    if(e.shiftKey){
-                        props.setSelectedItem(item)
-                    }
-                }}
+                onClick={(e) => handleItemClick(e, item)}
               >
                 {item.name} @ {item.zone}:{item.target}
               </div>

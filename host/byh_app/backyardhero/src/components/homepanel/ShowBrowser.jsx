@@ -22,11 +22,7 @@ export default function ShowBrowser({setCurrentTab, setEditorShowFnc}) {
     }
 
     if(action === "Delete"){
-        if(confirm("Are you sure you wanna delete this show?")){
-          deleteShow(selectedShow.id)
-        }else{
-          setStagedShow({...selectedShow, items: parsedItems})
-        }
+        deleteShow(selectedShow.id)
     }else if(action == "Stage"){
       const parsedItems = JSON.parse(selectedShow.display_payload).map((pi,i)=>({...inventoryById[pi.itemId], ...pi}))
       setStagedShow({...selectedShow, items: parsedItems})

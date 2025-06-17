@@ -54,9 +54,7 @@ export default function StatusPanel(props) {
         if (!show) return alert("Internal error - show not provided for action");
 
         if (action === "Delete") {
-            if (confirm("Are you sure you wanna delete this show?")) {
-                deleteShow(show.id);
-            }
+            deleteShow(show.id);
         } else if (action === "Stage") {
             const parsedItems = JSON.parse(show.display_payload).map((pi, i) => ({ ...inventoryById[pi.itemId], ...pi }));
             setStagedShow({ ...show, items: parsedItems });

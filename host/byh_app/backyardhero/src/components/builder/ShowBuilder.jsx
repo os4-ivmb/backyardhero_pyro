@@ -284,6 +284,96 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
   );
 };
 
+const ChainTimingModal = ({ isOpen, onClose, onApply, selectedItems }) => {
+  const [intervalSeconds, setIntervalSeconds] = useState(1);
+  const [startTime, setStartTime] = useState(0);
+
+  useEffect(() => {
+    if (selectedItems.length > 0) {
+      // Set default start time to the earliest selected item's start time
+      const earliestTime = Math.min(...selectedItems.map(item => item.startTime));
+      setStartTime(earliestTime);
+    }
+  }, [selectedItems]);
+
+  const handleApply = () => {
+    if (selectedItems.length < 2) return;
+    
+    // Sort items by their current start time to maintain order
+    const sortedItems = [...selectedItems].sort((a, b) => a.startTime - b.startTime);
+    
+    // Calculate new start times
+    const newItems = sortedItems.map((item, index) => ({
+      ...item,
+      startTime: startTime + (index * intervalSeconds)
+    }));
+    
+    onApply(newItems);
+    onClose();
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+      <div className="bg-gray-800 text-white p-6 rounded shadow-lg w-96 relative z-50">
+        <h2 className="text-xl mb-4">Chain Timing</h2>
+        <p className="text-sm text-gray-300 mb-4">
+          Set timing interval between {selectedItems.length} selected items
+        </p>
+        
+        <div className="mb-4">
+          <label className="block mb-2">Start Time (seconds):</label>
+          <input
+            type="number"
+            className="w-full p-2 bg-gray-700 rounded text-white"
+            value={startTime}
+            onChange={(e) => setStartTime(parseFloat(e.target.value) || 0)}
+            step="0.1"
+          />
+        </div>
+
+        <div className="mb-4">
+          <label className="block mb-2">Interval Between Items (seconds):</label>
+          <input
+            type="number"
+            className="w-full p-2 bg-gray-700 rounded text-white"
+            value={intervalSeconds}
+            onChange={(e) => setIntervalSeconds(parseFloat(e.target.value) || 0)}
+            step="0.1"
+            min="0"
+          />
+        </div>
+
+        <div className="mb-4 p-3 bg-gray-700 rounded">
+          <h3 className="text-sm font-bold mb-2">Preview:</h3>
+          {selectedItems.slice(0, 3).map((item, index) => (
+            <div key={item.id} className="text-xs">
+              {item.name}: {startTime + (index * intervalSeconds)}s
+            </div>
+          ))}
+          {selectedItems.length > 3 && (
+            <div className="text-xs text-gray-400">... and {selectedItems.length - 3} more</div>
+          )}
+        </div>
+
+        <div className="flex justify-end space-x-2">
+          <button className="bg-gray-600 px-4 py-2 rounded" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            className="bg-blue-600 px-4 py-2 rounded"
+            onClick={handleApply}
+            disabled={selectedItems.length < 2}
+          >
+            Apply
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const ShowBuilder = (props) => {
   const { inventory, inventoryById, stagedShow, setStagedShow, systemConfig } = useAppStore();
   const [items, setItems] = useState([]);
@@ -291,9 +381,11 @@ const ShowBuilder = (props) => {
   const [addItemStartTime, setAddItemStartTime] = useState(0);
   const [currentIndex, setCurrentIndex] = useState(50);
   const [selectedItem, setSelectedItem] = useState(false);
+  const [selectedItems, setSelectedItems] = useState([]); // Multi-select state
   const [isPopupVisible, setPopupVisible] = useState(false);
   const [showMetadata, setShowMetadata] = useState({});
   const [availableDevices, setAvailableDevices] = useState({});
+  const [isChainTimingModalOpen, setIsChainTimingModalOpen] = useState(false);
 
   const [isInitialized, setIsInitialized] = useState(false);
 
@@ -383,6 +475,42 @@ const ShowBuilder = (props) => {
     }
   }, [selectedItem]);
 
+  const handleItemSelect = (item, isMultiSelect) => {
+    if (isMultiSelect) {
+      setSelectedItems(prev => {
+        const isSelected = prev.some(selected => selected.id === item.id);
+        if (isSelected) {
+          return prev.filter(selected => selected.id !== item.id);
+        } else {
+          return [...prev, item];
+        }
+      });
+    } else {
+      setSelectedItem(item);
+      setSelectedItems([]); // Clear multi-select when single selecting
+    }
+  };
+
+  const handleChainTiming = () => {
+    if (selectedItems.length >= 2) {
+      setIsChainTimingModalOpen(true);
+    }
+  };
+
+  const handleChainTimingApply = (updatedItems) => {
+    setItems(prevItems => 
+      prevItems.map(item => {
+        const updatedItem = updatedItems.find(updated => updated.id === item.id);
+        return updatedItem || item;
+      })
+    );
+  };
+
+  const clearSelection = () => {
+    setSelectedItem(false);
+    setSelectedItems([]);
+  };
+
   return (
     <div className="p-4">
       <h1 className="text-xl mb-4">Show Editor</h1>
@@ -398,11 +526,31 @@ const ShowBuilder = (props) => {
       />
       {availableDevices ? (
         <div>
+          {/* Chain Timing Button */}
+          {selectedItems.length >= 2 && (
+            <div className="mb-4 p-3 bg-blue-900 rounded-lg border border-blue-700">
+              <div className="flex items-center justify-between">
+                <span className="text-white">
+                  {selectedItems.length} items selected - Command+Click to select multiple
+                </span>
+                <button
+                  onClick={handleChainTiming}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded"
+                >
+                  Chain Timing
+                </button>
+              </div>
+            </div>
+          )}
+          
           <Timeline 
             items={items} 
             setItems={setItems} 
             openAddModal={openAddModal} 
-            setSelectedItem={setSelectedItem}
+            setSelectedItem={(item) => handleItemSelect(item, false)}
+            selectedItems={selectedItems}
+            onItemSelect={handleItemSelect}
+            clearSelection={clearSelection}
           />
           <AddItemModal
             isOpen={isAddModalOpen}
@@ -412,6 +560,12 @@ const ShowBuilder = (props) => {
             items={items}
             inventory={inventory}
             availableDevices={availableDevices}
+          />
+          <ChainTimingModal
+            isOpen={isChainTimingModalOpen}
+            onClose={() => setIsChainTimingModalOpen(false)}
+            onApply={handleChainTimingApply}
+            selectedItems={selectedItems}
           />
           {selectedItem ? (
             <VideoPreviewPopup 

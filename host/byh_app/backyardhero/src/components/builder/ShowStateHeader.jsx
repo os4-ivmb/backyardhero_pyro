@@ -6,15 +6,9 @@ export default function ShowStateHeader({ items, showMetadata, setShowMetadata, 
 
   const handleUpsertShow = async () => {
     let authorization_code = showMetadata.authorization_code
-    if(authorization_code){
-        if(prompt('Enter the auth code for this show to update it.') == authorization_code){
-
-        }else{
-            alert("Could not update as you fucked the auth code up")
-            return
-        }
-    }else{
-        authorization_code = prompt("Please enter an auth code for this show. It will be used to both edit and launch the show.")
+    // Only prompt for code if creating a new show
+    if (!authorization_code) {
+      authorization_code = prompt("Please enter an auth code for this show. It will be used to both edit and launch the show.")
     }
 
     const allowedAttributes = ["id", "startTime", "itemId", "zone", "target", "type", "name", "duration", "delay"];
@@ -38,7 +32,6 @@ export default function ShowStateHeader({ items, showMetadata, setShowMetadata, 
         display_payload: JSON.stringify(compressedItems)
     }
 
-
     if(showMetadata.id){
         updateShow(showMetadata.id, showData)
         setShowMetadata((showmd) => ({ ...showmd, ...showData }))
@@ -52,11 +45,7 @@ export default function ShowStateHeader({ items, showMetadata, setShowMetadata, 
   }
 
   const handleUpdateShowProtocol = (e) => {
-    if(confirm("Changing the protocol of a show will require pretty much starting over. You sure?")){
-      setShowMetadata((showmd) => ({ ...showmd, protocol: e.target.value }))
-    }else{
-
-    }
+    setShowMetadata((showmd) => ({ ...showmd, protocol: e.target.value }))
   }
 
   // Calculate show statistics

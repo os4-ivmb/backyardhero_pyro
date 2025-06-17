@@ -105,7 +105,7 @@
             "label": "Backyard Hero v0.1",
             "config": {
                 "min_battery_to_fire_pct": 30,
-                "require_continuity": true
+                "require_continuity": false
             }
         }
     },

@@ -4,10 +4,10 @@
 #include <RF24Mesh.h>
 #include <Adafruit_NeoPixel.h>
 
-#define BOARD_VERISON 7 
+#define BOARD_VERISON 6 
 #define FW_VERISON 5
-#define NODE_ID 116
-const char RECEIVER_IDENT[] = "RX116";
+#define NODE_ID 115
+const char RECEIVER_IDENT[] = "RX115";
 
 const bool RECEIVER_USES_V1_CUES = false;
  
