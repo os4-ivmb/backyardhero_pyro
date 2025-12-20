@@ -376,6 +376,255 @@ const ChainTimingModal = ({ isOpen, onClose, onApply, selectedItems }) => {
   );
 };
 
+const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex }) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [selectedReceivers, setSelectedReceivers] = useState([]);
+  const [startTime, setStartTime] = useState(5);
+  const [cadence, setCadence] = useState(1);
+  const [pattern, setPattern] = useState("row"); // "row" or "sequential"
+
+  // Get all available receivers from the receivers object
+  const availableReceivers = Object.keys(receivers || {});
+
+  const handleToggleReceiver = (receiverKey) => {
+    setSelectedReceivers(prev => {
+      if (prev.includes(receiverKey)) {
+        return prev.filter(key => key !== receiverKey);
+      } else {
+        return [...prev, receiverKey];
+      }
+    });
+  };
+
+  const handleSelectAll = () => {
+    setSelectedReceivers(availableReceivers);
+  };
+
+  const handleDeselectAll = () => {
+    setSelectedReceivers([]);
+  };
+
+  const handleGenerate = () => {
+    if (selectedReceivers.length === 0) {
+      alert("Please select at least one receiver");
+      return;
+    }
+
+    // Get all cues for selected receivers
+    const receiverCues = {};
+    selectedReceivers.forEach(receiverKey => {
+      const receiver = receivers[receiverKey];
+      if (receiver && receiver.cues) {
+        // Collect all cues from all zones
+        const allCues = [];
+        Object.values(receiver.cues).forEach(targets => {
+          allCues.push(...targets);
+        });
+        receiverCues[receiverKey] = allCues.sort((a, b) => a - b);
+      }
+    });
+
+    // Find max number of cues across all receivers
+    const cueLengths = Object.values(receiverCues).map(cues => cues.length);
+    const maxCues = cueLengths.length > 0 ? Math.max(...cueLengths) : 0;
+
+    if (maxCues === 0) {
+      alert("Selected receivers have no cues available");
+      return;
+    }
+
+    // Generate items based on pattern
+    const newItems = [];
+    let itemId = currentIndex;
+
+    if (pattern === "row") {
+      // Row pattern: All receivers fire cue 0 at startTime, then all fire cue 1 at startTime + cadence, etc.
+      for (let cueIndex = 0; cueIndex < maxCues; cueIndex++) {
+        selectedReceivers.forEach(receiverKey => {
+          const cues = receiverCues[receiverKey];
+          if (cueIndex < cues.length) {
+            const cue = cues[cueIndex];
+            // Find the zone for this receiver (usually the receiver key itself)
+            const receiver = receivers[receiverKey];
+            let zone = receiverKey;
+            if (receiver && receiver.cues) {
+              // Find which zone contains this target
+              for (const [z, targets] of Object.entries(receiver.cues)) {
+                if (targets.includes(cue)) {
+                  zone = z;
+                  break;
+                }
+              }
+            }
+            
+            newItems.push({
+              id: itemId++,
+              type: "GENERIC",
+              name: `Test ${receiverKey} Cue ${cue}`,
+              startTime: startTime + (cueIndex * cadence),
+              zone: zone,
+              target: cue,
+              duration: 1,
+              delay: 0
+            });
+          }
+        });
+      }
+    } else {
+      // Sequential pattern: Receiver 1 fires cue 0, wait cadence, Receiver 2 fires cue 0, etc., then move to cue 1
+      let timeOffset = 0;
+      for (let cueIndex = 0; cueIndex < maxCues; cueIndex++) {
+        selectedReceivers.forEach(receiverKey => {
+          const cues = receiverCues[receiverKey];
+          if (cueIndex < cues.length) {
+            const cue = cues[cueIndex];
+            // Find the zone for this receiver
+            const receiver = receivers[receiverKey];
+            let zone = receiverKey;
+            if (receiver && receiver.cues) {
+              for (const [z, targets] of Object.entries(receiver.cues)) {
+                if (targets.includes(cue)) {
+                  zone = z;
+                  break;
+                }
+              }
+            }
+            
+            newItems.push({
+              id: itemId++,
+              type: "GENERIC",
+              name: `Test ${receiverKey} Cue ${cue}`,
+              startTime: startTime + timeOffset,
+              zone: zone,
+              target: cue,
+              duration: 1,
+              delay: 0
+            });
+            timeOffset += cadence;
+          }
+        });
+      }
+    }
+
+    setCurrentIndex(itemId);
+    onGenerate(newItems);
+  };
+
+  return (
+    <div className="mb-4 p-3 bg-gray-800 rounded-lg border border-gray-700">
+      <div className="flex items-center justify-between">
+        <button
+          onClick={() => setIsExpanded(!isExpanded)}
+          className="text-white font-semibold hover:text-gray-300 flex items-center"
+        >
+          <span className="mr-2">{isExpanded ? '▼' : '▶'}</span>
+          Test Show Builder
+        </button>
+        {isExpanded && (
+          <button
+            onClick={handleGenerate}
+            className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded text-sm"
+            disabled={selectedReceivers.length === 0}
+          >
+            Generate
+          </button>
+        )}
+      </div>
+      
+      {isExpanded && (
+        <div className="mt-4 space-y-4">
+          {/* Receiver Selection */}
+          <div>
+            <div className="flex justify-between items-center mb-2">
+              <label className="block text-white text-sm font-semibold">Select Receivers:</label>
+              <div className="space-x-2">
+                <button
+                  onClick={handleSelectAll}
+                  className="text-xs bg-gray-600 hover:bg-gray-700 text-white px-2 py-1 rounded"
+                >
+                  Select All
+                </button>
+                <button
+                  onClick={handleDeselectAll}
+                  className="text-xs bg-gray-600 hover:bg-gray-700 text-white px-2 py-1 rounded"
+                >
+                  Deselect All
+                </button>
+              </div>
+            </div>
+            <div className="max-h-32 overflow-y-auto bg-gray-900 p-2 rounded border border-gray-600">
+              {availableReceivers.length === 0 ? (
+                <div className="text-gray-400 text-sm">No receivers available</div>
+              ) : (
+                <div className="space-y-1">
+                  {availableReceivers.map(receiverKey => {
+                    const receiver = receivers[receiverKey];
+                    const cueCount = receiver?.cues ? 
+                      Object.values(receiver.cues).flat().length : 0;
+                    return (
+                      <label key={receiverKey} className="flex items-center text-sm text-white cursor-pointer hover:bg-gray-700 p-1 rounded">
+                        <input
+                          type="checkbox"
+                          checked={selectedReceivers.includes(receiverKey)}
+                          onChange={() => handleToggleReceiver(receiverKey)}
+                          className="mr-2"
+                        />
+                        <span>{receiverKey} ({cueCount} cues)</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Configuration */}
+          <div className="grid grid-cols-3 gap-4">
+            <div>
+              <label className="block text-white text-sm font-semibold mb-1">Start Time (sec):</label>
+              <input
+                type="number"
+                className="w-full p-2 bg-gray-700 rounded text-white"
+                value={startTime}
+                onChange={(e) => setStartTime(parseFloat(e.target.value) || 0)}
+                step="0.1"
+                min="0"
+              />
+            </div>
+            <div>
+              <label className="block text-white text-sm font-semibold mb-1">Cadence (sec):</label>
+              <select
+                className="w-full p-2 bg-gray-700 rounded text-white"
+                value={cadence}
+                onChange={(e) => setCadence(parseFloat(e.target.value))}
+              >
+                <option value={0.05}>0.05</option>
+                <option value={0.1}>0.1</option>
+                <option value={0.15}>0.15</option>
+                <option value={0.25}>0.25</option>
+                <option value={0.5}>0.5</option>
+                <option value={1}>1</option>
+                <option value={2}>2</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-white text-sm font-semibold mb-1">Pattern:</label>
+              <select
+                className="w-full p-2 bg-gray-700 rounded text-white"
+                value={pattern}
+                onChange={(e) => setPattern(e.target.value)}
+              >
+                <option value="row">Row (All at once)</option>
+                <option value="sequential">Sequential</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const AudioWaveform = ({ onTimeUpdate, currentTime, duration, isPlaying, onPlayPause, onAudioFileChange }) => {
   const waveformRef = useRef(null);
   const wavesurferRef = useRef(null);
@@ -592,6 +841,7 @@ const ShowBuilder = (props) => {
   const [receiverLocations, setReceiverLocations] = useState({});
   const [currentIndex, setCurrentIndex] = useState(50);
   const [itemsFixed, setItemsFixed] = useState(false);
+  const [filteredReceivers, setFilteredReceivers] = useState({});
 
   const [isInitialized, setIsInitialized] = useState(false);
 
@@ -626,6 +876,7 @@ const ShowBuilder = (props) => {
           })
         );
         
+        setFilteredReceivers(filteredReceivers);
         console.log('Filtered receivers:', filteredReceivers);
         
         const availableDevicesData = mergeCues(filteredReceivers);
@@ -654,6 +905,7 @@ const ShowBuilder = (props) => {
       } else {
         console.log('Protocol or protocol.receivers is missing, using all receivers');
         // If protocol.receivers doesn't exist, use all available receivers
+        setFilteredReceivers(systemConfig.receivers);
         const availableDevicesData = mergeCues(systemConfig.receivers);
         console.log('Using all receivers, availableDevices:', availableDevicesData);
         
@@ -680,6 +932,7 @@ const ShowBuilder = (props) => {
     } else {
       console.log('Missing required data:', { tprotocol, hasReceivers: !!systemConfig.receivers, hasProtocols: !!systemConfig.protocols });
       setAvailableDevices({});
+      setFilteredReceivers({});
     }
   }, [showMetadata.protocol, systemConfig.receivers, systemConfig.protocols]);
 
@@ -930,6 +1183,13 @@ const ShowBuilder = (props) => {
     }
   };
 
+  // Handle test show generation
+  const handleTestShowGenerate = (newItems) => {
+    // Clear existing items and set new ones
+    setItems(newItems);
+    setItemsFixed(false); // Allow ID reassignment
+  };
+
   return (
     <div className="p-4">
       <h1 className="text-xl mb-4">Show Editor</h1>
@@ -965,6 +1225,14 @@ const ShowBuilder = (props) => {
               </button>
             </div>
           )}
+          
+          {/* Test Show Builder */}
+          <TestShowBuilder
+            receivers={filteredReceivers}
+            onGenerate={handleTestShowGenerate}
+            currentIndex={currentIndex}
+            setCurrentIndex={setCurrentIndex}
+          />
           
           {/* Chain Timing Button */}
           {selectedItems.length >= 2 && (

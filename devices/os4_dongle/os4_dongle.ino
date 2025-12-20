@@ -2,15 +2,14 @@
 
 #include <SPI.h>
 #include <RF24.h>
-#include <RF24Network.h>
-#include <RF24Mesh.h>
 #include <Adafruit_NeoPixel.h>
 #include <ArduinoJson.h>
 
 // FW_VERSION: Firmware version tracking for os4_dongle
 // v1: Initial version - Basic mesh networking and command queuing (date unknown)
 // v2: 2025-01-XX - Added FW_VERSION tracking system with version history comments
-#define FW_VERSION 2
+// v3: 2025-01-XX - Migrated from RF24Mesh to pure RF24 with deterministic addressing
+#define FW_VERSION 3
 
 #define RF24_CE_PIN 37
 #define RF24_CSN_PIN 36
@@ -112,6 +111,9 @@ struct ReceiverInfo {
   bool successHistory[MAX_SUCCESS_SAMPLES];
   uint8_t successHead;  // Next position to write
   uint8_t successCount; // Number of samples in buffer (0 to MAX_SUCCESS_SAMPLES)
+  
+  // Radio recovery tracking
+  uint8_t consecutiveFailures;  // Count of consecutive transmission failures
 };
 
 #define MAX_RECEIVERS 10
@@ -122,11 +124,9 @@ uint8_t numReceivers = 0;
 uint32_t receiverInactivityTimeoutMs = 30000UL; 
 uint32_t commandResponseTimeoutMs = 150UL;    
 uint32_t clockSyncIntervalMs = 2000UL;  
-uint8_t debugMode = 1;
+uint8_t debugMode = 0;
 
 
-uint64_t lastDhcpCallTime = 0;
-const uint32_t dhcpCallIntervalMs = 1000UL; 
 
 
 
@@ -163,9 +163,12 @@ uint8_t  responseTargetNodeID = 0;
 uint64_t commandDispatchTime = 0;           
 uint64_t initialCommandDispatchTime = 0;
 
-// Per-receiver tracking for clock sync spacing
+// Per-receiver tracking for clock sync (for informational purposes)
 uint64_t lastClockSyncSent[MAX_RECEIVERS];  // Track last clock sync send time per receiver
-uint8_t lastClockSyncReceiverIndex = 0;     // Index in receivers array, not nodeID    
+uint8_t lastClockSyncReceiverIndex = 0;     // Index in receivers array, not nodeID
+
+// Per-receiver tracking for transmission time (for informational purposes)
+uint64_t lastTransmissionTime[MAX_RECEIVERS];  // Track last transmission time per receiver    
 
 
 #define MAX_LATENCY_SAMPLES 10
@@ -222,8 +225,16 @@ uint16_t serialBufferIndex = 0;
 
 
 RF24 radio(RF24_CE_PIN, RF24_CSN_PIN);
-RF24Network network(radio);
-RF24Mesh mesh(radio, network);
+
+// RF24 addressing scheme (Star Topology):
+// Master (dongle) uses ONE reading pipe (pipe 0) to receive from ALL receivers: 0x0000000000LL
+//   - All receivers write to this same address, so master can receive from unlimited receivers
+// Master writes to receivers using addresses: 0x0000000001LL + nodeID
+//   - Writing pipe is changed dynamically per transmission (no pipe limit)
+// Maximum node ID supported: 255 (using 5-byte addresses)
+// This design scales to any number of receivers (not limited by RF24's 6 reading pipes)
+#define MASTER_READ_ADDRESS 0x0000000000LL
+#define RECEIVER_BASE_ADDRESS 0x0000000001LL
 
 
 
@@ -460,6 +471,7 @@ ReceiverInfo* getReceiverByIdent(const String &ident, bool createIfNotExist) {
     
     // Initialize clock sync tracking
     lastClockSyncSent[numReceivers] = 0;
+    lastTransmissionTime[numReceivers] = 0;
     
     // Initialize success tracking
     receivers[numReceivers].successHead = 0;
@@ -467,6 +479,9 @@ ReceiverInfo* getReceiverByIdent(const String &ident, bool createIfNotExist) {
     for(uint8_t k=0; k<MAX_SUCCESS_SAMPLES; k++){
         receivers[numReceivers].successHistory[k] = false;
     }
+    
+    // Initialize radio recovery tracking
+    receivers[numReceivers].consecutiveFailures = 0;
     
     numReceivers++;
     return &receivers[numReceivers-1];
@@ -477,14 +492,9 @@ ReceiverInfo* getReceiverByIdent(const String &ident, bool createIfNotExist) {
   return nullptr;
 }
 
-void printMeshAddresses() {
-  Serial.println(F("Mesh DHCP Table:"));
-  for (uint8_t i = 0; i < mesh.addrListTop; i++) {
-    Serial.print(F("NodeID: "));
-    Serial.print(mesh.addrList[i].nodeID);
-    Serial.print(F("  RF24 Address: 0x"));
-    Serial.println(mesh.addrList[i].address, HEX);
-  }
+// Get RF24 address for a given node ID
+uint64_t getReceiverAddress(uint8_t nodeID) {
+  return (uint64_t)RECEIVER_BASE_ADDRESS + nodeID;
 }
 
 // Push a success (1) or failure (0) to the circular buffer for a receiver
@@ -538,35 +548,100 @@ uint8_t calculateSuccessPercent(ReceiverInfo* rinfo) {
 
 
 bool sendActualManualFireMessage(uint8_t nodeID, uint8_t position) {
+  // Verify radio is ready
+  if (!radio.isChipConnected()) {
+    if(debugMode > 0) {
+      Serial.print(F("TX ERROR: Radio not connected for MANUAL_FIRE to N")); Serial.println(nodeID);
+    }
+    return false;
+  }
+  
   ManualFireMessage msg;
   msg.type = MANUAL_FIRE;
   msg.position = position;
-  if(!mesh.write(&msg, MANUAL_FIRE, sizeof(msg), nodeID)){
-    Serial.println(F("TX ERROR: MANUAL_FIRE"));
+  
+  radio.stopListening();
+  delayMicroseconds(200); // Increased delay for more reliable TX mode switch
+  uint64_t targetAddress = getReceiverAddress(nodeID);
+  radio.openWritingPipe(targetAddress);
+  bool result = radio.write(&msg, sizeof(msg));
+  radio.startListening();
+  delayMicroseconds(150); // Delay to ensure listening mode is fully active
+  
+  if(!result){
+    if(debugMode > 0) {
+      Serial.print(F("TX ERROR: MANUAL_FIRE to N")); Serial.print(nodeID);
+      Serial.print(F(" addr=0x")); Serial.println(targetAddress, HEX);
+    }
     return false;
   }
   return true;
 }
 
 bool sendActualClockSyncMessage(uint8_t nodeID, uint64_t timestamp) {
+  // Verify radio is ready
+  if (!radio.isChipConnected()) {
+    if(debugMode > 0) {
+      Serial.print(F("TX ERROR: Radio not connected for CLOCK_SYNC to N")); Serial.println(nodeID);
+    }
+    return false;
+  }
+  
   uint64_t now = millis() + tsOffset;
   ClockSyncMessage msg;
   msg.type = CLOCK_SYNC;
   msg.timestamp = now;
-  if(!mesh.write(&msg, CLOCK_SYNC, sizeof(msg), nodeID)){
-    Serial.println(F("TX ERROR: CLOCK_SYNC"));
+  
+  radio.stopListening();
+  delayMicroseconds(200); // Increased delay for more reliable TX mode switch
+  uint64_t targetAddress = getReceiverAddress(nodeID);
+  radio.openWritingPipe(targetAddress);
+  bool result = radio.write(&msg, sizeof(msg));
+  
+  // Ensure we're back in listening mode to receive responses and send ACKs
+  radio.startListening();
+  delayMicroseconds(150); // Increased delay to ensure listening mode is fully active
+  
+  // Note: Radio should be in listening mode after startListening()
+  // (RF24 library doesn't have isListening() method in this version)
+  
+  if(!result){
+    if(debugMode > 0) {
+      Serial.print(F("TX ERROR: CLOCK_SYNC to N")); Serial.print(nodeID);
+      Serial.print(F(" addr=0x")); Serial.println(targetAddress, HEX);
+    }
     return false;
   }
   return true;
 }
 
 bool sendActualStartLoadMessage(uint8_t nodeID, uint8_t numTargets, uint16_t showId) {
+  // Verify radio is ready
+  if (!radio.isChipConnected()) {
+    if(debugMode > 0) {
+      Serial.print(F("TX ERROR: Radio not connected for START_LOAD to N")); Serial.println(nodeID);
+    }
+    return false;
+  }
+  
   StartLoadMessage msg;
   msg.type = START_LOAD;
   msg.numTargetsToFire = numTargets;
   msg.showId = showId;
-  if(!mesh.write(&msg, START_LOAD, sizeof(msg), nodeID)){
-    Serial.println(F("TX ERROR: START_LOAD"));
+  
+  radio.stopListening();
+  delayMicroseconds(200); // Increased delay for more reliable TX mode switch
+  uint64_t targetAddress = getReceiverAddress(nodeID);
+  radio.openWritingPipe(targetAddress);
+  bool result = radio.write(&msg, sizeof(msg));
+  radio.startListening();
+  delayMicroseconds(150); // Delay to ensure listening mode is fully active
+  
+  if(!result){
+    if(debugMode > 0) {
+      Serial.print(F("TX ERROR: START_LOAD to N")); Serial.print(nodeID);
+      Serial.print(F(" addr=0x")); Serial.println(targetAddress, HEX);
+    }
     return false;
   }
   return true;
@@ -574,38 +649,99 @@ bool sendActualStartLoadMessage(uint8_t nodeID, uint8_t numTargets, uint16_t sho
 
 bool sendActualShowLoadMessage(uint8_t nodeID, uint32_t t1, uint8_t p1,
                          uint32_t t2, uint8_t p2) {
+  // Verify radio is ready
+  if (!radio.isChipConnected()) {
+    if(debugMode > 0) {
+      Serial.print(F("TX ERROR: Radio not connected for SHOW_LOAD to N")); Serial.println(nodeID);
+    }
+    return false;
+  }
+  
   ShowLoadMessage msg;
   msg.type = SHOW_LOAD;
   msg.time_1 = t1;
   msg.position_1 = p1;
   msg.time_2 = t2;
   msg.position_2 = p2;
-  if(!mesh.write(&msg, SHOW_LOAD, sizeof(msg), nodeID)){
-    Serial.println(F("TX ERROR: SHOW_LOAD"));
+  
+  radio.stopListening();
+  delayMicroseconds(200); // Increased delay for more reliable TX mode switch
+  uint64_t targetAddress = getReceiverAddress(nodeID);
+  radio.openWritingPipe(targetAddress);
+  bool result = radio.write(&msg, sizeof(msg));
+  radio.startListening();
+  delayMicroseconds(150); // Delay to ensure listening mode is fully active
+  
+  if(!result){
+    if(debugMode > 0) {
+      Serial.print(F("TX ERROR: SHOW_LOAD to N")); Serial.print(nodeID);
+      Serial.print(F(" addr=0x")); Serial.println(targetAddress, HEX);
+    }
     return false;
   }
   return true;
 }
 
 bool sendActualShowStartMessage(uint8_t nodeID, uint64_t startTime, uint8_t numTargets, uint16_t showId) {
+  // Verify radio is ready
+  if (!radio.isChipConnected()) {
+    if(debugMode > 0) {
+      Serial.print(F("TX ERROR: Radio not connected for SHOW_START to N")); Serial.println(nodeID);
+    }
+    return false;
+  }
+  
   ShowStartMessage msg;
   msg.type = SHOW_START;
   msg.targetStartTime = startTime;
   msg.numTargetsToFire = numTargets;
   msg.showId = showId;
-  if(!mesh.write(&msg, SHOW_START, sizeof(msg), nodeID)){
-    Serial.println(F("TX ERROR: SHOW_START"));
+  
+  radio.stopListening();
+  delayMicroseconds(200); // Increased delay for more reliable TX mode switch
+  uint64_t targetAddress = getReceiverAddress(nodeID);
+  radio.openWritingPipe(targetAddress);
+  bool result = radio.write(&msg, sizeof(msg));
+  radio.startListening();
+  delayMicroseconds(150); // Delay to ensure listening mode is fully active
+  
+  if(!result){
+    if(debugMode > 0) {
+      Serial.print(F("TX ERROR: SHOW_START to N")); Serial.print(nodeID);
+      Serial.print(F(" addr=0x")); Serial.println(targetAddress, HEX);
+    }
     return false;
   }
   return true;
 }
 
 bool sendActualGenericMessage(uint8_t nodeID, uint8_t commandType) {
+  // Verify radio is ready
+  if (!radio.isChipConnected()) {
+    if(debugMode > 0) {
+      Serial.print(F("TX ERROR: Radio not connected for Generic Cmd ")); Serial.print(commandType);
+      Serial.print(F(" to N")); Serial.println(nodeID);
+    }
+    return false;
+  }
+  
   GenericMessage msg;
   msg.type = commandType;
-  if(!mesh.write(&msg, commandType, sizeof(msg), nodeID)){
-    Serial.print(F("TX ERROR: Generic Cmd "));
-    Serial.println(commandType);
+  
+  radio.stopListening();
+  delayMicroseconds(200); // Increased delay for more reliable TX mode switch
+  uint64_t targetAddress = getReceiverAddress(nodeID);
+  radio.openWritingPipe(targetAddress);
+  bool result = radio.write(&msg, sizeof(msg));
+  radio.startListening();
+  delayMicroseconds(150); // Delay to ensure listening mode is fully active
+  
+  if(!result){
+    if(debugMode > 0) {
+      Serial.print(F("TX ERROR: Generic Cmd ")); Serial.print(commandType);
+      Serial.print(F(" to N")); Serial.print(nodeID);
+      Serial.print(F(" addr=0x")); Serial.println(targetAddress, HEX);
+    }
     return false;
   }
   return true;
@@ -780,20 +916,34 @@ void processSerialCommand(String inStr) {
     }
   } else if(cmdStr == "startload") {
     qc.messageType = START_LOAD;
-    // Extract repeat count if present: "numTargets showId [repeat]"
+    // Command format: "ident numTargets showId [repeat]"
+    // After ident extraction, paramsStr = "numTargets showId [repeat]"
+    // Extract repeat count if present (last token, only if it's a small number 1-10)
     int lastSpace = paramsStr.lastIndexOf(' ');
+    String mainParams = paramsStr;
     if (lastSpace > 0) {
-      String mainParams = paramsStr.substring(0, lastSpace);
-      qc.repeat_count = paramsStr.substring(lastSpace+1).toInt();
-      if (qc.repeat_count == 0) qc.repeat_count = 1;
-      int thirdSpace = mainParams.indexOf(' ');
-      qc.startload_numTargets = mainParams.substring(0, thirdSpace).toInt();
-      qc.startload_showId = mainParams.substring(thirdSpace+1).toInt();
+      String lastToken = paramsStr.substring(lastSpace+1);
+      int lastTokenVal = lastToken.toInt();
+      // If last token is a small number (1-10), treat it as repeat count
+      // Otherwise, it's part of the showId (showId can be large like 40)
+      if (lastTokenVal > 0 && lastTokenVal <= 10) {
+        mainParams = paramsStr.substring(0, lastSpace);
+        qc.repeat_count = lastTokenVal;
+      } else {
+        qc.repeat_count = 1;
+      }
     } else {
-      int thirdSpace = paramsStr.indexOf(' ');
-      qc.startload_numTargets = paramsStr.substring(0, thirdSpace).toInt();
-      qc.startload_showId = paramsStr.substring(thirdSpace+1).toInt();
+      qc.repeat_count = 1;
     }
+    
+    // Parse main params: "numTargets showId"
+    int spaceIdx = mainParams.indexOf(' ');
+    if (spaceIdx < 0) {
+      Serial.println(F("CV startload")); 
+      return;
+    }
+    qc.startload_numTargets = mainParams.substring(0, spaceIdx).toInt();
+    qc.startload_showId = mainParams.substring(spaceIdx + 1).toInt();
   } else if(cmdStr == "showload") {
     qc.messageType = SHOW_LOAD;
     // Extract repeat count if present: "time1 pos1 time2 pos2 [repeat]"
@@ -908,6 +1058,7 @@ void setup() {
   // Initialize clock sync tracking
   for (uint8_t i = 0; i < MAX_RECEIVERS; i++) {
     lastClockSyncSent[i] = 0;
+    lastTransmissionTime[i] = 0;
   } 
 
   SPI.begin(35, 33, 34); 
@@ -927,17 +1078,25 @@ void setup() {
   radio.setDataRate(RF24_250KBPS);
   radio.setPALevel(RF24_PA_MAX);
   radio.setChannel(85); 
-  radio.setRetries(15, 15); 
-
-  mesh.setNodeID(0); 
-  Serial.println(F("Initializing Mesh..."));
-  while (!mesh.begin()) {
-    Serial.println(F("M- (Mesh begin failed, retrying)"));
-    pixels.setPixelColor(5, COLOR_YELLOW); pixels.show(); 
-    delay(2000);
-  }
-  mesh.DHCP(); 
-  Serial.println(F("M+ (Mesh Master Online)"));
+  radio.setRetries(15, 15);
+  
+  // Enable 16-bit CRC for maximum reliability (default, but explicit is better)
+  radio.setCRCLength(RF24_CRC_16);
+  
+  // Enable auto-ACK for commands we send to receivers (they ACK our commands)
+  // Receivers send status messages as their ACK (status message = ACK), so we don't need
+  // to wait for hardware ACK on status messages - the status message itself is the acknowledgment
+  radio.setAutoAck(true);
+  radio.setAutoAck(0, true); // Explicitly enable on pipe 0 for receiving status messages
+  
+  // Configure master (dongle) as receiver on pipe 0
+  radio.openReadingPipe(0, (uint64_t)MASTER_READ_ADDRESS);
+  radio.startListening();
+  
+  // Note: Radio should be in listening mode after startListening()
+  // (RF24 library doesn't have isListening() method in this version)
+  
+  Serial.println(F("M+ (RF24 Master Hub Online)"));
 
   
   for (int i = 0; i < NUM_PIXELS; i++) {
@@ -957,18 +1116,6 @@ void setup() {
 
 void loop() {
   uint64_t now = millis() + tsOffset;
-  mesh.update();    
-  
-                  
-
-  
-  if (now - lastDhcpCallTime >= dhcpCallIntervalMs) {
-    mesh.DHCP();
-    lastDhcpCallTime = now;
-    if (debugMode > 1) { 
-      Serial.println(F("INFO: Periodic mesh.DHCP() called."));
-    }
-  }
 
   checkGpioStatus();
   updateLEDs();
@@ -989,23 +1136,25 @@ void loop() {
 
 
   
-  while (network.available()) {
-    RF24NetworkHeader header;
+  while (radio.available()) {
     uint8_t buf[32]; 
-    uint8_t msgSize = network.read(header, &buf, sizeof(buf));
+    uint8_t msgSize = radio.getPayloadSize();
+    if (msgSize > sizeof(buf)) msgSize = sizeof(buf);
+    
+    // Read the message (ACK is sent automatically by RF24 hardware)
+    radio.read(&buf, msgSize);
 
     uint8_t msgType = (msgSize > 0) ? buf[0] : 0;
 
     ReceiverInfo* r_from_msg = nullptr;
-    
-
 
     if (msgType == RECEIVER_STATUS) {
       ReceiverStatusMessage* status = (ReceiverStatusMessage*)buf;
       
-      if (!r_from_msg) {
-          r_from_msg = getReceiverByIdent(String(status->ident), true); 
-      }
+      // Status message serves as ACK - receiver sends status after receiving commands
+      // This is more reliable than hardware ACK since it confirms the receiver processed the command
+      
+      r_from_msg = getReceiverByIdent(String(status->ident), true); 
 
       if (r_from_msg) {
         r_from_msg->nodeID = status->nodeID; 
@@ -1018,6 +1167,7 @@ void loop() {
         r_from_msg->continuity[0] = status->cont64_0;
         r_from_msg->continuity[1] = status->cont64_1;
 
+        // Status message received = ACK that receiver got and processed the command
         if (awaitingResponseForCommand && r_from_msg->nodeID == responseTargetNodeID) {
           uint32_t currentLatency = now - initialCommandDispatchTime;
           
@@ -1043,14 +1193,16 @@ void loop() {
           awaitingResponseForCommand = false;
           
           // Track successful command
-          pushCommandResult(r_from_msg, true); 
+          pushCommandResult(r_from_msg, true);
+          
+          // Reset consecutive failure counter on success
+          r_from_msg->consecutiveFailures = 0;
         }
       } else {
          Serial.print(F("ERR: Status from unknown ident/node ")); Serial.println(status->nodeID);
       }
     } else if (msgType != 0) {
-        Serial.print(F("WARN: Received unhandled message type ")); Serial.print(msgType);
-        Serial.print(F(" from node ")); Serial.println(header.from_node);
+        Serial.print(F("WARN: Received unhandled message type ")); Serial.println(msgType);
     }
   }
 
@@ -1066,6 +1218,42 @@ void loop() {
       for (uint8_t i = 0; i < numReceivers; i++) {
         if (receivers[i].nodeID == responseTargetNodeID) {
           pushCommandResult(&receivers[i], false);
+          
+          // Increment consecutive failure counter
+          receivers[i].consecutiveFailures++;
+          
+          // If we have many consecutive failures, try radio recovery
+          const uint8_t RADIO_RECOVERY_THRESHOLD = 10;
+          if (receivers[i].consecutiveFailures >= RADIO_RECOVERY_THRESHOLD) {
+            if(debugMode > 0) {
+              Serial.print(F("WARN: Many consecutive failures for N")); Serial.print(responseTargetNodeID);
+              Serial.println(F(", attempting radio recovery..."));
+            }
+            
+            // Power cycle radio to recover from potential stuck state
+            radio.powerDown();
+            delay(10);
+            radio.powerUp();
+            delay(10);
+            
+            // Reconfigure radio
+            radio.setDataRate(RF24_250KBPS);
+            radio.setPALevel(RF24_PA_MAX);
+            radio.setChannel(85);
+            radio.setRetries(15, 15);
+            radio.setCRCLength(RF24_CRC_16);
+            radio.setAutoAck(true);
+            radio.setAutoAck(0, true);
+            radio.openReadingPipe(0, (uint64_t)MASTER_READ_ADDRESS);
+            radio.startListening();
+            
+            // Reset failure counter after recovery attempt
+            receivers[i].consecutiveFailures = 0;
+            
+            if(debugMode > 0) {
+              Serial.println(F("Radio recovery complete."));
+            }
+          }
           break;
         }
       }
@@ -1075,178 +1263,180 @@ void loop() {
     }
   }
 
-  // Process queue: allow CLOCK_SYNC and critical commands to bypass response-wait
-  // But space out clock sync sends to avoid receiver response collisions
-  bool canProcessCommand = !awaitingResponseForCommand;
-  
-  if (!isQueueEmpty()) {
-    // Peek at next command to check type
-    QueuedCommand peekCmd = commandBuffer[cmdQueueHead];
-    bool isClockSync = (peekCmd.messageType == CLOCK_SYNC);
-    
-    // Critical commands that should bypass queue blocking (not just keepalive)
-    bool isCriticalCommand = (peekCmd.messageType == SHOW_START ||
-                               peekCmd.messageType == START_LOAD ||
-                               peekCmd.messageType == SHOW_LOAD ||
-                               peekCmd.messageType == GENERIC_PLAY ||
-                               peekCmd.messageType == GENERIC_STOP ||
-                               peekCmd.messageType == GENERIC_PAUSE ||
-                               peekCmd.messageType == GENERIC_RESET ||
-                               peekCmd.messageType == MANUAL_FIRE ||
-                               peekCmd.messageType == RESET_DVC);
-    
-    // For clock sync: check if we need to space out sends to avoid collisions
-    bool canSendClockSync = false;
-    if (isClockSync) {
-      // Find receiver index for this clock sync target
-      uint8_t targetIdx = 255; // Invalid
-      for (uint8_t i = 0; i < numReceivers; i++) {
-        if (receivers[i].nodeID == peekCmd.targetNodeID) {
-          targetIdx = i;
-          break;
-        }
-      }
+  // Process queue: simple blocking approach - wait for response before sending next command
+  if (!isQueueEmpty() && !awaitingResponseForCommand) {
+    QueuedCommand cmdToSend;
+    if (dequeueCommand(cmdToSend)) {
+      responseTargetNodeID = cmdToSend.targetNodeID;
       
-      if (targetIdx < MAX_RECEIVERS) {
-        // Space out clock sync sends: minimum 50ms between sends to same receiver
-        // This prevents all receivers from responding simultaneously
-        uint64_t timeSinceLastSync = now - lastClockSyncSent[targetIdx];
-        const uint32_t CLOCK_SYNC_SPACING_MS = 50;
-        
-        if (timeSinceLastSync >= CLOCK_SYNC_SPACING_MS || lastClockSyncSent[targetIdx] == 0) {
-          canSendClockSync = true;
-        }
+      if (cmdToSend.targetNodeID == 0 && cmdToSend.messageType != CLOCK_SYNC) {
+        Serial.print(F("WARN: Cmd for Node 0 (master) skipped or invalid target: "));
+        Serial.println(cmdToSend.messageType);
       } else {
-        // Receiver not found, allow send anyway (will fail gracefully)
-        canSendClockSync = true;
-      }
-    }
-    
-    // Allow: normal commands if not waiting, OR clock sync if spaced properly, OR critical commands always
-    if (canProcessCommand || (isClockSync && canSendClockSync) || isCriticalCommand) {
-      QueuedCommand cmdToSend;
-      if (dequeueCommand(cmdToSend)) {
-        responseTargetNodeID = cmdToSend.targetNodeID;
-        
-        
-        if (cmdToSend.targetNodeID == 0 && cmdToSend.messageType != CLOCK_SYNC /*e.g.*/) {
-            Serial.print(F("WARN: Cmd for Node 0 (master) skipped or invalid target: "));
-            Serial.println(cmdToSend.messageType);
-            
-        } else {
-          if(debugMode > 0) {
-            Serial.print(F("TX CMD: ")); Serial.print(cmdToSend.messageType);
-            Serial.print(F(" to N")); Serial.print(cmdToSend.targetNodeID);
-            Serial.print(F(" (repeat=")); Serial.print(cmdToSend.repeat_count);
-            Serial.println(F(")"));
-          }
+        if(debugMode > 0) {
+          Serial.print(F("TX CMD: ")); Serial.print(cmdToSend.messageType);
+          Serial.print(F(" to N")); Serial.print(cmdToSend.targetNodeID);
+          Serial.print(F(" (repeat=")); Serial.print(cmdToSend.repeat_count);
+          Serial.println(F(")"));
+        }
 
-            // Determine if this is a critical command (same check as above, but for the actual command being sent)
-            bool cmdIsCritical = (cmdToSend.messageType == SHOW_START ||
-                                  cmdToSend.messageType == START_LOAD ||
-                                  cmdToSend.messageType == SHOW_LOAD ||
-                                  cmdToSend.messageType == GENERIC_PLAY ||
-                                  cmdToSend.messageType == GENERIC_STOP ||
-                                  cmdToSend.messageType == GENERIC_PAUSE ||
-                                  cmdToSend.messageType == GENERIC_RESET ||
-                                  cmdToSend.messageType == MANUAL_FIRE ||
-                                  cmdToSend.messageType == RESET_DVC);
-            
-            // Send command multiple times based on repeat_count
-            bool txSuccess = false;
-            const uint8_t REPEAT_DELAY_MS = 10;  // Small delay between repeats to avoid overwhelming receiver
-            
-            for (uint8_t repeatIdx = 0; repeatIdx < cmdToSend.repeat_count; repeatIdx++) {
-              if (repeatIdx > 0) {
-                delay(REPEAT_DELAY_MS);  // Small delay between repeats
+        // Find receiver index for tracking
+        uint8_t targetIdx = 255;
+        for (uint8_t i = 0; i < numReceivers; i++) {
+          if (receivers[i].nodeID == cmdToSend.targetNodeID) {
+            targetIdx = i;
+            break;
+          }
+        }
+        
+        // Send command with repeat support - stop early if first transmission is ACKed
+        bool txSuccess = false;
+        bool gotAck = false;
+        const uint8_t REPEAT_DELAY_MS = 10;  // Small delay between repeats to avoid overwhelming receiver
+        
+        for (uint8_t repeatIdx = 0; repeatIdx < cmdToSend.repeat_count && !gotAck; repeatIdx++) {
+          if (repeatIdx > 0) {
+            delay(REPEAT_DELAY_MS);  // Small delay between repeats
+          }
+          
+          bool thisTxSuccess = false;
+          switch(cmdToSend.messageType) {
+            case MANUAL_FIRE:
+              thisTxSuccess = sendActualManualFireMessage(cmdToSend.targetNodeID, cmdToSend.fire_position);
+              break;
+            case CLOCK_SYNC:
+              thisTxSuccess = sendActualClockSyncMessage(cmdToSend.targetNodeID, cmdToSend.sync_timestamp);
+              // Track clock sync send time for this receiver
+              if (targetIdx < MAX_RECEIVERS) {
+                lastClockSyncSent[targetIdx] = now;
               }
-              
-              bool thisTxSuccess = false;
-              switch(cmdToSend.messageType) {
-                case MANUAL_FIRE:
-                  thisTxSuccess = sendActualManualFireMessage(cmdToSend.targetNodeID, cmdToSend.fire_position);
-                  break;
-                case CLOCK_SYNC:
-                  thisTxSuccess = sendActualClockSyncMessage(cmdToSend.targetNodeID, cmdToSend.sync_timestamp);
-                  break;
-                case START_LOAD:
-                  thisTxSuccess = sendActualStartLoadMessage(cmdToSend.targetNodeID, cmdToSend.startload_numTargets, cmdToSend.startload_showId);
-                  break;
-                case SHOW_LOAD:
-                  thisTxSuccess = sendActualShowLoadMessage(cmdToSend.targetNodeID, cmdToSend.showload_time_1, cmdToSend.showload_position_1, cmdToSend.showload_time_2, cmdToSend.showload_position_2);
-                  break;
-                case SHOW_START:
-                  thisTxSuccess = sendActualShowStartMessage(cmdToSend.targetNodeID, cmdToSend.showstart_targetStartTime, cmdToSend.showstart_numTargetsToFire, cmdToSend.showstart_showId);
-                  break;
-                case GENERIC_PLAY:
-                case GENERIC_STOP:
-                case GENERIC_RESET:
-                case GENERIC_PAUSE:
-                case RESET_DVC: 
-                  thisTxSuccess = sendActualGenericMessage(cmdToSend.targetNodeID, cmdToSend.messageType);
-                  break;
-                default:
-                  Serial.print(F("ERR: Unknown command type in queue: ")); Serial.println(cmdToSend.messageType);
+              break;
+            case START_LOAD:
+              thisTxSuccess = sendActualStartLoadMessage(cmdToSend.targetNodeID, cmdToSend.startload_numTargets, cmdToSend.startload_showId);
+              break;
+            case SHOW_LOAD:
+              thisTxSuccess = sendActualShowLoadMessage(cmdToSend.targetNodeID, cmdToSend.showload_time_1, cmdToSend.showload_position_1, cmdToSend.showload_time_2, cmdToSend.showload_position_2);
+              break;
+            case SHOW_START:
+              thisTxSuccess = sendActualShowStartMessage(cmdToSend.targetNodeID, cmdToSend.showstart_targetStartTime, cmdToSend.showstart_numTargetsToFire, cmdToSend.showstart_showId);
+              break;
+            case GENERIC_PLAY:
+            case GENERIC_STOP:
+            case GENERIC_RESET:
+            case GENERIC_PAUSE:
+            case RESET_DVC: 
+              thisTxSuccess = sendActualGenericMessage(cmdToSend.targetNodeID, cmdToSend.messageType);
+              break;
+            default:
+              Serial.print(F("ERR: Unknown command type in queue: ")); Serial.println(cmdToSend.messageType);
+              break;
+          }
+          
+          // Track success if at least one transmission succeeded
+          if (thisTxSuccess) {
+            txSuccess = true;
+            
+            // Set up to wait for response after this transmission
+            awaitingResponseForCommand = true;
+            commandDispatchTime = now;
+            initialCommandDispatchTime = now;
+            
+            // Wait for response with timeout - check radio and process messages
+            uint64_t responseWaitStart = now;
+            bool responseReceived = false;
+            
+            while ((now = millis() + tsOffset) - responseWaitStart < commandResponseTimeoutMs && !responseReceived) {
+              // Process incoming radio messages to check for ACK
+              while (radio.available()) {
+                uint8_t buf[32]; 
+                uint8_t msgSize = radio.getPayloadSize();
+                if (msgSize > sizeof(buf)) msgSize = sizeof(buf);
+                radio.read(&buf, msgSize);
+                
+                uint8_t msgType = (msgSize > 0) ? buf[0] : 0;
+                if (msgType == RECEIVER_STATUS) {
+                  ReceiverStatusMessage* status = (ReceiverStatusMessage*)buf;
+                  ReceiverInfo* r_from_msg = getReceiverByIdent(String(status->ident), false);
                   
-                  goto next_command_check; 
+                  if (r_from_msg && r_from_msg->nodeID == responseTargetNodeID) {
+                    // Got response from target receiver - this is our ACK
+                    responseReceived = true;
+                    gotAck = true;
+                    awaitingResponseForCommand = false;
+                    
+                    // Update receiver info
+                    r_from_msg->nodeID = status->nodeID; 
+                    r_from_msg->batteryLevel = status->batteryLevel;
+                    r_from_msg->showId = status->showState & 0x3FFF;
+                    r_from_msg->loadComplete = (status->showState & (1 << 14)) ? true : false;
+                    r_from_msg->startReady  = (status->showState & (1 << 15)) ? true : false;
+                    r_from_msg->lastMessageTime = now;
+                    r_from_msg->continuity[0] = status->cont64_0;
+                    r_from_msg->continuity[1] = status->cont64_1;
+                    
+                    // Track successful command
+                    pushCommandResult(r_from_msg, true);
+                    r_from_msg->consecutiveFailures = 0;
+                    
+                    if(debugMode > 0) {
+                      Serial.print(F("Got ACK after repeat ")); Serial.print(repeatIdx + 1); Serial.println(F(", stopping repeats"));
+                    }
+                    break;
+                  }
+                }
               }
               
-              // Track success if at least one transmission succeeded
-              if (thisTxSuccess) {
-                txSuccess = true;
+              if (!responseReceived) {
+                delay(10);  // Small delay before checking again
+                now = millis() + tsOffset;
               }
             }
             
-            // For clock sync and critical commands: wait for response (connectivity tracking), but allow bypass
-            // For other commands: wait for response if transmission succeeded and block queue
-            if (txSuccess) {
-              if (isClockSync || cmdIsCritical) {
-                // Clock sync: track when we sent it to this receiver (for spacing)
-                if (isClockSync) {
-                  uint8_t targetIdx = 255;
-                  for (uint8_t i = 0; i < numReceivers; i++) {
-                    if (receivers[i].nodeID == cmdToSend.targetNodeID) {
-                      targetIdx = i;
-                      break;
-                    }
-                  }
-                  if (targetIdx < MAX_RECEIVERS) {
-                    lastClockSyncSent[targetIdx] = now;
-                  }
-                }
-                
-                // Set awaiting response but allow next clock sync/critical command to proceed
-                // Only wait for response after the last repeat
-                awaitingResponseForCommand = true;
-                commandDispatchTime = now;
-                initialCommandDispatchTime = now;
-                // Note: clock sync and critical commands can bypass the awaitingResponseForCommand check above
-              } else {
-                // Other commands: block queue until response (shouldn't happen with current command types)
-                // Only wait for response after the last repeat
-                awaitingResponseForCommand = true;
-                commandDispatchTime = now;
-                initialCommandDispatchTime = now;
+            // If we didn't get a response yet, continue to next repeat (if any)
+            if (!responseReceived) {
+              // Timeout - will try next repeat if available
+              awaitingResponseForCommand = false;  // Reset so we can send next repeat
+              if(debugMode > 0 && repeatIdx < cmdToSend.repeat_count - 1) {
+                Serial.print(F("No ACK after repeat ")); Serial.print(repeatIdx + 1); Serial.println(F(", trying next repeat"));
               }
-            } else {
-              // Transmission failed, don't wait for response - process next command immediately
-              if(debugMode > 0) {
-                Serial.println(F("TX failed, skipping response wait"));
-              }
+            }
+          }
+        }
+        
+        // Update last transmission time for this receiver
+        if (targetIdx < MAX_RECEIVERS) {
+          lastTransmissionTime[targetIdx] = now;
+        }
+        
+        // If we got ACK, we're done. Otherwise, set up final response wait or mark as failed
+        if (gotAck) {
+          // Already got ACK, nothing more to do
+          // awaitingResponseForCommand is already false
+        } else if (txSuccess) {
+          // Transmission succeeded but no ACK yet - wait for response in main loop
+          awaitingResponseForCommand = true;
+          commandDispatchTime = now;
+          initialCommandDispatchTime = now;
+        } else {
+          // Transmission failed, don't wait for response - process next command immediately
+          if(debugMode > 0) {
+            Serial.println(F("TX failed, skipping response wait"));
+          }
+          
+          // Track transmission failure - find receiver by nodeID
+          for (uint8_t i = 0; i < numReceivers; i++) {
+            if (receivers[i].nodeID == cmdToSend.targetNodeID) {
+              pushCommandResult(&receivers[i], false);
               
-              // Track transmission failure - find receiver by nodeID
-              for (uint8_t i = 0; i < numReceivers; i++) {
-                if (receivers[i].nodeID == cmdToSend.targetNodeID) {
-                  pushCommandResult(&receivers[i], false);
-                  break;
-                }
-              }
-            } 
+              // Increment consecutive failure counter
+              receivers[i].consecutiveFailures++;
+              break;
+            }
+          }
         }
       }
     }
-  }
-next_command_check:; 
+  } 
 
   
   if (now - lastPrintTime >= 1000) { 
@@ -1311,7 +1501,8 @@ next_command_check:;
         QueuedCommand qc = {0};
         qc.targetNodeID = receivers[i].nodeID;
         qc.messageType = CLOCK_SYNC;
-        qc.sync_timestamp = now; 
+        qc.sync_timestamp = now;
+        qc.repeat_count = 1;  // Ensure at least 1 repeat
         enqueueCommand(qc);
       }
     }

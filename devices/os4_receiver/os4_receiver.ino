@@ -1,17 +1,16 @@
 #include <SPI.h>
 #include <RF24.h>
-#include <RF24Network.h>
-#include <RF24Mesh.h>
 #include <Adafruit_NeoPixel.h>
 
 // FW_VERSION: Firmware version tracking for os4_receiver
 // v1-v4: Historical versions (not documented, dates unknown)
 // v5: Baseline version before tracking system (date unknown)
 // v6: 2025-01-XX - Added FW_VERSION tracking system with version history comments (fixed typo: FW_VERISON -> FW_VERSION)
+// v7: 2025-01-XX - Migrated from RF24Mesh to pure RF24 with deterministic addressing
 #define BOARD_VERISON 7
-#define FW_VERSION 6
-#define NODE_ID 122
-const char RECEIVER_IDENT[] = "RX122";
+#define FW_VERSION 7
+#define NODE_ID 124
+const char RECEIVER_IDENT[] = "RX124";
 
 const bool RECEIVER_USES_V1_CUES = false;
  
@@ -64,6 +63,7 @@ uint32_t COLOR_CONT_NEEDED = strip.Color(180, 0, 0);
 uint32_t COLOR_CONT_ACHIEVED = strip.Color(0, 175, 0);
 uint32_t COLOR_CONT_AVAIL = strip.Color(0, 0, 175);
 uint32_t COLOR_FIRING = strip.Color(200, 200, 0);
+uint32_t COLOR_FIRED = strip.Color(0, 0, 255);  // Blue for fired targets
 
  
 enum MessageType {
@@ -126,8 +126,15 @@ struct ReceiverStatusMessage {
 } __attribute__((packed));
 
 RF24 radio(RF24_CE_PIN, RF24_CSN_PIN);
-RF24Network network(radio);
-RF24Mesh mesh(radio, network);
+
+// RF24 addressing scheme (Star Topology):
+// Receiver reads from master on pipe 0: address based on NODE_ID (0x0000000001LL + NODE_ID)
+//   - Each receiver has its own unique listening address
+// Receiver writes to master: 0x0000000000LL
+//   - All receivers write to the same address (master's single reading pipe)
+// This allows unlimited receivers (master only needs 1 reading pipe for all receivers)
+#define MASTER_WRITE_ADDRESS 0x0000000000LL
+#define RECEIVER_BASE_ADDRESS 0x0000000001LL
 
 int8_t failed_tx_ct = 0;
 int8_t txSetting = 0;
@@ -378,8 +385,29 @@ void sendStatus(){
     }
   }
 
-  if(!mesh.write(&msg, RECEIVER_STATUS, sizeof(msg), 0)){
-    incrementFailedTXCtAndMaybeChangeTXP();
+  // Ensure radio is ready before transmitting
+  if (!radio.isChipConnected()) {
+    Serial.println("ERROR: Radio chip not connected!");
+    return;
+  }
+  
+  radio.stopListening();
+  delayMicroseconds(200); // Increased delay for more reliable TX mode switch
+  radio.openWritingPipe((uint64_t)MASTER_WRITE_ADDRESS);
+  
+  // Use writeFast() - status message itself serves as the ACK
+  // The dongle treats receipt of status as acknowledgment that receiver got the command
+  // No need to wait for hardware ACK since status message is the acknowledgment
+  radio.writeFast(&msg, sizeof(msg));
+  radio.txStandBy(); // Wait for transmission to complete
+  
+  // Increased delay before switching back to RX mode for better reliability
+  delayMicroseconds(150);
+  radio.startListening();
+  
+  // Reset failed TX counter - transmission succeeded (status message is the ACK)
+  if (failed_tx_ct > 0) {
+    failed_tx_ct = 0;
   }
 }
 
@@ -424,6 +452,11 @@ void runPlayLoop(){
             if (now - fireStartTime[i] >= FIRE_MS_DURATION) {
               targetFiring[i] = false;
               fireChanged=true;
+              Serial.println("FIRED");
+              Serial.println(i);
+              Serial.print(" | ");
+              Serial.print(now);
+
             }
           }
         }
@@ -431,6 +464,7 @@ void runPlayLoop(){
 
       if(fireChanged){
         refreshFiring();
+        Serial.println("FIRE CHANGED");
         fireChanged=false;
       }
 
@@ -833,8 +867,13 @@ void displayInputStates(uint8_t *shiftInput) {
       
       uint8_t ledIndex = (boardIndex * 8) + (physicalPin - 1);
       if (targetFiring[ledIndex]) {
+        // Currently firing - show yellow
         strip.setPixelColor(ledIndex, COLOR_FIRING);
-      }else{
+      } else if (targetFired[ledIndex]) {
+        // Already fired - show blue
+        strip.setPixelColor(ledIndex, COLOR_FIRED);
+      } else {
+        // Not fired yet - show continuity/loaded states
         if (shiftInput[boardIndex] & (1 << bitPosition)) {
           
           if(targetLoaded[(boardIndex*8)+bitPosition]){
@@ -976,15 +1015,24 @@ void setup(){
   }
   radio.setChannel(85);
   radio.setRetries(15, 15);
+  
+  // Enable 16-bit CRC for maximum reliability (default, but explicit is better)
+  radio.setCRCLength(RF24_CRC_16);
+  
+  // Enable auto-ACK for receiving commands from dongle (we want ACK on commands)
+  // Status messages use writeFast() without ACK - the status message itself is the ACK
+  radio.setAutoAck(true);
+  radio.setAutoAck(0, true); // Explicitly enable on pipe 0 for receiving commands
+  
   pinMode(15, OUTPUT);
  
-  mesh.releaseAddress();
-  mesh.setNodeID(NODE_ID);
-  while(!mesh.begin()){
-    Serial.println("ERROR: Mesh start failed!");
-    incrementFailedTXCtAndMaybeChangeTXP();
-    testLEDStrip_pulsingBlue();
-  }
+  // Configure receiver to read from master using address based on NODE_ID
+  uint64_t receiverReadAddress = (uint64_t)RECEIVER_BASE_ADDRESS + NODE_ID;
+  radio.openReadingPipe(0, receiverReadAddress);
+  radio.startListening();
+  
+  Serial.print("Receiver configured with address: 0x");
+  Serial.println(receiverReadAddress, HEX);
   zeroTargets();
   testLEDStrip_pulsingGreen();
   Serial.println("SUCCESS: Receiver started!");
@@ -994,18 +1042,16 @@ void setup(){
 }
  
 void loop(){
-  mesh.update();
-  network.update();
-
   runPlayLoop();
 
   uint64_t now = getSynchronizedTime();
  
   
-  while(network.available()){
-    RF24NetworkHeader header;
+  while(radio.available()){
     uint8_t buf[32];
-    network.read(header, &buf, sizeof(buf));
+    uint8_t msgSize = radio.getPayloadSize();
+    if (msgSize > sizeof(buf)) msgSize = sizeof(buf);
+    radio.read(&buf, msgSize);
     uint8_t mType = buf[0];
     gotCommand = true;
     timedOut = false;
@@ -1039,6 +1085,9 @@ void loop(){
         break;
     }
     Serial.println("Cmd in status out");
+    Serial.println(now);
+    // Small delay to ensure dongle is back in listening mode
+    delay(2);
     sendStatus();
 
     if(mType == SHOW_START){
@@ -1081,6 +1130,7 @@ void loop(){
   
   if(now - lastCmdReceived > 10000 && gotCommand && !timedOut){
     Serial.println("Disconnect detected. Will try to ping again.");
+    Serial.println(now);
     if(isPlaying){
       Serial.println("Disonnected while playing. Stopping show.");
       testLEDStrip_flashingPurple();
@@ -1106,7 +1156,7 @@ void loop(){
     refreshFiring();
   }
 
-  if(!isPlaying && (millis() - lastInputModeRunTime > INPUT_MODE_INTERVAL)){
+  if((millis() - lastInputModeRunTime > INPUT_MODE_INTERVAL)){
     handleInputMode();
     lastInputModeRunTime = millis();
   }
@@ -1114,12 +1164,14 @@ void loop(){
   
   if(millis() - lastStatus > STATUS_INTERVAL && !gotCommand){
     if(timedOut){
-      mesh.renewAddress();
-      while(!mesh.begin()){
-        incrementFailedTXCtAndMaybeChangeTXP();
-        testLEDStrip_pulsingBlue();
-      }
-      Serial.println("Timed out status send");
+      // Re-initialize radio if timed out
+      radio.powerDown();
+      delay(10);
+      radio.powerUp();
+      uint64_t receiverReadAddress = (uint64_t)RECEIVER_BASE_ADDRESS + NODE_ID;
+      radio.openReadingPipe(0, receiverReadAddress);
+      radio.startListening();
+      Serial.println("Timed out status send - radio reinitialized");
     }
     Serial.println("TOS");
     sendStatus();

@@ -76,6 +76,9 @@ class BYHProtocolHandler:
         self.types = {}
         self.async_load_targets = {}
         self.show_start_time = 0
+        
+        # Track latency samples for sliding average (max 20 samples per receiver)
+        self.latency_samples = {}  # Key: receiver ident, Value: list of latency values
 
         self.load_initial_receiver_cfg()
         print(f"Initialized Protocol {self.protocol}")
@@ -122,8 +125,9 @@ class BYHProtocolHandler:
                 if self.async_retry_ct > 10:
                     print(f"Retrying show load for incomplete devices: {incomplete_devices}")
                     # Retry only for devices that haven't completed loading
+                    # Skip START_LOAD on retry to avoid resetting receivers that are already loading
                     incomplete_targets = {dev: self.async_load_targets[dev] for dev in incomplete_devices}
-                    self.load_async_fire_targets(incomplete_targets, self.show_id, False)
+                    self.load_async_fire_targets(incomplete_targets, self.show_id, False, skip_startload=True)
                     self.async_retry_ct = 0
 
     def get_async_load_targets_not_with_status(self, key, state):
@@ -138,7 +142,7 @@ class BYHProtocolHandler:
                     print(f"{device_id}:{key} is FALSE as '{status[key]}'")
                     false_device_ids.append(device_id)
             else:
-                print(f"Show not correct for {device_id}")
+                print(f"Show {self.show_id} not correct for {device_id}({status['showId']})")
                 false_device_ids.append(device_id)
         return false_device_ids
 
@@ -164,6 +168,7 @@ class BYHProtocolHandler:
 
         for receiver in msg_obj.get('receivers', []):
             if receiver.get('i') in self.receivers:
+                receiver_ident = receiver.get('i')
                 # Create a new dictionary with full keys
                 full_receiver = {}
                 for abbr_key, full_key in key_map.items():
@@ -171,6 +176,26 @@ class BYHProtocolHandler:
                         full_receiver[full_key] = receiver[abbr_key]
                         if(abbr_key == 't'):
                             full_receiver[full_key] = full_receiver[full_key] + lmtoffset
+                        elif(abbr_key == 'x'):
+                            # Apply sliding average to latency
+                            latency_value = receiver[abbr_key]
+                            
+                            # Add to sliding window (initialize if needed)
+                            if receiver_ident not in self.latency_samples:
+                                self.latency_samples[receiver_ident] = []
+                            
+                            # Add new sample
+                            self.latency_samples[receiver_ident].append(latency_value)
+                            
+                            # Keep only last 20 samples
+                            if len(self.latency_samples[receiver_ident]) > 20:
+                                self.latency_samples[receiver_ident].pop(0)
+                            
+                            # Calculate average of available samples (up to 20)
+                            avg_latency = sum(self.latency_samples[receiver_ident]) / len(self.latency_samples[receiver_ident])
+                            
+                            # Round to whole number and set
+                            full_receiver[full_key] = round(avg_latency)
                 self.receivers[receiver['i']]['drift'] = lmtoffset
                 self.receivers[receiver['i']]['status'] = full_receiver
             else:
@@ -263,11 +288,12 @@ class BYHProtocolHandler:
     def send_load_segment_to_dev(self, dev_id, st1, target1, st2, target2):
         print(f"Loading segment to {dev_id}: {st1}, {target1}, {st2}, {target2}")
 
-        cmd = f"showload {dev_id} {int(st1)} {int(target1)} {int(st2)} {int(target2)}"
-        for _ in range(2):
-            self.parent.send_serial_command(cmd)
+        # Send with repeat count of 2 - dongle will handle retries internally
+        # This prevents queue overflow while still ensuring reliability
+        cmd = f"showload {dev_id} {int(st1)} {int(target1)} {int(st2)} {int(target2)} 2"
+        self.parent.send_serial_command(cmd)
 
-    def load_async_fire_targets(self, async_fire_targets, showId, setLoadTargets=True):
+    def load_async_fire_targets(self, async_fire_targets, showId, setLoadTargets=True, skip_startload=False):
         if(setLoadTargets):
             self.async_load_targets = async_fire_targets
 
@@ -276,9 +302,20 @@ class BYHProtocolHandler:
         for target_key, fire_targets in async_fire_targets.items():
             print(f"Processing {target_key}:")
             
-            expectedItemsCt = len(fire_targets)
-            self.parent.send_serial_command(f"startload {target_key} {expectedItemsCt} {showId}")
-            time.sleep(0.01)
+            # Only send START_LOAD if skip_startload is False (initial load) or if receiver has wrong showId
+            should_send_startload = not skip_startload
+            if skip_startload:
+                # Check if receiver already has the correct showId - if so, skip START_LOAD to avoid resetting
+                receiver_status = self.receivers.get(target_key, {}).get('status', {})
+                if receiver_status.get('showId') == showId:
+                    print(f"Skipping START_LOAD for {target_key} - already loading show {showId}")
+                    should_send_startload = False
+            
+            if should_send_startload:
+                expectedItemsCt = len(fire_targets)
+                self.parent.send_serial_command(f"startload {target_key} {expectedItemsCt} {showId}")
+                # Wait longer for startload to be processed (blocking queue needs time)
+                time.sleep(0.3)
             # Process the list in chunks of 3
             for i in range(0, len(fire_targets), 2):
                 # Get a chunk of up to 3 items
@@ -296,7 +333,10 @@ class BYHProtocolHandler:
                 
                 # Call the method with the six parameters.
                 self.send_load_segment_to_dev(target_key, round(st1*1000), t1-1 , round(st2*1000), t2-1 )
-                time.sleep(0.01)
+                # Wait longer between showload commands to allow queue to process
+                # With blocking approach, each command waits for response (~150-250ms)
+                # So we need to space out commands to prevent queue overflow
+                time.sleep(0.25)
 
     #Figure out which ones we need to preload (native) and which we fire via. daemon (433 Bilusocn).. or if we have zones+targets that we cant fire. Annotates firing array.
     def load_targets_to_devices(self, firing_array, showId):
@@ -362,7 +402,10 @@ class BYHProtocolHandler:
                 # Include repeat count in the command itself
                 cmd = f"{cmdpre} {rcv}{cmdpost} {repeat}"
                 print(f"Sending cmd: {cmd} (repeat={repeat})")
-                self.parent.send_serial_command(cmd) 
+                self.parent.send_serial_command(cmd)
+                # Add delay between commands to prevent queue overflow with blocking approach
+                # Each command waits for response (~150-250ms), so space them out
+                time.sleep(0.25)
             else:
                 print(f"Not sendinf to {rcv} as not connected.")
         

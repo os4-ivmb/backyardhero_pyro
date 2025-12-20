@@ -17,11 +17,14 @@ import { FaSpinner } from 'react-icons/fa';
 // v1.0.0: Initial version - Basic receiver display with battery, connectivity, and cue status
 // v1.1.0: Added health bar at top of receiver cards displaying successPercent (0-100% with red-to-green gradient)
 // v1.2.0: Increased connection timeout threshold from 5 seconds to 10 seconds
-const FW_VERSION = "1.2.0";
+// v1.3.0: Added latency scale bar (1s=100%/green, 10s=0%/red) with smooth animations, moved health bar to bottom with percentage text
+const FW_VERSION = "1.3.0";
 
 function SingleReceiver({ rcv_name, receiver, showMapping, showId }) {
   const [popup, setPopup] = useState(null);
   const receiverRef = useRef(null);
+  const [smoothedLatency, setSmoothedLatency] = useState(0);
+  const latencyRef = useRef(0);
 
   const handleTargetClick = (target, item, event) => {
     if (item) {
@@ -67,7 +70,44 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId }) {
     isConnectionGood = receiver.connectionStatus === "good";
   }
 
-  const lfx = (latency / 1000).toFixed(1)
+  // Smooth latency value to reduce jumpiness (exponential moving average)
+  useEffect(() => {
+    if (receiver.status && receiver.status.lmt && latency > 0) {
+      // Use exponential moving average with smoothing factor of 0.9 (highly responsive)
+      // Higher value = more responsive, lower value = smoother but slower
+      const smoothingFactor = 0.8;
+      const newSmoothed = latencyRef.current === 0 
+        ? latency 
+        : latencyRef.current + (latency - latencyRef.current) * smoothingFactor;
+      
+      latencyRef.current = newSmoothed;
+      setSmoothedLatency(newSmoothed);
+    } else {
+      latencyRef.current = 0;
+      setSmoothedLatency(0);
+    }
+  }, [latency, receiver.status?.lmt]);
+
+  // Use smoothed latency for both display and bar calculation for consistency
+  const latencyForDisplay = smoothedLatency > 0 ? smoothedLatency : latency;
+  const lfx = (latencyForDisplay / 1000).toFixed(1)
+
+  // Calculate latency percentage for visual bar (0 sec = 100%, 10 sec = 0%)
+  // Use smoothed latency so bar moves smoothly
+  // 5 seconds = 50% (halfway point)
+  let latencyPercent = null;
+  if (receiver.status && receiver.status.lmt && latencyForDisplay >= 0) {
+    if (lfx <= 1) {
+      latencyPercent = 100;
+    } else if (lfx >= 10) {
+      latencyPercent = 0;
+    } else {
+      // Linear interpolation: 100% at 0s, 0% at 10s
+      latencyPercent = 100 - (lfx / 10) * 100;
+    }
+    // Clamp to ensure valid percentage
+    latencyPercent = Math.max(0, Math.min(100, latencyPercent));
+  }
 
   // Get successPercent for health bar (0-100)
   const successPercent = receiver.status?.successPercent ?? null;
@@ -96,22 +136,6 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId }) {
       ref={receiverRef}
       className={`border rounded-xl p-4 ${bgColor} text-white shadow-md dark:bg-gray-700 dark:border-gray-600 flex flex-col gap-3 w-72 relative`}
     >
-      {/* Health Bar */}
-      {healthPercent !== null && (
-        <div className="w-full h-2 bg-gray-700 rounded-full overflow-hidden -mt-4 -mx-4 mb-1">
-          <div
-            className="h-full transition-all duration-300 ease-out"
-            style={{
-              width: `${healthPercent}%`,
-              backgroundColor: healthPercent >= 50 
-                ? `rgb(${Math.floor(255 * (1 - (healthPercent - 50) / 50))}, 255, 0)` 
-                : `rgb(255, ${Math.floor(255 * (healthPercent / 50))}, 0)`
-            }}
-            title={`Success Rate: ${healthPercent}%`}
-          />
-        </div>
-      )}
-      
       {/* Receiver Header */}
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold">{rcv_name}</h2>
@@ -225,9 +249,55 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId }) {
       {/* New Latency Display Section */}
       {isConnectionGood && (
         <div className="text-sm text-gray-400 mt-auto pt-2 border-t border-gray-700">
-          <div className="flex items-center justify-center gap-1">
+          <div className="flex items-center justify-center gap-1 mb-2">
             <MdAccessTime />
             <span>Latency: {lfx}s (RTT: {txmtLatency}ms)</span>
+          </div>
+          {/* Latency Bar */}
+          {latencyPercent !== null && (
+            <div className="relative w-full">
+              <div className="w-full h-1 bg-gray-700 rounded-full overflow-hidden opacity-80">
+                <div
+                  className="h-full transition-all duration-1000 ease-out"
+                  style={{
+                    width: `${latencyPercent}%`,
+                    backgroundColor: latencyPercent >= 50 
+                      ? `rgba(${Math.floor(225 * (1 - (latencyPercent - 50) / 50))}, 225, 0, 0.85)` 
+                      : `rgba(225, ${Math.floor(225 * (latencyPercent / 50))}, 0, 0.85)`
+                  }}
+                  title={`Latency Quality: ${latencyPercent.toFixed(0)}%`}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Health Bar - Muted at bottom */}
+      {healthPercent !== null && (
+        <div className="relative w-full mt-2">
+          {/* Percentage text above the bar end */}
+          <div
+            className="absolute text-xs text-gray-500 -top-4 transition-all duration-300 ease-out"
+            style={{
+              left: `${healthPercent}%`,
+              transform: 'translateX(-50%)'
+            }}
+          >
+            {healthPercent}%
+          </div>
+          {/* Health bar */}
+          <div className="w-full h-1 bg-gray-700 rounded-full overflow-hidden opacity-80">
+            <div
+              className="h-full transition-all duration-300 ease-out"
+              style={{
+                width: `${healthPercent}%`,
+                backgroundColor: healthPercent >= 50 
+                  ? `rgba(${Math.floor(225 * (1 - (healthPercent - 50) / 50))}, 225, 0, 0.85)` 
+                  : `rgba(225, ${Math.floor(225 * (healthPercent / 50))}, 0, 0.85)`
+              }}
+              title={`Success Rate: ${healthPercent}%`}
+            />
           </div>
         </div>
       )}
@@ -301,8 +371,221 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       }
     }, [systemConfig.receivers, stagedShow, stateData.fw_state?.active_protocol, stateData.fw_state?.receivers]);
 
+    // Calculate system health metrics
+    const calculateSystemHealth = () => {
+      const onlineReceivers = Object.entries(receivers).filter(([ident, receiver]) => {
+        if (!receiver.status || !receiver.status.lmt) return false;
+        const latency = Date.now() - receiver.status.lmt;
+        return latency <= 10000; // 10 second timeout
+      });
+
+      if (onlineReceivers.length === 0) {
+        return { avgLatencyPercent: null, worstLatencyPercent: null, worstLatencyIdent: null, avgSuccessPercent: null, worstSuccessPercent: null, worstSuccessIdent: null, continuityPercent: null, continuityCount: null, continuityTotal: null };
+      }
+
+      // Calculate latency metrics with ident tracking
+      const latencyData = onlineReceivers.map(([ident, receiver]) => {
+        const latency = Date.now() - receiver.status.lmt;
+        const lfx = latency / 1000;
+        let percent;
+        if (lfx <= 1) percent = 100;
+        else if (lfx >= 10) percent = 0;
+        else percent = 100 - (lfx / 10) * 100;
+        return { ident, percent };
+      });
+
+      const avgLatencyPercent = latencyData.reduce((sum, d) => sum + d.percent, 0) / latencyData.length;
+      const worstLatency = latencyData.reduce((worst, current) => current.percent < worst.percent ? current : worst);
+      const worstLatencyPercent = worstLatency.percent;
+      const worstLatencyIdent = worstLatency.ident;
+
+      // Calculate success percent metrics with ident tracking
+      const successData = onlineReceivers
+        .map(([ident, receiver]) => ({
+          ident,
+          percent: receiver.status?.successPercent ?? null
+        }))
+        .filter(d => d.percent !== null);
+
+      if (successData.length === 0) {
+        return { avgLatencyPercent, worstLatencyPercent, worstLatencyIdent, avgSuccessPercent: null, worstSuccessPercent: null, worstSuccessIdent: null, continuityPercent: null, continuityCount: null, continuityTotal: null };
+      }
+
+      const avgSuccessPercent = successData.reduce((sum, d) => sum + d.percent, 0) / successData.length;
+      const worstSuccess = successData.reduce((worst, current) => current.percent < worst.percent ? current : worst);
+      const worstSuccessPercent = worstSuccess.percent;
+      const worstSuccessIdent = worstSuccess.ident;
+
+      // Calculate continuity metrics (only if show is loaded)
+      let continuityPercent = null;
+      let continuityCount = null;
+      let continuityTotal = null;
+      
+      if (stagedShow && targetRcvMap && Object.keys(targetRcvMap).length > 0) {
+        let totalCues = 0;
+        let connectedCues = 0;
+        
+        Object.entries(receivers).forEach(([receiverKey, receiver]) => {
+          const receiverMapping = targetRcvMap[receiverKey];
+          if (!receiverMapping || !receiver.cues) return;
+          
+          // Iterate through all zones and targets in the receiver
+          Object.entries(receiver.cues).forEach(([zoneKey, targets]) => {
+            const zoneMapping = receiverMapping[zoneKey];
+            if (!zoneMapping) return;
+            
+            targets.forEach((target, targetIndex) => {
+              // Only count cues that have items assigned in the show
+              if (zoneMapping[target]) {
+                totalCues++;
+                
+                // Check continuity for this cue
+                if (receiver.status?.continuity && receiver.status.continuity.length === 2) {
+                  const blockIndex = Math.floor(targetIndex / 64);
+                  const bitIndex = targetIndex % 64;
+                  const block = receiver.status.continuity[blockIndex];
+                  if (block !== undefined) {
+                    const continuityActive = (BigInt(block) & (BigInt(1) << BigInt(bitIndex))) !== BigInt(0);
+                    if (continuityActive) {
+                      connectedCues++;
+                    }
+                  }
+                }
+              }
+            });
+          });
+        });
+        
+        if (totalCues > 0) {
+          continuityTotal = totalCues;
+          continuityCount = connectedCues;
+          continuityPercent = (connectedCues / totalCues) * 100;
+        }
+      }
+
+      return { avgLatencyPercent, worstLatencyPercent, worstLatencyIdent, avgSuccessPercent, worstSuccessPercent, worstSuccessIdent, continuityPercent, continuityCount, continuityTotal };
+    };
+
+    const systemHealth = calculateSystemHealth();
+
     return (
         <div className="w-full">
+            {/* System Health Bar - Fixed at top */}
+            {(systemHealth.avgLatencyPercent !== null || systemHealth.avgSuccessPercent !== null || systemHealth.continuityPercent !== null) && (
+              <div className="sticky top-0 z-10 bg-gray-900 border-b border-gray-700 py-2 px-3">
+                <div className="max-w-7xl mx-auto">
+                  <div className="flex gap-4">
+                    {/* Latency Health Bar */}
+                    {systemHealth.avgLatencyPercent !== null && (
+                      <div className="flex-1">
+                        <div className="text-xs text-gray-500 mb-0.5">Latency</div>
+                        <div className="relative w-full h-1.5 bg-gray-800 rounded-full overflow-visible">
+                          {/* Average bar with full 0-100 color gradient */}
+                          <div
+                            className="absolute h-full transition-all duration-1000 ease-out rounded-full"
+                            style={{
+                              width: `${systemHealth.avgLatencyPercent}%`,
+                              backgroundColor: systemHealth.avgLatencyPercent >= 50 
+                                ? `rgba(${Math.floor(225 * (1 - (systemHealth.avgLatencyPercent - 50) / 50))}, 225, 0, 0.85)` 
+                                : `rgba(225, ${Math.floor(225 * (systemHealth.avgLatencyPercent / 50))}, 0, 0.85)`
+                            }}
+                          />
+                          {/* Red tick marker for worst value */}
+                          <div
+                            className="absolute top-0 w-0.5 h-full bg-red-500 transition-all duration-1000 ease-out"
+                            style={{
+                              left: `${systemHealth.worstLatencyPercent}%`,
+                              transform: 'translateX(-50%)',
+                              boxShadow: '0 0 4px 2px rgba(239, 68, 68, 0.5)'
+                            }}
+                          />
+                          {/* Worst receiver ident */}
+                          {systemHealth.worstLatencyIdent && (
+                            <div
+                              className="absolute text-[10px] text-gray-300 transition-all duration-1000 ease-out whitespace-nowrap z-10"
+                              style={{
+                                left: `${systemHealth.worstLatencyPercent}%`,
+                                top: '-14px',
+                                transform: 'translateX(-100%)',
+                                marginRight: '4px',
+                                textShadow: '0 1px 2px rgba(0, 0, 0, 0.8), 0 0 4px rgba(0, 0, 0, 0.6)'
+                              }}
+                            >
+                              {systemHealth.worstLatencyIdent}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    {/* Success Percent Health Bar */}
+                    {systemHealth.avgSuccessPercent !== null && (
+                      <div className="flex-1">
+                        <div className="text-xs text-gray-500 mb-0.5">Success Rate</div>
+                        <div className="relative w-full h-1.5 bg-gray-800 rounded-full overflow-visible">
+                          {/* Average bar with full 0-100 color gradient */}
+                          <div
+                            className="absolute h-full transition-all duration-1000 ease-out rounded-full"
+                            style={{
+                              width: `${systemHealth.avgSuccessPercent}%`,
+                              backgroundColor: systemHealth.avgSuccessPercent >= 50 
+                                ? `rgba(${Math.floor(225 * (1 - (systemHealth.avgSuccessPercent - 50) / 50))}, 225, 0, 0.85)` 
+                                : `rgba(225, ${Math.floor(225 * (systemHealth.avgSuccessPercent / 50))}, 0, 0.85)`
+                            }}
+                          />
+                          {/* Red tick marker for worst value */}
+                          <div
+                            className="absolute top-0 w-0.5 h-full bg-red-500 transition-all duration-1000 ease-out"
+                            style={{
+                              left: `${systemHealth.worstSuccessPercent}%`,
+                              transform: 'translateX(-50%)',
+                              boxShadow: '0 0 4px 2px rgba(239, 68, 68, 0.5)'
+                            }}
+                          />
+                          {/* Worst receiver ident */}
+                          {systemHealth.worstSuccessIdent && (
+                            <div
+                              className="absolute text-[10px] text-gray-300 transition-all duration-1000 ease-out whitespace-nowrap z-10"
+                              style={{
+                                left: `${systemHealth.worstSuccessPercent}%`,
+                                top: '-14px',
+                                transform: 'translateX(-100%)',
+                                marginRight: '4px',
+                                textShadow: '0 1px 2px rgba(0, 0, 0, 0.8), 0 0 4px rgba(0, 0, 0, 0.6)'
+                              }}
+                            >
+                              {systemHealth.worstSuccessIdent}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    {/* Continuity Health Bar */}
+                    {systemHealth.continuityPercent !== null && (
+                      <div className="flex-1">
+                        <div className="text-xs text-gray-500 mb-0.5">Continuity</div>
+                        <div className="relative w-full h-1.5 bg-gray-800 rounded-full overflow-visible">
+                          {/* Continuity bar with full 0-100 color gradient */}
+                          <div
+                            className="absolute h-full transition-all duration-1000 ease-out rounded-full"
+                            style={{
+                              width: `${systemHealth.continuityPercent}%`,
+                              backgroundColor: systemHealth.continuityPercent >= 50 
+                                ? `rgba(${Math.floor(225 * (1 - (systemHealth.continuityPercent - 50) / 50))}, 225, 0, 0.85)` 
+                                : `rgba(225, ${Math.floor(225 * (systemHealth.continuityPercent / 50))}, 0, 0.85)`
+                            }}
+                          />
+                        </div>
+                        {/* Count text below the bar */}
+                        <div className="text-xs text-gray-400 mt-0.5 text-center">
+                          {systemHealth.continuityCount}/{systemHealth.continuityTotal} connected
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Header with Show Loadout button */}
             <div className="flex justify-between items-center p-4 border-b border-gray-700">
                 <h1 className="text-2xl font-bold text-white">Receivers</h1>
