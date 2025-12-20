@@ -170,6 +170,7 @@ class FireworkDaemon:
         self.serial_baud = BAUD_RATE
         self.serial_addr = SERIAL_PORT
         self.loaded_show_name = None
+        self.loaded_show_id = None
         self.time_cursor = None
         self.protocol_handler = None
         self.delegate_start_to_client = True
@@ -628,7 +629,13 @@ class FireworkDaemon:
             self.protocol_handler.unload_show()
         self.current_schedule = None
         self.loaded_show_name = None
+        self.loaded_show_id = None
         self.write_time_cursor(-1)
+        
+    def signal_show_loaded(self, show_id):
+        self.loaded_show_id = show_id
+        self.led_handler.update("show_load_state", LOAD_STATE.LOADED.value)
+        self.write_time_cursor(0)
 
     def load_show(self, show_id):
         """Load a show from the database, process it, and save the runtime payload."""
@@ -676,6 +683,7 @@ class FireworkDaemon:
                     self.led_handler.update("show_load_state", LOAD_STATE.LOADED.value)
                     print(f"Show ID {show_id} loaded and processed.")
                     self.loaded_show_name = row[0]
+                    self.loaded_show_id = show_id
                     self.write_time_cursor(0)
                     # Set the schedule but don't start it yet
                     self.current_schedule = firing_array
@@ -782,6 +790,7 @@ class FireworkDaemon:
             "daemon_lup": int(datetime.now().timestamp() * 1000),
             "show_loaded": self.protocol_handler is not None and self.protocol_handler.show_loaded,
             "loaded_show_name": self.loaded_show_name,
+            "loaded_show_id": self.loaded_show_id,
             "show_running": any(thread.is_alive() for thread in self.command_timer_threads),
             "device_is_transmitting": self.last_serial_sent is not None and (datetime.now() - self.last_serial_sent).total_seconds() <= 10,
             "device_is_armed": gpio_handler.read_key(ARMING_GPIO_KEY) == LOW,

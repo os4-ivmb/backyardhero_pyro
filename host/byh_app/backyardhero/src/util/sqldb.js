@@ -15,7 +15,9 @@ function initializeDatabase() {
       runtime_payload TEXT NOT NULL, -- To hold very large serialized JSON
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
       authorization_code TEXT NOT NULL,
-      protocol TEXT
+      protocol TEXT,
+      audio_file TEXT, -- To store audio file path and metadata as JSON
+      receiver_locations TEXT -- To store receiver positions as JSON
     );
   `;
 
@@ -49,10 +51,10 @@ function initializeDatabase() {
 initializeDatabase(); // Initialize database on load
 
 export const showQueries = {
-  insert: db.prepare(`INSERT INTO Show (name, duration, version, runtime_version, display_payload, runtime_payload, authorization_code, protocol)
-                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+  insert: db.prepare(`INSERT INTO Show (name, duration, version, runtime_version, display_payload, runtime_payload, authorization_code, protocol, audio_file, receiver_locations)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   getAll: db.prepare(`SELECT * FROM Show`),
-  update: db.prepare(`UPDATE Show SET name = ?, duration = ?, version = ?, runtime_version = ?, display_payload = ?, runtime_payload = ?, authorization_code = ?, protocol = ? WHERE id = ?`),
+  update: db.prepare(`UPDATE Show SET name = ?, duration = ?, version = ?, runtime_version = ?, display_payload = ?, runtime_payload = ?, authorization_code = ?, protocol = ?, audio_file = ?, receiver_locations = ? WHERE id = ?`),
   delete: db.prepare(`DELETE FROM Show WHERE id = ?`), // Delete query
 };
 

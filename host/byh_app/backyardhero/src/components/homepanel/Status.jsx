@@ -157,9 +157,9 @@ export default function Status() {
                     <div className="hidden group-hover:block text-xs p-1">{`${stateData.fw_state?.settings?.rf?.addr}@${stateData.fw_state?.settings?.rf?.baud}`}</div>
                 </div>
                 <div className={`${statusItemBaseClass} ${stateData.fw_state?.manual_fire_active ? 'bg-yellow-500 text-yellow-900' : 'bg-green-600 text-white'}`}>{stateData.fw_state?.manual_fire_active ? "Manual Fire" : "MF Disarm"}</div>
-                <div className={`${statusItemBaseClass} ${stateData.fw_state?.device_is_armed ? 'bg-red-600 text-white' : 'bg-gray-500 text-white'}`}>{stateData.fw_state?.device_is_armed ? "ARMED" : "DISARMED"}</div>
+                <div className={`${statusItemBaseClass} ${stateData.fw_state?.device_is_armed ? 'armed-striped text-black' : 'bg-gray-500 text-white'}`}>{stateData.fw_state?.device_is_armed ? "ARMED" : "DISARMED"}</div>
                 
-                <div className={`${statusItemBaseClass} ${stateData.fw_state?.loaded_show_name ? 'bg-blue-600 text-white' : 'bg-gray-400 text-gray-800'}`}>{stateData.fw_state?.loaded_show_name ? `${stateData.fw_state?.loaded_show_name} loaded`: `No show loaded`}</div>
+                <div className={`${statusItemBaseClass} ${stateData.fw_state?.loaded_show_id ? 'bg-blue-600 text-white' : 'bg-gray-400 text-gray-800'}`}>{stateData.fw_state?.loaded_show_id ? `Show Loaded`: `No show loaded`}</div>
                 <div className={`${statusItemBaseClass} ${stateData.fw_state?.device_is_transmitting ? 'bg-yellow-500 text-yellow-900' : 'bg-gray-400 text-gray-800'}`}>{stateData.fw_state?.device_is_transmitting ? "TX ACTIVE": "NO TX"}</div>
                 <div className={`${statusItemBaseClass} ${(stateData.fw_cursor >= 0 ? 'bg-green-600' : 'bg-blue-600')} text-white flex flex-col items-center justify-center`}>
                     <span className="text-xxs -mb-0.5 leading-tight">Cursor @</span>
@@ -167,6 +167,27 @@ export default function Status() {
                 </div>
                 <div className={`${statusItemBaseClass} ${showRunClass.replace('-800', '-600').replace('-500', '-600')} text-white`}>{showRunLabel}</div>
             </div>
+
+            {/* CSS for armed striped background */}
+            <style jsx>{`
+                .armed-striped {
+                    color: #FFF;
+                    font-size: 20px;
+                    text-shadow: 
+                        2px 2px 0px #000, 
+                        -2px -2px 0px #000, 
+                        2px -2px 0px #000, 
+                        -2px 2px 0px #000;
+                    background: repeating-linear-gradient(
+                        45deg,
+                        #fbbf24,
+                        #fbbf24 10px,
+                        #000000 10px,
+                        #000000 20px
+                    );
+                    font-weight: bold;
+                }
+            `}</style>
         </div>
     );
 }

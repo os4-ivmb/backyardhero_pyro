@@ -11,6 +11,30 @@ const useAppStore = create((set, get) => ({
     try {
       const { data } = await axios.get('/api/shows');
       const showById = data.reduce((acc, show) => {
+        // Parse audio_file JSON string if it exists
+        if (show.audio_file) {
+          try {
+            show.audioFile = JSON.parse(show.audio_file);
+          } catch (e) {
+            console.error('Failed to parse audio_file for show:', show.id, e);
+            show.audioFile = null;
+          }
+        } else {
+          show.audioFile = null;
+        }
+        
+        // Parse receiver_locations JSON string if it exists
+        if (show.receiver_locations) {
+          try {
+            show.receiverLocations = JSON.parse(show.receiver_locations);
+          } catch (e) {
+            console.error('Failed to parse receiver_locations for show:', show.id, e);
+            show.receiverLocations = null;
+          }
+        } else {
+          show.receiverLocations = null;
+        }
+        
         acc[show.id] = show;
         return acc;
       }, {});

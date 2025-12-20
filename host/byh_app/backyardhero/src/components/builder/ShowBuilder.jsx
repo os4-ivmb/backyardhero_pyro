@@ -5,6 +5,7 @@ import FusedLineBuilderModal from "./FusedLineBuilderModal";
 import ShowTargetGrid from "./ShowTargetGrid";
 import ShowStateHeader from "./ShowStateHeader";
 import VideoPreviewPopup from "../common/VideoPreviewPopup";
+import SpatialLayoutMap from "./SpatialLayoutMap";
 import WaveSurfer from 'wavesurfer.js';
 
 export const mergeCues = (receivers) => {
@@ -507,7 +508,8 @@ const AudioWaveform = ({ onTimeUpdate, currentTime, duration, isPlaying, onPlayP
           name: file.name,
           size: file.size,
           type: file.type,
-          lastModified: file.lastModified
+          lastModified: file.lastModified,
+          file: file // Pass the actual file object for upload
         });
       }
     }
@@ -573,52 +575,202 @@ const AudioWaveform = ({ onTimeUpdate, currentTime, duration, isPlaying, onPlayP
 };
 
 const ShowBuilder = (props) => {
-  const { inventory, inventoryById, stagedShow, setStagedShow, systemConfig } = useAppStore();
+  const { systemConfig, inventory, inventoryById, stagedShow, setStagedShow, updateShow } = useAppStore();
   const [items, setItems] = useState([]);
-  const [isAddModalOpen, setAddModalOpen] = useState(false);
-  const [addItemStartTime, setAddItemStartTime] = useState(0);
-  const [currentIndex, setCurrentIndex] = useState(50);
-  const [selectedItem, setSelectedItem] = useState(false);
-  const [selectedItems, setSelectedItems] = useState([]); // Multi-select state
-  const [isPopupVisible, setPopupVisible] = useState(false);
   const [showMetadata, setShowMetadata] = useState({});
-  const [availableDevices, setAvailableDevices] = useState({});
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [addItemStartTime, setAddItemStartTime] = useState(0);
+  const [selectedItem, setSelectedItem] = useState(false);
+  const [selectedItems, setSelectedItems] = useState([]);
   const [isChainTimingModalOpen, setIsChainTimingModalOpen] = useState(false);
-  
-  // Audio state
+  const [isPopupVisible, setPopupVisible] = useState(false);
+  const [audioFile, setAudioFile] = useState(null);
   const [audioCurrentTime, setAudioCurrentTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
+  const [availableDevices, setAvailableDevices] = useState({});
+  const [receiverLocations, setReceiverLocations] = useState({});
+  const [currentIndex, setCurrentIndex] = useState(50);
+  const [itemsFixed, setItemsFixed] = useState(false);
 
   const [isInitialized, setIsInitialized] = useState(false);
 
   useEffect(() => {
-    let tprotocol = showMetadata.protocol
-    if(!tprotocol && systemConfig.receivers){
+
+    
+    let tprotocol = showMetadata.protocol;
+    
+    // If no protocol is set, set the first available one
+    if(!tprotocol && systemConfig.protocols && Object.keys(systemConfig.protocols).length > 0){
       tprotocol = Object.keys(systemConfig.protocols)[0];
+      console.log('Setting default protocol:', tprotocol);
       setShowMetadata((showmd) => ({ ...showmd, protocol: tprotocol }));
+      return; // Exit early, let the next render handle it
     }
 
-    if (tprotocol && systemConfig.receivers) {
+    console.log('Using protocol:', tprotocol);
 
-      const allowedTypes = Object.keys(systemConfig.types).filter((typekey) => {
-        return systemConfig.types[typekey].supported_protocols.includes(tprotocol)
-      })
-
-
-      setAvailableDevices(
-        mergeCues(
-          Object.fromEntries(
-            Object.entries(systemConfig.receivers).filter(
-              ([key, val]) =>{
-                return allowedTypes.includes(val.type)
-              }
-            )
-          )
-        )
-      );
+    if (tprotocol && systemConfig.receivers && systemConfig.protocols) {
+      const protocol = systemConfig.protocols[tprotocol];
+      console.log('Found protocol object:', protocol);
+      
+      if (protocol && protocol.receivers) {
+        console.log('Protocol receivers:', protocol.receivers);
+        console.log('Available system receivers:', Object.keys(systemConfig.receivers));
+        
+        const filteredReceivers = Object.fromEntries(
+          Object.entries(systemConfig.receivers).filter(([key, receiver]) => {
+            const isIncluded = protocol.receivers.includes(key);
+            console.log(`Receiver ${key}: ${isIncluded ? 'included' : 'excluded'}`);
+            return isIncluded;
+          })
+        );
+        
+        console.log('Filtered receivers:', filteredReceivers);
+        
+        const availableDevicesData = mergeCues(filteredReceivers);
+        console.log('Final availableDevices:', availableDevicesData);
+        
+        // If mergeCues returns empty, try using the receivers directly
+        if (Object.keys(availableDevicesData).length === 0 && Object.keys(filteredReceivers).length > 0) {
+          console.log('mergeCues returned empty, using receivers directly');
+          // Create a simple mapping from receiver keys to their cues
+          const directMapping = {};
+          Object.entries(filteredReceivers).forEach(([receiverKey, receiver]) => {
+            if (receiver.cues) {
+              Object.entries(receiver.cues).forEach(([zone, targets]) => {
+                if (!directMapping[zone]) {
+                  directMapping[zone] = [];
+                }
+                directMapping[zone].push(...targets);
+              });
+            }
+          });
+          console.log('Direct mapping:', directMapping);
+          setAvailableDevices(directMapping);
+        } else {
+          setAvailableDevices(availableDevicesData);
+        }
+      } else {
+        console.log('Protocol or protocol.receivers is missing, using all receivers');
+        // If protocol.receivers doesn't exist, use all available receivers
+        const availableDevicesData = mergeCues(systemConfig.receivers);
+        console.log('Using all receivers, availableDevices:', availableDevicesData);
+        
+        // If mergeCues returns empty, try using the receivers directly
+        if (Object.keys(availableDevicesData).length === 0 && Object.keys(systemConfig.receivers).length > 0) {
+          console.log('mergeCues returned empty, using all receivers directly');
+          const directMapping = {};
+          Object.entries(systemConfig.receivers).forEach(([receiverKey, receiver]) => {
+            if (receiver.cues) {
+              Object.entries(receiver.cues).forEach(([zone, targets]) => {
+                if (!directMapping[zone]) {
+                  directMapping[zone] = [];
+                }
+                directMapping[zone].push(...targets);
+              });
+            }
+          });
+          console.log('Direct mapping from all receivers:', directMapping);
+          setAvailableDevices(directMapping);
+        } else {
+          setAvailableDevices(availableDevicesData);
+        }
+      }
+    } else {
+      console.log('Missing required data:', { tprotocol, hasReceivers: !!systemConfig.receivers, hasProtocols: !!systemConfig.protocols });
+      setAvailableDevices({});
     }
-  }, [showMetadata.protocol, systemConfig.receivers]);
+  }, [showMetadata.protocol, systemConfig.receivers, systemConfig.protocols]);
+
+  // Debug useEffect to monitor availableDevices changes
+  useEffect(() => {
+    console.log('availableDevices changed:', availableDevices);
+    console.log('availableDevices keys:', Object.keys(availableDevices));
+  }, [availableDevices]);
+
+  useEffect(() => {
+    if (items.length && !itemsFixed) {
+      // Reassign IDs sequentially starting from 1
+      const updatedItems = items.map((item, index) => ({
+        ...item,
+        id: index + 1
+      }));
+      setItems(updatedItems);
+      setItemsFixed(true);
+    }
+  }, [items, itemsFixed]);
+
+  useEffect(() => {
+    console.log('items changed:', items);
+    if(items.length > 0){
+      setCurrentIndex(items.reduce((max, obj) => (obj.id > max.id ? obj : max), items[0]).id + 1);
+    }
+  }, [items]);
+
+  useEffect(() => {
+    if (stagedShow.id) {
+      setShowMetadata(stagedShow);
+      const newItems = JSON.parse(stagedShow.display_payload);
+      const maxId = newItems.reduce((max, obj) => (obj.id > max.id ? obj : max), newItems[0]).id;
+      refreshInventory(newItems);
+      console.log(`CURRENT INDEX IS ${maxId}`);
+      // If editing a show with audio, set the audio file for the player
+      if (stagedShow.audioFile) {
+        setAudioFile(stagedShow.audioFile);
+      } else {
+        setAudioFile(null);
+      }
+      
+      // Load existing receiver locations from show data
+      if (stagedShow.receiver_locations) {
+        try {
+          const parsedLocations = JSON.parse(stagedShow.receiver_locations);
+          setReceiverLocations(parsedLocations);
+        } catch (e) {
+          console.error('Failed to parse receiver_locations for show:', stagedShow.id, e);
+          initializeDefaultLocations();
+        }
+      } else {
+        initializeDefaultLocations();
+      }
+    }
+  }, [stagedShow]);
+
+  const initializeDefaultLocations = () => {
+    if (systemConfig.receivers && systemConfig.protocols) {
+      const protocol = systemConfig.protocols[showMetadata.protocol];
+      if (protocol && protocol.receivers) {
+        const receivers = Object.keys(systemConfig.receivers).filter(key => 
+          protocol.receivers.includes(key)
+        );
+        const defaultLocations = {};
+        receivers.forEach((receiverKey, index) => {
+          const row = Math.floor(index / 3);
+          const col = index % 3;
+          defaultLocations[receiverKey] = {
+            x: 100 + col * 150,
+            y: 100 + row * 150
+          };
+        });
+        setReceiverLocations(defaultLocations);
+      } else {
+        // If protocol.receivers doesn't exist, use all receivers
+        console.log('Initializing default locations for all receivers');
+        const receivers = Object.keys(systemConfig.receivers);
+        const defaultLocations = {};
+        receivers.forEach((receiverKey, index) => {
+          const row = Math.floor(index / 3);
+          const col = index % 3;
+          defaultLocations[receiverKey] = {
+            x: 100 + col * 150,
+            y: 100 + row * 150
+          };
+        });
+        setReceiverLocations(defaultLocations);
+      }
+    }
+  };
 
   const refreshInventory = (items_in) => {
     setItems((items) => (items_in || items).map((item) => {
@@ -633,17 +785,6 @@ const ShowBuilder = (props) => {
   };
 
   useEffect(() => {
-    if (stagedShow.id) {
-      setShowMetadata(stagedShow);
-      const newItems = JSON.parse(stagedShow.display_payload);
-      const maxId = newItems.reduce((max, obj) => (obj.id > max.id ? obj : max), newItems[0]).id;
-      refreshInventory(newItems);
-      setCurrentIndex(maxId + 5 || 50);
-      console.log(`CURRENT INDEX IS ${maxId}`);
-    }
-  }, [stagedShow]);
-
-  useEffect(() => {
     if (props.showId && !isInitialized) {
       // any additional initialization code
     }
@@ -651,17 +792,16 @@ const ShowBuilder = (props) => {
 
   const clearEditorFnc = () => {
     setItems([]);
-    setStagedShow({});
     setShowMetadata({name:""});
   };
 
   const openAddModal = (time) => {
     setAddItemStartTime(time);
-    setAddModalOpen(true);
+    setIsAddModalOpen(true);
   };
 
   const closeModal = () => {
-    setAddModalOpen(false);
+    setIsAddModalOpen(false);
   };
 
   const addItemToTimeline = (item) => {
@@ -724,6 +864,72 @@ const ShowBuilder = (props) => {
     setIsAudioPlaying(playing);
   };
 
+  const handleAudioFileChange = async (fileInfo) => {
+    setAudioFile(fileInfo);
+    
+    // Upload the actual file to get a persistent URL
+    try {
+      const formData = new FormData();
+      formData.append('audio', fileInfo.file);
+      
+      const response = await fetch('/api/shows/upload-audio', {
+        method: 'POST',
+        body: formData
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        const audioUrl = result.url;
+        
+        // Update show metadata with audio info and URL
+        console.log("SSM", showMetadata)
+        setShowMetadata(prev => ({
+          ...prev,
+          audioFile: {
+            ...fileInfo,
+            url: audioUrl
+          }
+        }));
+      } else {
+        console.error('Failed to upload audio file');
+      }
+    } catch (error) {
+      console.error('Error uploading audio file:', error);
+      // Fallback: just save the file info without URL
+      setShowMetadata(prev => ({
+        ...prev,
+        audioFile: fileInfo
+      }));
+    }
+  };
+
+  // Remove audio from show handler
+  const handleRemoveAudio = () => {
+    setShowMetadata(prev => ({ ...prev, audioFile: null }));
+    setAudioFile(null);
+  };
+
+  // Save receiver locations to show data
+  const saveReceiverLocations = async () => {
+    if (!stagedShow.id) {
+      alert("Please save the show first before saving receiver locations.");
+      return;
+    }
+
+    try {
+      const updatedShowData = {
+        ...stagedShow,
+        receiver_locations: JSON.stringify(receiverLocations)
+      };
+      
+      await updateShow(stagedShow.id, updatedShowData);
+      alert("Receiver locations saved successfully!");
+    } catch (error) {
+      console.error('Failed to save receiver locations:', error);
+      alert("Failed to save receiver locations. Please try again.");
+    }
+  };
+
   return (
     <div className="p-4">
       <h1 className="text-xl mb-4">Show Editor</h1>
@@ -737,7 +943,7 @@ const ShowBuilder = (props) => {
         clearEditor={clearEditorFnc}
         protocols={systemConfig.protocols}
       />
-      {availableDevices ? (
+      {availableDevices && Object.keys(availableDevices).length > 0 ? (
         <div>
           {/* Audio Waveform */}
           <AudioWaveform
@@ -746,10 +952,19 @@ const ShowBuilder = (props) => {
             duration={audioDuration}
             isPlaying={isAudioPlaying}
             onPlayPause={handleAudioPlayPause}
-            onAudioFileChange={(fileInfo) => {
-              // Handle audio file change
-            }}
+            onAudioFileChange={handleAudioFileChange}
           />
+          {/* Remove Audio Button */}
+          {audioFile && (
+            <div className="mb-2 flex justify-end">
+              <button
+                className="bg-red-700 hover:bg-red-800 text-white px-3 py-1 rounded text-sm"
+                onClick={handleRemoveAudio}
+              >
+                Remove Audio
+              </button>
+            </div>
+          )}
           
           {/* Chain Timing Button */}
           {selectedItems.length >= 2 && (
@@ -808,9 +1023,28 @@ const ShowBuilder = (props) => {
             setItems={setItems} 
             availableDevices={availableDevices} 
           />
+          
+          {/* Spatial Layout Section */}
+          <SpatialLayoutMap
+            receivers={systemConfig.receivers}
+            items={items}
+            receiverLocations={receiverLocations}
+            setReceiverLocations={setReceiverLocations}
+            onSaveLocations={saveReceiverLocations}
+          />
         </div>
       ) : (
-        "Need to select a protocol"
+        <div className="text-center p-8">
+          <h2 className="text-xl font-bold text-gray-700 mb-4">Show Editor</h2>
+          <p className="text-gray-500 mb-4">
+            {!showMetadata.protocol 
+              ? "Please select a protocol in the show header above to get started." 
+              : "No receivers available for the selected protocol. Please check your system configuration."}
+          </p>
+          <p className="text-sm text-gray-400">
+            Available protocols: {systemConfig.protocols ? Object.keys(systemConfig.protocols).join(', ') : 'None configured'}
+          </p>
+        </div>
       )}
     </div>
   );

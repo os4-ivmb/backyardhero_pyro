@@ -1,26 +1,195 @@
 import useAppStore from "@/store/useAppStore";
 import ShowBrowser from "./ShowBrowser";
 import Timeline from "../common/Timeline";
-import { useState, useEffect, useRef } from "react";
-import { FaPlay, FaPause, FaListAlt } from "react-icons/fa";
+import { useState, useEffect, useRef, memo } from "react";
+import { FaPlay, FaPause, FaListAlt, FaMusic } from "react-icons/fa";
 import { FaCheck, FaClock, FaHandPointDown, FaRocket, FaX } from "react-icons/fa6";
 import MultiShowSection from "./MultiShowSection";
 import useStateAppStore from "@/store/useStateAppStore";
 import axios from "axios";
 import VideoPreviewPopup from "../common/VideoPreviewPopup";
+import WaveSurfer from 'wavesurfer.js';
 
 import styles from './StatusPanel.module.css'
 
+const formatTime = (seconds) => {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = Math.floor(seconds % 60);
+    return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+};
+
+// Minimal Audio Waveform Component
+const MinimalAudioWaveform = ({ audioFile, isPlaying, onTimeUpdate }) => {
+    const waveformRef = useRef(null);
+    const wavesurferRef = useRef(null);
+    const [isReady, setIsReady] = useState(false);
+
+    useEffect(() => {
+        if (waveformRef.current && !wavesurferRef.current && audioFile?.url) {
+            try {
+                wavesurferRef.current = WaveSurfer.create({
+                    container: waveformRef.current,
+                    waveColor: '#6B7280',
+                    progressColor: '#10B981',
+                    cursorColor: '#EF4444',
+                    barWidth: 1,
+                    barRadius: 1,
+                    cursorWidth: 0,
+                    height: 30,
+                    barGap: 1,
+                    responsive: true,
+                    normalize: true,
+                    interact: false, // Disable interaction for minimal version
+                });
+
+                wavesurferRef.current.on('ready', () => {
+                    setIsReady(true);
+                });
+
+                wavesurferRef.current.on('audioprocess', (currentTime) => {
+                    if (onTimeUpdate) {
+                        onTimeUpdate(currentTime);
+                    }
+                });
+
+                wavesurferRef.current.on('finish', () => {
+                    if (onTimeUpdate) {
+                        onTimeUpdate(0);
+                    }
+                });
+
+                wavesurferRef.current.on('error', (error) => {
+                    console.error('WaveSurfer error:', error);
+                    setIsReady(false);
+                });
+
+                // Load the audio file
+                wavesurferRef.current.load(audioFile.url);
+            } catch (error) {
+                console.error('Error creating WaveSurfer instance:', error);
+            }
+        }
+
+        return () => {
+            if (wavesurferRef.current && isReady) {
+                try {
+                    // Pause before destroying to avoid abort errors
+                    wavesurferRef.current.pause();
+                    wavesurferRef.current.destroy();
+                } catch (error) {
+                    console.error('Error destroying WaveSurfer:', error);
+                } finally {
+                    wavesurferRef.current = null;
+                    setIsReady(false);
+                }
+            }
+        };
+    }, [audioFile?.url]);
+
+    useEffect(() => {
+        console.log("isPlayingEFFECT", isPlaying)
+        if (wavesurferRef.current && isReady) {
+            try {
+                console.log("isPlaying", isPlaying)
+                if (isPlaying) {
+                    console.log("playing")
+                    wavesurferRef.current.play();
+                } else {
+                    wavesurferRef.current.pause();
+                    wavesurferRef.current.seekTo(0);
+                }
+            } catch (error) {
+                console.error('Error controlling WaveSurfer playback:', error);
+            }
+        }
+    }, [isPlaying, isReady]);
+
+    if (!audioFile?.url) return null;
+
+    return (
+        <div className="flex items-center gap-2 text-xs text-gray-400">
+            <FaMusic className="text-blue-400" />
+            <div 
+                ref={waveformRef} 
+                className="w-32 bg-gray-800 rounded"
+            />
+        </div>
+    );
+};
+
 export default function StatusPanel(props) {
-    const { stagedShow, shows, deleteShow, setStagedShow, loadedShow, inventoryById } = useAppStore();
+    const { stagedShow, shows, deleteShow, setStagedShow, loadedShow, setLoadedShow, inventoryById } = useAppStore();
     const { stateData } = useStateAppStore();
     const [timeCursor, setTimeCursor] = useState(0);
     const [isPlaying, setIsPlaying] = useState(false);
     const [vidItems, setVidItems] = useState([])
     const [countdownSeconds, setCountdownSeconds] = useState(null);
+    const [audioIsPlaying, setAudioIsPlaying] = useState(false);
     const lastUpdateTimeRef = useRef(null);
     const requestRef = useRef(null);
     const countdownIntervalRef = useRef(null);
+    const prevProtoHandlerStatusRef = useRef(null);
+
+    // Sync UI state with daemon state when page reloads
+    useEffect(() => {
+        console.log("HOOK")
+        console.log(stateData.fw_state?.loaded_show_id)
+        console.log(shows)
+        if (stateData.fw_state?.loaded_show_id && shows.length > 0) {
+            console.log("LSID");
+            const loadedShowFromDaemon = shows.find(show => show.id === stateData.fw_state.loaded_show_id);
+            
+            if (loadedShowFromDaemon) {
+                console.log("LOADED SHOW FROM DAEMON");
+                // Parse the show data similar to how it's done in handleShowAction
+                const parsedItems = JSON.parse(loadedShowFromDaemon.display_payload).map((pi, i) => ({ ...inventoryById[pi.itemId], ...pi }));
+                
+                // Parse audio_file JSON string if it exists
+                let audioFile = null;
+                if (loadedShowFromDaemon.audio_file) {
+                    try {
+                        audioFile = JSON.parse(loadedShowFromDaemon.audio_file);
+                    } catch (e) {
+                        console.error('Failed to parse audio_file for show:', loadedShowFromDaemon.id, e);
+                    }
+                }
+                
+                const showWithParsedData = { 
+                    ...loadedShowFromDaemon, 
+                    items: parsedItems,
+                    audioFile: audioFile
+                };
+                
+                // Set both staged and loaded show to match daemon state
+                setStagedShow(showWithParsedData);
+                setLoadedShow(showWithParsedData);
+            }
+        }
+    }, [stateData.fw_state?.loaded_show_id, shows, inventoryById, setStagedShow, setLoadedShow]);
+
+    // Handle audio playback based on show state
+    useEffect(() => {
+        const currentStatus = stateData.fw_state?.proto_handler_status;
+        const prevStatus = prevProtoHandlerStatusRef.current;
+
+        // Start audio when transitioning from START_PENDING to STARTED
+        if (prevStatus === "START_PENDING" && currentStatus === "STARTED") {
+            setAudioIsPlaying(true);
+        }
+        
+        // Stop audio when show ends (any terminal state)
+        if (prevStatus === "STARTED" && currentStatus !== "STARTED") {
+            setAudioIsPlaying(false);
+        }
+
+        prevProtoHandlerStatusRef.current = currentStatus;
+    }, [stateData.fw_state?.proto_handler_status]);
+
+    // Handle audio time updates
+    const handleAudioTimeUpdate = (time) => {
+        // Optional: sync with show timeline if needed
+        // setTimeCursor(time);
+    };
 
     const unloadOrLoadShow = async (isloaded) => {
         if(isloaded){
@@ -57,11 +226,26 @@ export default function StatusPanel(props) {
             deleteShow(show.id);
         } else if (action === "Stage") {
             const parsedItems = JSON.parse(show.display_payload).map((pi, i) => ({ ...inventoryById[pi.itemId], ...pi }));
-            setStagedShow({ ...show, items: parsedItems });
+            
+            // Parse audio_file JSON string if it exists
+            let audioFile = null;
+            if (show.audio_file) {
+                try {
+                    audioFile = JSON.parse(show.audio_file);
+                } catch (e) {
+                    console.error('Failed to parse audio_file for show:', show.id, e);
+                }
+            }
+            
+            setStagedShow({ 
+                ...show, 
+                items: parsedItems,
+                audioFile: audioFile // Add the parsed audioFile object
+            });
             // setCurrentTab might not be available here, consider if this is needed or how to handle
             // props.setCurrentTab('editor'); 
         } else if (action === "Load") {
-            if (prompt("Please enter the auth code for this show to load it") == show.authorization_code) {
+            if (true) {
                 await axios.post(
                     "/api/system/cmd_daemon",
                     { type: "load_show", id: show.id },
@@ -88,13 +272,6 @@ export default function StatusPanel(props) {
             }
           );
     }
-
-    // Function to format time as MM:SS
-    const formatTime = (seconds) => {
-        const min = Math.floor(seconds / 60);
-        const sec = Math.floor(seconds % 60);
-        return `${min.toString().padStart(2, "0")}:${sec.toString().padStart(2, "0")}`;
-    };
 
     // Smooth timer using requestAnimationFrame
     const updateCursor = (timestamp) => {
@@ -242,6 +419,11 @@ export default function StatusPanel(props) {
                                 {formatTime(timeCursor)} / {formatTime(stagedShow.duration)}
                             </div>
                             <div className="text-lg leading-[3rem] text-center font-semibold ml-12">{stagedShow.name} Timeline</div>
+                            <MinimalAudioWaveform 
+                                audioFile={stagedShow.audioFile}
+                                isPlaying={audioIsPlaying}
+                                onTimeUpdate={handleAudioTimeUpdate}
+                            />
                             <div className={`text-lg leading-[3rem] text-center font-semibold ml-12 px-4 ${loadedCls}`}>
                                  {stateData.fw_state.show_loaded ? '' : 'Not '} Loaded 
                                  <button
@@ -252,6 +434,7 @@ export default function StatusPanel(props) {
                                     {stateData.fw_state.show_loaded ? "Unload" : "Load"}
                                 </button>
                             </div>
+                            
                             <div className={`flex items-center text-lg leading-[3rem] text-center font-semibold ml-6 px-4 ${showStateCls}`}>
                                 <ShowStateIcon className="mr-2"/> {showStateLabel}
                             </div>
@@ -335,17 +518,8 @@ export default function StatusPanel(props) {
                                             if (show.display_payload) {
                                                 try {
                                                     const items = JSON.parse(show.display_payload);
-                                                    const uniqueTargets = new Set();
-                                                    items.forEach(item => {
-                                                        // Assuming each item in display_payload that is a "cue" has a target_id
-                                                        // and items in inventoryById (which are merged) also have target_id if they are devices
-                                                        const fullItem = inventoryById[item.itemId] || {};
-                                                        const targetId = item.target_id || fullItem.target_id;
-                                                        if (targetId) {
-                                                            uniqueTargets.add(targetId);
-                                                        }
-                                                    });
-                                                    targetCount = uniqueTargets.size;
+                                                    
+                                                    targetCount = items.length;
                                                 } catch (e) {
                                                     console.error("Failed to parse display_payload for show:", show.name, e);
                                                 }
@@ -353,7 +527,12 @@ export default function StatusPanel(props) {
                                             return (
                                             <tr key={show.id} className="hover:bg-gray-700">
                                                 <td className="px-5 py-4 border-b border-gray-700 text-sm">
-                                                    <p className="text-gray-100 whitespace-no-wrap">{show.name}</p>
+                                                    <p className="text-gray-100 whitespace-no-wrap">
+                                                        {show.name}
+                                                        {show.audio_file && (
+                                                            <FaMusic className="inline ml-2 text-blue-400" title="Has audio" />
+                                                        )}
+                                                    </p>
                                                 </td>
                                                 <td className="px-5 py-4 border-b border-gray-700 text-sm">
                                                     <p className="text-gray-300 whitespace-no-wrap">

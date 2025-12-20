@@ -3,6 +3,7 @@ import InventoryManager from "./inventory/InventoryManager";
 import useAppStore from '@/store/useAppStore';
 import { FaExplosion, FaGear, FaList } from "react-icons/fa6";
 import { FiTarget, FiEdit, FiRadio } from "react-icons/fi";
+import { MdAssignment } from "react-icons/md";
 import Image from 'next/image';
 import ManualFiring from './manualFire/ManualFiring';
 import Status from './homepanel/Status';
@@ -10,12 +11,14 @@ import StatusPanel from './homepanel/StatusPanel';
 import SettingsPanel from './settings/SettingsPanel';
 import ShowBuilder from './builder/ShowBuilder';
 import ReceiverDisplay from './receivers/ReceiverDisplay';
+import ShowLoadout from './receivers/ShowLoadout';
 
 const MainNav = () => {
   const menuItems = [
     { label: "Main", icon: <FaExplosion/>, href: "/", key: "main" },
     { label: "Receivers", icon: <FiRadio/>, href: "/about", key: "receivers" },
     { label: "Show Editor", icon: <FiEdit/>, href: "/about", key: "editor" },
+    { label: "Show Loadout", icon: <MdAssignment/>, href: "/loadout", key: "loadout" },
     { label: "Inventory", icon: <FaList/>, href: "/contact", key: "inventory" },
     { label: "Manual Fire", icon: <FiTarget/>, href: "/profile", key: "manual"  },
     { label: "Settings", icon: <FaGear/>, href: "/profile", key: "setting" },
@@ -77,7 +80,8 @@ const MainNav = () => {
             <div className={`${currTab==='main' ? '' : 'hidden'}`}><StatusPanel setCurrentTab={setCurrTab}/></div>
             <div className={`${currTab==='inventory' ? '' : 'hidden'}`}><InventoryManager/></div>
             <div className={`${currTab==='editor' ? '' : 'hidden'}`}><ShowBuilder/></div>
-            <div className={`${currTab==='receivers' ? '' : 'hidden'}`}><ReceiverDisplay/></div>
+            <div className={`${currTab==='receivers' ? '' : 'hidden'}`}><ReceiverDisplay setCurrentTab={setCurrTab}/></div>
+            <div className={`${currTab==='loadout' ? '' : 'hidden'}`}><ShowLoadout setCurrentTab={setCurrTab}/></div>
             {currTab==='manual' ? (<ManualFiring/>) : ""}
             {currTab==='setting' ? (<SettingsPanel/>) : ""}
         </div>

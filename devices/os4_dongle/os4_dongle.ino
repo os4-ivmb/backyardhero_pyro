@@ -7,12 +7,18 @@
 #include <Adafruit_NeoPixel.h>
 #include <ArduinoJson.h>
 
+// FW_VERSION: Firmware version tracking for os4_dongle
+// v1: Initial version - Basic mesh networking and command queuing (date unknown)
+// v2: 2025-01-XX - Added FW_VERSION tracking system with version history comments
+#define FW_VERSION 2
+
 #define RF24_CE_PIN 37
 #define RF24_CSN_PIN 36
 #define RF_PIN 4
 
 #define CONTINUITY_INDEX_CT 2
 #define MAX_LATENCY_SAMPLES 10
+#define MAX_SUCCESS_SAMPLES 64
 
 #define SWITCH_START_STOP_PIN 9   
 #define SWITCH_ARMING_PIN 8       
@@ -101,6 +107,11 @@ struct ReceiverInfo {
   uint32_t latencies[MAX_LATENCY_SAMPLES];
   uint8_t latencyNextIndex;
   uint8_t latencySampleCount;
+  
+  // Success tracking: circular buffer of command results (1 = success, 0 = failure/timeout)
+  bool successHistory[MAX_SUCCESS_SAMPLES];
+  uint8_t successHead;  // Next position to write
+  uint8_t successCount; // Number of samples in buffer (0 to MAX_SUCCESS_SAMPLES)
 };
 
 #define MAX_RECEIVERS 10
@@ -109,9 +120,9 @@ uint8_t numReceivers = 0;
 
 
 uint32_t receiverInactivityTimeoutMs = 30000UL; 
-uint32_t commandResponseTimeoutMs = 100UL;    
+uint32_t commandResponseTimeoutMs = 150UL;    
 uint32_t clockSyncIntervalMs = 2000UL;  
-uint8_t debugMode = 0;
+uint8_t debugMode = 1;
 
 
 uint64_t lastDhcpCallTime = 0;
@@ -136,6 +147,7 @@ struct QueuedCommand {
   uint64_t showstart_targetStartTime;
   uint8_t  showstart_numTargetsToFire;
   uint16_t showstart_showId;
+  uint8_t repeat_count;  // Number of times to repeat this command
   
 };
 
@@ -149,7 +161,11 @@ int cmdQueueCount = 0;
 bool awaitingResponseForCommand = false;      
 uint8_t  responseTargetNodeID = 0;            
 uint64_t commandDispatchTime = 0;           
-uint64_t initialCommandDispatchTime = 0;    
+uint64_t initialCommandDispatchTime = 0;
+
+// Per-receiver tracking for clock sync spacing
+uint64_t lastClockSyncSent[MAX_RECEIVERS];  // Track last clock sync send time per receiver
+uint8_t lastClockSyncReceiverIndex = 0;     // Index in receivers array, not nodeID    
 
 
 #define MAX_LATENCY_SAMPLES 10
@@ -195,7 +211,12 @@ uint8_t ledEffects[NUM_PIXELS] = {0};
 
 uint64_t tsOffset = 0;
 uint64_t lastPrintTime = 0;
-uint64_t lastScheduledClockSyncTime = 0; 
+uint64_t lastScheduledClockSyncTime = 0;
+
+// Non-blocking serial line buffer
+#define SERIAL_BUFFER_SIZE 256
+char serialLineBuffer[SERIAL_BUFFER_SIZE];
+uint16_t serialBufferIndex = 0; 
 
 
 
@@ -436,6 +457,17 @@ ReceiverInfo* getReceiverByIdent(const String &ident, bool createIfNotExist) {
     for(uint8_t k=0; k<MAX_LATENCY_SAMPLES; k++){
         receivers[numReceivers].latencies[k] = 0; 
     }
+    
+    // Initialize clock sync tracking
+    lastClockSyncSent[numReceivers] = 0;
+    
+    // Initialize success tracking
+    receivers[numReceivers].successHead = 0;
+    receivers[numReceivers].successCount = 0;
+    for(uint8_t k=0; k<MAX_SUCCESS_SAMPLES; k++){
+        receivers[numReceivers].successHistory[k] = false;
+    }
+    
     numReceivers++;
     return &receivers[numReceivers-1];
   }
@@ -455,39 +487,92 @@ void printMeshAddresses() {
   }
 }
 
+// Push a success (1) or failure (0) to the circular buffer for a receiver
+void pushCommandResult(ReceiverInfo* rinfo, bool success) {
+  if (!rinfo) return;
+  
+  // Write to head position
+  rinfo->successHistory[rinfo->successHead] = success;
+  
+  // Advance head (circular)
+  rinfo->successHead = (rinfo->successHead + 1) % MAX_SUCCESS_SAMPLES;
+  
+  // Update count (max at MAX_SUCCESS_SAMPLES)
+  if (rinfo->successCount < MAX_SUCCESS_SAMPLES) {
+    rinfo->successCount++;
+  }
+  // If buffer is full, we've already overwritten the oldest entry (circular buffer behavior)
+}
+
+// Calculate success percentage (0-100) from the circular buffer
+uint8_t calculateSuccessPercent(ReceiverInfo* rinfo) {
+  if (!rinfo || rinfo->successCount == 0) {
+    return 0; // No data yet
+  }
+  
+  uint8_t successCount = 0;
+  
+  // Read from circular buffer: if buffer is full, start from oldest entry
+  // Oldest entry is at (head - count) % MAX, but since we're using head as next write,
+  // if count == MAX, oldest is at head (we're about to overwrite it)
+  // Otherwise, oldest is at 0
+  uint8_t startIdx = 0;
+  if (rinfo->successCount == MAX_SUCCESS_SAMPLES) {
+    // Buffer is full, oldest entry is at head (next to be overwritten)
+    startIdx = rinfo->successHead;
+  }
+  
+  // Count successes in the valid range
+  for (uint8_t i = 0; i < rinfo->successCount; i++) {
+    uint8_t idx = (startIdx + i) % MAX_SUCCESS_SAMPLES;
+    if (rinfo->successHistory[idx]) {
+      successCount++;
+    }
+  }
+  
+  // Calculate percentage and round to nearest integer
+  return (uint8_t)((successCount * 100) / rinfo->successCount);
+}
 
 
 
-void sendActualManualFireMessage(uint8_t nodeID, uint8_t position) {
+
+bool sendActualManualFireMessage(uint8_t nodeID, uint8_t position) {
   ManualFireMessage msg;
   msg.type = MANUAL_FIRE;
   msg.position = position;
   if(!mesh.write(&msg, MANUAL_FIRE, sizeof(msg), nodeID)){
     Serial.println(F("TX ERROR: MANUAL_FIRE"));
+    return false;
   }
+  return true;
 }
 
-void sendActualClockSyncMessage(uint8_t nodeID, uint64_t timestamp) {
+bool sendActualClockSyncMessage(uint8_t nodeID, uint64_t timestamp) {
   uint64_t now = millis() + tsOffset;
   ClockSyncMessage msg;
   msg.type = CLOCK_SYNC;
   msg.timestamp = now;
   if(!mesh.write(&msg, CLOCK_SYNC, sizeof(msg), nodeID)){
     Serial.println(F("TX ERROR: CLOCK_SYNC"));
+    return false;
   }
+  return true;
 }
 
-void sendActualStartLoadMessage(uint8_t nodeID, uint8_t numTargets, uint16_t showId) {
+bool sendActualStartLoadMessage(uint8_t nodeID, uint8_t numTargets, uint16_t showId) {
   StartLoadMessage msg;
   msg.type = START_LOAD;
   msg.numTargetsToFire = numTargets;
   msg.showId = showId;
   if(!mesh.write(&msg, START_LOAD, sizeof(msg), nodeID)){
     Serial.println(F("TX ERROR: START_LOAD"));
+    return false;
   }
+  return true;
 }
 
-void sendActualShowLoadMessage(uint8_t nodeID, uint32_t t1, uint8_t p1,
+bool sendActualShowLoadMessage(uint8_t nodeID, uint32_t t1, uint8_t p1,
                          uint32_t t2, uint8_t p2) {
   ShowLoadMessage msg;
   msg.type = SHOW_LOAD;
@@ -497,10 +582,12 @@ void sendActualShowLoadMessage(uint8_t nodeID, uint32_t t1, uint8_t p1,
   msg.position_2 = p2;
   if(!mesh.write(&msg, SHOW_LOAD, sizeof(msg), nodeID)){
     Serial.println(F("TX ERROR: SHOW_LOAD"));
+    return false;
   }
+  return true;
 }
 
-void sendActualShowStartMessage(uint8_t nodeID, uint64_t startTime, uint8_t numTargets, uint16_t showId) {
+bool sendActualShowStartMessage(uint8_t nodeID, uint64_t startTime, uint8_t numTargets, uint16_t showId) {
   ShowStartMessage msg;
   msg.type = SHOW_START;
   msg.targetStartTime = startTime;
@@ -508,16 +595,20 @@ void sendActualShowStartMessage(uint8_t nodeID, uint64_t startTime, uint8_t numT
   msg.showId = showId;
   if(!mesh.write(&msg, SHOW_START, sizeof(msg), nodeID)){
     Serial.println(F("TX ERROR: SHOW_START"));
+    return false;
   }
+  return true;
 }
 
-void sendActualGenericMessage(uint8_t nodeID, uint8_t commandType) {
+bool sendActualGenericMessage(uint8_t nodeID, uint8_t commandType) {
   GenericMessage msg;
   msg.type = commandType;
   if(!mesh.write(&msg, commandType, sizeof(msg), nodeID)){
     Serial.print(F("TX ERROR: Generic Cmd "));
     Serial.println(commandType);
+    return false;
   }
+  return true;
 }
 
 
@@ -663,26 +754,62 @@ void processSerialCommand(String inStr) {
 
   QueuedCommand qc = {0};
   qc.targetNodeID = targetNodeID;
+  qc.repeat_count = 1;  // Default to 1 if not specified
 
   if(cmdStr == "fire") {
     qc.messageType = MANUAL_FIRE;
-    qc.fire_position = paramsStr.toInt();
+    // Extract repeat count if present: "position [repeat]"
+    int lastSpace = paramsStr.lastIndexOf(' ');
+    if (lastSpace > 0) {
+      qc.fire_position = paramsStr.substring(0, lastSpace).toInt();
+      qc.repeat_count = paramsStr.substring(lastSpace+1).toInt();
+      if (qc.repeat_count == 0) qc.repeat_count = 1;  // Ensure at least 1
+    } else {
+      qc.fire_position = paramsStr.toInt();
+    }
   } else if(cmdStr == "sync") { 
     qc.messageType = CLOCK_SYNC;
-    qc.sync_timestamp = atoll(paramsStr.c_str());
+    // Extract repeat count if present: "timestamp [repeat]"
+    int lastSpace = paramsStr.lastIndexOf(' ');
+    if (lastSpace > 0) {
+      qc.sync_timestamp = atoll(paramsStr.substring(0, lastSpace).c_str());
+      qc.repeat_count = paramsStr.substring(lastSpace+1).toInt();
+      if (qc.repeat_count == 0) qc.repeat_count = 1;
+    } else {
+      qc.sync_timestamp = atoll(paramsStr.c_str());
+    }
   } else if(cmdStr == "startload") {
     qc.messageType = START_LOAD;
-    int thirdSpace = paramsStr.indexOf(' ');
-    qc.startload_numTargets = paramsStr.substring(0, thirdSpace).toInt();
-    qc.startload_showId = paramsStr.substring(thirdSpace+1).toInt();
+    // Extract repeat count if present: "numTargets showId [repeat]"
+    int lastSpace = paramsStr.lastIndexOf(' ');
+    if (lastSpace > 0) {
+      String mainParams = paramsStr.substring(0, lastSpace);
+      qc.repeat_count = paramsStr.substring(lastSpace+1).toInt();
+      if (qc.repeat_count == 0) qc.repeat_count = 1;
+      int thirdSpace = mainParams.indexOf(' ');
+      qc.startload_numTargets = mainParams.substring(0, thirdSpace).toInt();
+      qc.startload_showId = mainParams.substring(thirdSpace+1).toInt();
+    } else {
+      int thirdSpace = paramsStr.indexOf(' ');
+      qc.startload_numTargets = paramsStr.substring(0, thirdSpace).toInt();
+      qc.startload_showId = paramsStr.substring(thirdSpace+1).toInt();
+    }
   } else if(cmdStr == "showload") {
     qc.messageType = SHOW_LOAD;
+    // Extract repeat count if present: "time1 pos1 time2 pos2 [repeat]"
+    int lastSpace = paramsStr.lastIndexOf(' ');
+    String mainParams = paramsStr;
+    if (lastSpace > 0) {
+      mainParams = paramsStr.substring(0, lastSpace);
+      qc.repeat_count = paramsStr.substring(lastSpace+1).toInt();
+      if (qc.repeat_count == 0) qc.repeat_count = 1;
+    }
     int tokens[4];
     int currentIdx = 0;
     for (uint8_t i = 0; i < 4; i++){
-      int sp = paramsStr.indexOf(' ', currentIdx);
-      if(sp < 0) sp = paramsStr.length();
-      tokens[i] = paramsStr.substring(currentIdx, sp).toInt();
+      int sp = mainParams.indexOf(' ', currentIdx);
+      if(sp < 0) sp = mainParams.length();
+      tokens[i] = mainParams.substring(currentIdx, sp).toInt();
       currentIdx = sp+1;
     }
     qc.showload_time_1 = tokens[0];
@@ -691,37 +818,76 @@ void processSerialCommand(String inStr) {
     qc.showload_position_2 = tokens[3];
   } else if(cmdStr == "showstart") {
     qc.messageType = SHOW_START;
+    // Extract repeat count if present: "targetStartTime numTargetsToFire showId [repeat]"
+    int lastSpace = paramsStr.lastIndexOf(' ');
+    String mainParams = paramsStr;
+    if (lastSpace > 0) {
+      mainParams = paramsStr.substring(0, lastSpace);
+      qc.repeat_count = paramsStr.substring(lastSpace+1).toInt();
+      if (qc.repeat_count == 0) qc.repeat_count = 1;
+    }
     uint64_t ts_param = 0;
     int int_tokens[2] = {0, 0};
     int currentIdx = 0;
     for (uint8_t i = 0; i < 3; i++){ 
-      int sp = paramsStr.indexOf(' ', currentIdx);
-      if(sp < 0) sp = paramsStr.length();
-      String valStr = paramsStr.substring(currentIdx, sp);
+      int sp = mainParams.indexOf(' ', currentIdx);
+      if(sp < 0) sp = mainParams.length();
+      String valStr = mainParams.substring(currentIdx, sp);
       if(i == 0){
         ts_param = atoll(valStr.c_str());
       } else {
         int_tokens[i-1] = atoi(valStr.c_str());
       }
       currentIdx = sp+1;
-      if (currentIdx >= paramsStr.length() && i < 2) { /* error, not enough params */ break; }
+      if (currentIdx >= mainParams.length() && i < 2) { /* error, not enough params */ break; }
     }
     qc.showstart_targetStartTime = ts_param;
     qc.showstart_numTargetsToFire = int_tokens[0];
     qc.showstart_showId = int_tokens[1];
-  } else if(cmdStr == "play")   { qc.messageType = GENERIC_PLAY; }
-    else if(cmdStr == "stop")  { qc.messageType = GENERIC_STOP; }
-    else if(cmdStr == "reset") { qc.messageType = GENERIC_RESET; } 
-    else if(cmdStr == "pause") { qc.messageType = GENERIC_PAUSE; }
-    
-  else {
+  } else if(cmdStr == "play") {
+    qc.messageType = GENERIC_PLAY;
+    // Extract repeat count if present: "param [repeat]"
+    int lastSpace = paramsStr.lastIndexOf(' ');
+    if (lastSpace > 0) {
+      qc.repeat_count = paramsStr.substring(lastSpace+1).toInt();
+      if (qc.repeat_count == 0) qc.repeat_count = 1;
+    }
+  } else if(cmdStr == "stop") {
+    qc.messageType = GENERIC_STOP;
+    // Extract repeat count if present: "param [repeat]"
+    int lastSpace = paramsStr.lastIndexOf(' ');
+    if (lastSpace > 0) {
+      qc.repeat_count = paramsStr.substring(lastSpace+1).toInt();
+      if (qc.repeat_count == 0) qc.repeat_count = 1;
+    }
+  } else if(cmdStr == "reset") {
+    qc.messageType = GENERIC_RESET;
+    // Extract repeat count if present: "param [repeat]"
+    int lastSpace = paramsStr.lastIndexOf(' ');
+    if (lastSpace > 0) {
+      qc.repeat_count = paramsStr.substring(lastSpace+1).toInt();
+      if (qc.repeat_count == 0) qc.repeat_count = 1;
+    }
+  } else if(cmdStr == "pause") {
+    qc.messageType = GENERIC_PAUSE;
+    // Extract repeat count if present: "param [repeat]"
+    int lastSpace = paramsStr.lastIndexOf(' ');
+    if (lastSpace > 0) {
+      qc.repeat_count = paramsStr.substring(lastSpace+1).toInt();
+      if (qc.repeat_count == 0) qc.repeat_count = 1;
+    }
+  } else {
     Serial.println(F("C?UK")); 
     return;
   }
 
   if (qc.messageType != 0) { 
     enqueueCommand(qc);
-    if(debugMode > 0)Serial.println(F("C+ Q")); 
+    if(debugMode > 0) {
+      Serial.print(F("C+ Q (repeat="));
+      Serial.print(qc.repeat_count);
+      Serial.println(F(")"));
+    }
   } else {
     Serial.println(F("C? PE")); 
   }
@@ -733,7 +899,16 @@ void processSerialCommand(String inStr) {
 void setup() {
   Serial.begin(115200);
   while (!Serial); 
-  delay(1000); 
+  delay(1000);
+  
+  // Initialize serial line buffer
+  serialBufferIndex = 0;
+  serialLineBuffer[0] = '\0';
+  
+  // Initialize clock sync tracking
+  for (uint8_t i = 0; i < MAX_RECEIVERS; i++) {
+    lastClockSyncSent[i] = 0;
+  } 
 
   SPI.begin(35, 33, 34); 
   pinMode(RF_PIN, OUTPUT); 
@@ -752,7 +927,7 @@ void setup() {
   radio.setDataRate(RF24_250KBPS);
   radio.setPALevel(RF24_PA_MAX);
   radio.setChannel(85); 
-  radio.setRetries(3, 5); 
+  radio.setRetries(15, 15); 
 
   mesh.setNodeID(0); 
   Serial.println(F("Initializing Mesh..."));
@@ -775,6 +950,9 @@ void setup() {
   for (int i = 1; i < NUM_PIXELS; i++) {
     ledStates[i] = 0; ledEffects[i] = 0;
   }
+  
+  // Set Serial timeout to minimal value (we're using non-blocking reads)
+  Serial.setTimeout(1);
 }
 
 void loop() {
@@ -862,7 +1040,10 @@ void loop() {
               Serial.print(F("CMD_TO_STATUS_LATENCY: ")); Serial.print(currentLatency); Serial.println(F(" ms"));
           }
           commandDispatchTime = now; 
-          awaitingResponseForCommand = false; 
+          awaitingResponseForCommand = false;
+          
+          // Track successful command
+          pushCommandResult(r_from_msg, true); 
         }
       } else {
          Serial.print(F("ERR: Status from unknown ident/node ")); Serial.println(status->nodeID);
@@ -880,59 +1061,188 @@ void loop() {
       if(debugMode > 0) {
         Serial.print(F("CMD_TIMEOUT_LATENCY: ")); Serial.print(now - initialCommandDispatchTime); Serial.println(F(" ms"));
       }
+      
+      // Track timeout failure - find receiver by nodeID
+      for (uint8_t i = 0; i < numReceivers; i++) {
+        if (receivers[i].nodeID == responseTargetNodeID) {
+          pushCommandResult(&receivers[i], false);
+          break;
+        }
+      }
+      
       awaitingResponseForCommand = false; 
       
     }
   }
 
-  if (!awaitingResponseForCommand && !isQueueEmpty()) {
-    QueuedCommand cmdToSend;
-    if (dequeueCommand(cmdToSend)) {
-      responseTargetNodeID = cmdToSend.targetNodeID;
-      
-      
-      if (cmdToSend.targetNodeID == 0 && cmdToSend.messageType != CLOCK_SYNC /*e.g.*/) {
-          Serial.print(F("WARN: Cmd for Node 0 (master) skipped or invalid target: "));
-          Serial.println(cmdToSend.messageType);
-          
-      } else {
-        if(debugMode > 0) {
-          Serial.print(F("TX CMD: ")); Serial.print(cmdToSend.messageType);
-          Serial.print(F(" to N")); Serial.println(cmdToSend.targetNodeID);
+  // Process queue: allow CLOCK_SYNC and critical commands to bypass response-wait
+  // But space out clock sync sends to avoid receiver response collisions
+  bool canProcessCommand = !awaitingResponseForCommand;
+  
+  if (!isQueueEmpty()) {
+    // Peek at next command to check type
+    QueuedCommand peekCmd = commandBuffer[cmdQueueHead];
+    bool isClockSync = (peekCmd.messageType == CLOCK_SYNC);
+    
+    // Critical commands that should bypass queue blocking (not just keepalive)
+    bool isCriticalCommand = (peekCmd.messageType == SHOW_START ||
+                               peekCmd.messageType == START_LOAD ||
+                               peekCmd.messageType == SHOW_LOAD ||
+                               peekCmd.messageType == GENERIC_PLAY ||
+                               peekCmd.messageType == GENERIC_STOP ||
+                               peekCmd.messageType == GENERIC_PAUSE ||
+                               peekCmd.messageType == GENERIC_RESET ||
+                               peekCmd.messageType == MANUAL_FIRE ||
+                               peekCmd.messageType == RESET_DVC);
+    
+    // For clock sync: check if we need to space out sends to avoid collisions
+    bool canSendClockSync = false;
+    if (isClockSync) {
+      // Find receiver index for this clock sync target
+      uint8_t targetIdx = 255; // Invalid
+      for (uint8_t i = 0; i < numReceivers; i++) {
+        if (receivers[i].nodeID == peekCmd.targetNodeID) {
+          targetIdx = i;
+          break;
         }
-
-          switch(cmdToSend.messageType) {
-            case MANUAL_FIRE:
-              sendActualManualFireMessage(cmdToSend.targetNodeID, cmdToSend.fire_position);
-              break;
-            case CLOCK_SYNC:
-              sendActualClockSyncMessage(cmdToSend.targetNodeID, cmdToSend.sync_timestamp);
-              break;
-            case START_LOAD:
-              sendActualStartLoadMessage(cmdToSend.targetNodeID, cmdToSend.startload_numTargets, cmdToSend.startload_showId);
-              break;
-            case SHOW_LOAD:
-              sendActualShowLoadMessage(cmdToSend.targetNodeID, cmdToSend.showload_time_1, cmdToSend.showload_position_1, cmdToSend.showload_time_2, cmdToSend.showload_position_2);
-              break;
-            case SHOW_START:
-              sendActualShowStartMessage(cmdToSend.targetNodeID, cmdToSend.showstart_targetStartTime, cmdToSend.showstart_numTargetsToFire, cmdToSend.showstart_showId);
-              break;
-            case GENERIC_PLAY:
-            case GENERIC_STOP:
-            case GENERIC_RESET:
-            case GENERIC_PAUSE:
-            case RESET_DVC: 
-              sendActualGenericMessage(cmdToSend.targetNodeID, cmdToSend.messageType);
-              break;
-            default:
-              Serial.print(F("ERR: Unknown command type in queue: ")); Serial.println(cmdToSend.messageType);
-              
-              goto next_command_check; 
+      }
+      
+      if (targetIdx < MAX_RECEIVERS) {
+        // Space out clock sync sends: minimum 50ms between sends to same receiver
+        // This prevents all receivers from responding simultaneously
+        uint64_t timeSinceLastSync = now - lastClockSyncSent[targetIdx];
+        const uint32_t CLOCK_SYNC_SPACING_MS = 50;
+        
+        if (timeSinceLastSync >= CLOCK_SYNC_SPACING_MS || lastClockSyncSent[targetIdx] == 0) {
+          canSendClockSync = true;
+        }
+      } else {
+        // Receiver not found, allow send anyway (will fail gracefully)
+        canSendClockSync = true;
+      }
+    }
+    
+    // Allow: normal commands if not waiting, OR clock sync if spaced properly, OR critical commands always
+    if (canProcessCommand || (isClockSync && canSendClockSync) || isCriticalCommand) {
+      QueuedCommand cmdToSend;
+      if (dequeueCommand(cmdToSend)) {
+        responseTargetNodeID = cmdToSend.targetNodeID;
+        
+        
+        if (cmdToSend.targetNodeID == 0 && cmdToSend.messageType != CLOCK_SYNC /*e.g.*/) {
+            Serial.print(F("WARN: Cmd for Node 0 (master) skipped or invalid target: "));
+            Serial.println(cmdToSend.messageType);
+            
+        } else {
+          if(debugMode > 0) {
+            Serial.print(F("TX CMD: ")); Serial.print(cmdToSend.messageType);
+            Serial.print(F(" to N")); Serial.print(cmdToSend.targetNodeID);
+            Serial.print(F(" (repeat=")); Serial.print(cmdToSend.repeat_count);
+            Serial.println(F(")"));
           }
 
-          awaitingResponseForCommand = true;
-          commandDispatchTime = now;
-          initialCommandDispatchTime = now; 
+            // Determine if this is a critical command (same check as above, but for the actual command being sent)
+            bool cmdIsCritical = (cmdToSend.messageType == SHOW_START ||
+                                  cmdToSend.messageType == START_LOAD ||
+                                  cmdToSend.messageType == SHOW_LOAD ||
+                                  cmdToSend.messageType == GENERIC_PLAY ||
+                                  cmdToSend.messageType == GENERIC_STOP ||
+                                  cmdToSend.messageType == GENERIC_PAUSE ||
+                                  cmdToSend.messageType == GENERIC_RESET ||
+                                  cmdToSend.messageType == MANUAL_FIRE ||
+                                  cmdToSend.messageType == RESET_DVC);
+            
+            // Send command multiple times based on repeat_count
+            bool txSuccess = false;
+            const uint8_t REPEAT_DELAY_MS = 10;  // Small delay between repeats to avoid overwhelming receiver
+            
+            for (uint8_t repeatIdx = 0; repeatIdx < cmdToSend.repeat_count; repeatIdx++) {
+              if (repeatIdx > 0) {
+                delay(REPEAT_DELAY_MS);  // Small delay between repeats
+              }
+              
+              bool thisTxSuccess = false;
+              switch(cmdToSend.messageType) {
+                case MANUAL_FIRE:
+                  thisTxSuccess = sendActualManualFireMessage(cmdToSend.targetNodeID, cmdToSend.fire_position);
+                  break;
+                case CLOCK_SYNC:
+                  thisTxSuccess = sendActualClockSyncMessage(cmdToSend.targetNodeID, cmdToSend.sync_timestamp);
+                  break;
+                case START_LOAD:
+                  thisTxSuccess = sendActualStartLoadMessage(cmdToSend.targetNodeID, cmdToSend.startload_numTargets, cmdToSend.startload_showId);
+                  break;
+                case SHOW_LOAD:
+                  thisTxSuccess = sendActualShowLoadMessage(cmdToSend.targetNodeID, cmdToSend.showload_time_1, cmdToSend.showload_position_1, cmdToSend.showload_time_2, cmdToSend.showload_position_2);
+                  break;
+                case SHOW_START:
+                  thisTxSuccess = sendActualShowStartMessage(cmdToSend.targetNodeID, cmdToSend.showstart_targetStartTime, cmdToSend.showstart_numTargetsToFire, cmdToSend.showstart_showId);
+                  break;
+                case GENERIC_PLAY:
+                case GENERIC_STOP:
+                case GENERIC_RESET:
+                case GENERIC_PAUSE:
+                case RESET_DVC: 
+                  thisTxSuccess = sendActualGenericMessage(cmdToSend.targetNodeID, cmdToSend.messageType);
+                  break;
+                default:
+                  Serial.print(F("ERR: Unknown command type in queue: ")); Serial.println(cmdToSend.messageType);
+                  
+                  goto next_command_check; 
+              }
+              
+              // Track success if at least one transmission succeeded
+              if (thisTxSuccess) {
+                txSuccess = true;
+              }
+            }
+            
+            // For clock sync and critical commands: wait for response (connectivity tracking), but allow bypass
+            // For other commands: wait for response if transmission succeeded and block queue
+            if (txSuccess) {
+              if (isClockSync || cmdIsCritical) {
+                // Clock sync: track when we sent it to this receiver (for spacing)
+                if (isClockSync) {
+                  uint8_t targetIdx = 255;
+                  for (uint8_t i = 0; i < numReceivers; i++) {
+                    if (receivers[i].nodeID == cmdToSend.targetNodeID) {
+                      targetIdx = i;
+                      break;
+                    }
+                  }
+                  if (targetIdx < MAX_RECEIVERS) {
+                    lastClockSyncSent[targetIdx] = now;
+                  }
+                }
+                
+                // Set awaiting response but allow next clock sync/critical command to proceed
+                // Only wait for response after the last repeat
+                awaitingResponseForCommand = true;
+                commandDispatchTime = now;
+                initialCommandDispatchTime = now;
+                // Note: clock sync and critical commands can bypass the awaitingResponseForCommand check above
+              } else {
+                // Other commands: block queue until response (shouldn't happen with current command types)
+                // Only wait for response after the last repeat
+                awaitingResponseForCommand = true;
+                commandDispatchTime = now;
+                initialCommandDispatchTime = now;
+              }
+            } else {
+              // Transmission failed, don't wait for response - process next command immediately
+              if(debugMode > 0) {
+                Serial.println(F("TX failed, skipping response wait"));
+              }
+              
+              // Track transmission failure - find receiver by nodeID
+              for (uint8_t i = 0; i < numReceivers; i++) {
+                if (receivers[i].nodeID == cmdToSend.targetNodeID) {
+                  pushCommandResult(&receivers[i], false);
+                  break;
+                }
+              }
+            } 
+        }
       }
     }
   }
@@ -976,6 +1286,9 @@ next_command_check:;
         receiverAvgLatency = round((float)receiverTotalLatencySum / receivers[i].latencySampleCount);
       }
       receiver["x"] = receiverAvgLatency;
+      
+      // Success percentage (0-100)
+      receiver["sp"] = calculateSuccessPercent(&receivers[i]);
 
       JsonArray continuityArray = receiver.createNestedArray("c");
       for (uint8_t j = 0; j < CONTINUITY_INDEX_CT; j++) {
@@ -1005,8 +1318,31 @@ next_command_check:;
   }
 
   
-  if (Serial.available()) {
-    String s = Serial.readStringUntil('\n');
-    processSerialCommand(s);
+  // Non-blocking serial input processing
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    
+    if (c == '\n' || c == '\r') {
+      // End of line - process the command
+      if (serialBufferIndex > 0) {
+        serialLineBuffer[serialBufferIndex] = '\0'; // Null terminate
+        String s = String(serialLineBuffer);
+        processSerialCommand(s);
+        serialBufferIndex = 0; // Reset buffer
+      }
+      // Skip \r if followed by \n (handle Windows line endings)
+      if (c == '\r' && Serial.available() > 0 && Serial.peek() == '\n') {
+        Serial.read(); // Consume the \n
+      }
+    } else if (serialBufferIndex < (SERIAL_BUFFER_SIZE - 1)) {
+      // Add character to buffer (leave room for null terminator)
+      serialLineBuffer[serialBufferIndex++] = c;
+    } else {
+      // Buffer overflow - reset and skip this character
+      serialBufferIndex = 0;
+      if(debugMode > 0) {
+        Serial.println(F("WARN: Serial buffer overflow"));
+      }
+    }
   }
 }

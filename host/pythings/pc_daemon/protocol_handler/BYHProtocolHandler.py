@@ -115,7 +115,7 @@ class BYHProtocolHandler:
                 self.show_loaded = True
                 self.load_waiting = False
                 self.status = START_SEQUENCE_STEPS.LOADED
-                self.parent.led_handler.update("show_load_state", LOAD_STATE.LOADED.value)
+                self.parent.signal_show_loaded(self.show_id)
             else:
                 print("Waiting on targets to load:", incomplete_devices)
                 self.async_retry_ct += 1
@@ -156,7 +156,8 @@ class BYHProtocolHandler:
             'l': 'loadComplete',
             'r': 'startReady',
             'c': 'continuity',
-            'x': 'lat'
+            'x': 'lat',
+            'sp': 'successPercent'
         }
 
         lmtoffset = int(time.time() * 1000) - msg_obj.get('timestamp', 0)
@@ -354,14 +355,14 @@ class BYHProtocolHandler:
         print("STAN")
         print(rcv_dict_override)
         if(rcv_dict_override):
-            rcv_dict_override = rcv_dict_override.items()
+            receiver_dict = rcv_dict_override.items()
 
         for rcv, statusdata in receiver_dict:
             if self.receiver_is_connected(rcv):
-                cmd = f"{cmdpre} {rcv}{cmdpost}"
-                print(f"Sending cmd: {cmd}")
-                for _ in range(1):
-                    self.parent.send_serial_command(cmd) 
+                # Include repeat count in the command itself
+                cmd = f"{cmdpre} {rcv}{cmdpost} {repeat}"
+                print(f"Sending cmd: {cmd} (repeat={repeat})")
+                self.parent.send_serial_command(cmd) 
             else:
                 print(f"Not sendinf to {rcv} as not connected.")
         

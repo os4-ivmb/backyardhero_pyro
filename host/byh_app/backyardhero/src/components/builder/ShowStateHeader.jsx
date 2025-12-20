@@ -29,8 +29,13 @@ export default function ShowStateHeader({ items, showMetadata, setShowMetadata, 
         duration: Math.round(Math.max(
             ...items.map((item) => item.startTime + item.duration)
         )),
-        display_payload: JSON.stringify(compressedItems)
+        display_payload: JSON.stringify(compressedItems),
+        // Include audio file info if present
+        audioFile: showMetadata.audioFile || null,
+        // Include receiver locations as JSON if present
+        receiver_locations: showMetadata.receiver_locations ? JSON.stringify(showMetadata.receiver_locations) : null
     }
+
 
     if(showMetadata.id){
         updateShow(showMetadata.id, showData)

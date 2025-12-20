@@ -11,7 +11,7 @@ const Timeline = memo((props) => {
   const MAX_SHOW_TIME_SEC=props.timeCapSeconds || 1800
 
   const handleWheel = (e) => {
-    e.preventDefault();
+    //e.preventDefault();
     e.stopPropagation();
     setZoom((prevZoom) => Math.max(0.1, prevZoom - e.deltaY * (prevZoom*0.001))); // Zoom with mouse wheel
   };
@@ -96,6 +96,8 @@ const Timeline = memo((props) => {
 
       // Check if the dragged item is part of a multi-selection
       const selectedItems = props.selectedItems || [];
+      console.log('selectedItems', selectedItems);
+      console.log('id', id);
       const isMultiSelectDrag = selectedItems.some(item => item.id === parseInt(id));
       
       if (isMultiSelectDrag && selectedItems.length > 1) {
@@ -113,6 +115,7 @@ const Timeline = memo((props) => {
         );
       } else {
         // Single item drag (existing behavior)
+        console.log(items)
         setItems((prevItems) =>
           prevItems.map((item) =>
             item.id === parseInt(id)

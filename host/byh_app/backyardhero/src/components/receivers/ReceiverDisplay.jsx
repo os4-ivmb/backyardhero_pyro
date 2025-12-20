@@ -8,10 +8,16 @@ import {
   MdSignalWifi4Bar, 
   MdSignalWifiOff, 
   MdPlayArrow,
-  MdAccessTime
+  MdAccessTime,
+  MdAssignment
 } from 'react-icons/md';
 import { FaSpinner } from 'react-icons/fa';
 
+// FW_VERSION: Frontend version tracking for ReceiverDisplay component
+// v1.0.0: Initial version - Basic receiver display with battery, connectivity, and cue status
+// v1.1.0: Added health bar at top of receiver cards displaying successPercent (0-100% with red-to-green gradient)
+// v1.2.0: Increased connection timeout threshold from 5 seconds to 10 seconds
+const FW_VERSION = "1.2.0";
 
 function SingleReceiver({ rcv_name, receiver, showMapping, showId }) {
   const [popup, setPopup] = useState(null);
@@ -56,13 +62,16 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId }) {
   if (receiver.status && receiver.status.lmt) {
     latency = Date.now() - receiver.status.lmt
     txmtLatency = receiver.status.lat
-    isConnectionGood = (latency <= 5000);
+    isConnectionGood = (latency <= 10000);
   } else {
     isConnectionGood = receiver.connectionStatus === "good";
   }
 
   const lfx = (latency / 1000).toFixed(1)
 
+  // Get successPercent for health bar (0-100)
+  const successPercent = receiver.status?.successPercent ?? null;
+  const healthPercent = successPercent !== null ? Math.max(0, Math.min(100, successPercent)) : null;
 
   // Determine battery styling and icon based on level
   const batteryClass =
@@ -87,6 +96,22 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId }) {
       ref={receiverRef}
       className={`border rounded-xl p-4 ${bgColor} text-white shadow-md dark:bg-gray-700 dark:border-gray-600 flex flex-col gap-3 w-72 relative`}
     >
+      {/* Health Bar */}
+      {healthPercent !== null && (
+        <div className="w-full h-2 bg-gray-700 rounded-full overflow-hidden -mt-4 -mx-4 mb-1">
+          <div
+            className="h-full transition-all duration-300 ease-out"
+            style={{
+              width: `${healthPercent}%`,
+              backgroundColor: healthPercent >= 50 
+                ? `rgb(${Math.floor(255 * (1 - (healthPercent - 50) / 50))}, 255, 0)` 
+                : `rgb(255, ${Math.floor(255 * (healthPercent / 50))}, 0)`
+            }}
+            title={`Success Rate: ${healthPercent}%`}
+          />
+        </div>
+      )}
+      
       {/* Receiver Header */}
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold">{rcv_name}</h2>
@@ -210,7 +235,7 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId }) {
   );
 }
 
-export default function ReceiverDisplay() {
+export default function ReceiverDisplay({ setCurrentTab }) {
     const { systemConfig, stagedShow } = useAppStore();
     const { stateData } = useStateAppStore()
     const [ targetRcvMap, setTargetRcvMap ] = useState({});
@@ -277,10 +302,26 @@ export default function ReceiverDisplay() {
     }, [systemConfig.receivers, stagedShow, stateData.fw_state?.active_protocol, stateData.fw_state?.receivers]);
 
     return (
-        <div className="w-full flex flex-wrap gap-5 p-4 justify-center">
-        {Object.keys(receivers).map((rcv_key, i) => (
-            <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]}  showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id}/>
-        ))}
+        <div className="w-full">
+            {/* Header with Show Loadout button */}
+            <div className="flex justify-between items-center p-4 border-b border-gray-700">
+                <h1 className="text-2xl font-bold text-white">Receivers</h1>
+                {stagedShow && (
+                    <button
+                        onClick={() => setCurrentTab('loadout')}
+                        className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                    >
+                        <MdAssignment />
+                        View Show Loadout
+                    </button>
+                )}
+            </div>
+            
+            <div className="flex flex-wrap gap-5 p-4 justify-center">
+            {Object.keys(receivers).map((rcv_key, i) => (
+                <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]}  showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id}/>
+            ))}
+            </div>
         </div>
     );
 }

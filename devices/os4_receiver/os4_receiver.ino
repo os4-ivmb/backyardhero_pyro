@@ -4,10 +4,14 @@
 #include <RF24Mesh.h>
 #include <Adafruit_NeoPixel.h>
 
-#define BOARD_VERISON 6 
-#define FW_VERISON 5
-#define NODE_ID 115
-const char RECEIVER_IDENT[] = "RX115";
+// FW_VERSION: Firmware version tracking for os4_receiver
+// v1-v4: Historical versions (not documented, dates unknown)
+// v5: Baseline version before tracking system (date unknown)
+// v6: 2025-01-XX - Added FW_VERSION tracking system with version history comments (fixed typo: FW_VERISON -> FW_VERSION)
+#define BOARD_VERISON 7
+#define FW_VERSION 6
+#define NODE_ID 122
+const char RECEIVER_IDENT[] = "RX122";
 
 const bool RECEIVER_USES_V1_CUES = false;
  
@@ -414,7 +418,6 @@ void runPlayLoop(){
             fireStartTime[i] = now;
             targetFired[i] = true;
             fireChanged=true;
-            refreshFiring();
           }
           
           else if (targetFiring[i]) {
@@ -444,6 +447,7 @@ void runPlayLoop(){
         isPlaying = false;
         startReady = false;
         currentShowId=0;
+        testLEDStrip_pulsingYellowFast();
         Serial.println("Show complete. Stopping playback and setting show to 0.");
       }
     }
@@ -530,6 +534,35 @@ void testLEDStrip_pulsingGreen() {
       uint8_t brightness = (j * 255) / steps;
       for (int i = 0; i < NUM_LEDS; i++) {
         strip.setPixelColor(i, strip.Color(0, brightness, 0));
+      }
+      strip.show();
+      delay(delayTime);
+    }
+  }
+  strip.clear();
+  strip.show();
+}
+
+void testLEDStrip_pulsingYellowFast() {
+  int pulseDuration = 200;  // Much faster: 200ms instead of ~667ms
+  int steps = 20;            // Fewer steps for faster animation
+  int delayTime = (pulseDuration / 2) / steps;
+
+  for (int p = 0; p < 3; p++) {
+    
+    for (int j = 0; j <= steps; j++) {
+      uint8_t brightness = (j * 255) / steps;
+      for (int i = 0; i < NUM_LEDS; i++) {
+        strip.setPixelColor(i, strip.Color(brightness, brightness, 0));  // Yellow: R=G, B=0
+      }
+      strip.show();
+      delay(delayTime);
+    }
+    
+    for (int j = steps; j >= 0; j--) {
+      uint8_t brightness = (j * 255) / steps;
+      for (int i = 0; i < NUM_LEDS; i++) {
+        strip.setPixelColor(i, strip.Color(brightness, brightness, 0));  // Yellow: R=G, B=0
       }
       strip.show();
       delay(delayTime);
@@ -823,11 +856,6 @@ void displayInputStates(uint8_t *shiftInput) {
 
 void refreshFiring() {
   
-  for (int i = 0; i < NUM_LEDS; i++) {
-    strip.setPixelColor(i, 0);
-  }
-  
-  
   int targetCount = 0;
   for (int i = 0; i < 128; i++) {
     if (targetFiring[i]) {
@@ -868,11 +896,7 @@ void refreshFiring() {
     Serial.print(" ");
   }
   Serial.println();
-  
-  
-  digitalWrite(LED_BUILTIN, HIGH);
-  delay(100);
-  digitalWrite(LED_BUILTIN, LOW);
+
 }
 
 void handleInputMode() {
@@ -902,7 +926,7 @@ void setup(){
   Serial.println(BOARD_VERISON);
 
   Serial.print("FW Version: ");
-  Serial.println(FW_VERISON);
+  Serial.println(FW_VERSION);
 
   Serial.print("Ident: ");
   Serial.println(RECEIVER_IDENT);
@@ -951,7 +975,7 @@ void setup(){
     radio.setPALevel(RF24_PA_MAX);
   }
   radio.setChannel(85);
-  radio.setRetries(15,30);
+  radio.setRetries(15, 15);
   pinMode(15, OUTPUT);
  
   mesh.releaseAddress();
@@ -1014,6 +1038,7 @@ void loop(){
         Serial.println(mType);
         break;
     }
+    Serial.println("Cmd in status out");
     sendStatus();
 
     if(mType == SHOW_START){
@@ -1058,6 +1083,7 @@ void loop(){
     Serial.println("Disconnect detected. Will try to ping again.");
     if(isPlaying){
       Serial.println("Disonnected while playing. Stopping show.");
+      testLEDStrip_flashingPurple();
       isPlaying=false;
     }
     gotCommand=false;
@@ -1093,7 +1119,9 @@ void loop(){
         incrementFailedTXCtAndMaybeChangeTXP();
         testLEDStrip_pulsingBlue();
       }
+      Serial.println("Timed out status send");
     }
+    Serial.println("TOS");
     sendStatus();
     lastStatus = millis();
     txForgivenessCt++;
@@ -1105,7 +1133,7 @@ void loop(){
         failed_tx_ct = 0;
       }
     }
-
+    
   }
 
 }

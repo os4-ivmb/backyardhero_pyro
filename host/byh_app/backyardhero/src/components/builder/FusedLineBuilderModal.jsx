@@ -67,7 +67,7 @@ const FusedLineBuilderModal = ({ isOpen, onClose, onAdd, inventory }) => {
             </option>
             {fuseInventory.map((fuse) => (
               <option key={fuse.id} value={fuse.id} >
-                {fuse.name}
+                {fuse.name} ({fuse.burn_rate} s/f)
               </option>
             ))}
           </select>
