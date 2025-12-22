@@ -2,83 +2,90 @@
     0% {
       outline-width: 1px;
       outline-offset: 0;
-      outline-color: rgba(0, 130, 206, 0);
+      outline-color: rgba(16, 185, 129, 0);
     }
   
     10% {
-      outline-color: rgba(0, 174, 49, 0.75);
+      outline-color: rgba(16, 185, 129, 0.75);
     }
   
     /* The animation finishes at 50% */
     50% {
       outline-width: 7px;
       outline-offset: 4px;
-      outline-color: rgba(0, 130, 206, 0);
+      outline-color: rgba(16, 185, 129, 0);
     }
   
     100% {
       outline-width: 7px;
       outline-offset: 4px;
-      outline-color: rgba(102, 102, 102, 0);
+      outline-color: rgba(16, 185, 129, 0);
     }
   }
 
 .pushy_green_border {
     outline-width: 1px;
     outline-offset: 0;
-    background-color:rgba(0, 174, 49, 0.75);
-    outline-color: rgba(0, 174, 49, 0.75);
+    background-color: rgba(15, 23, 42, 0.95);
+    border: 2px solid rgba(16, 185, 129, 0.5);
+    color: rgb(110, 231, 183);
+    outline-color: rgba(16, 185, 129, 0.75);
     outline-style: solid;
     animation: animateOutline 1s ease infinite;
     cursor: pointer;
+    box-shadow: 0 0 12px rgba(16, 185, 129, 0.4);
   }
 
   .pushy_green_border_slow {
     outline-width: 1px;
     outline-offset: 0;
-    background-color:rgba(0, 174, 49, 0.75);
-    outline-color: rgba(0, 174, 49, 0.75);
+    background-color: rgba(15, 23, 42, 0.95);
+    border: 2px solid rgba(16, 185, 129, 0.5);
+    color: rgb(110, 231, 183);
+    outline-color: rgba(16, 185, 129, 0.75);
     outline-style: solid;
     animation: animateOutline 3s ease infinite;
     cursor: none;
+    box-shadow: 0 0 12px rgba(16, 185, 129, 0.4);
   }
 
   .pushy_green_border_slowest {
     outline-width: 1px;
     outline-offset: 0;
-    background-color:rgba(0, 174, 49, 0.75);
-    outline-color: rgba(0, 174, 49, 0.75);
+    background-color: rgba(15, 23, 42, 0.95);
+    border: 2px solid rgba(16, 185, 129, 0.5);
+    color: rgb(110, 231, 183);
+    outline-color: rgba(16, 185, 129, 0.75);
     outline-style: solid;
     animation: animateOutline 5s ease infinite;
     cursor: none;
+    box-shadow: 0 0 12px rgba(16, 185, 129, 0.4);
   }
 
   .pushy_green_border:hover {
-    background-color:rgba(0, 79, 22, 0.75);
+    background-color: rgba(15, 23, 42, 0.95);
+    border-color: rgba(16, 185, 129, 0.8);
+    box-shadow: 0 0 16px rgba(16, 185, 129, 0.6);
   }
 
   .rotating_border_fast {
-
-    border: 2px solid #0000;
-    border-radius: 4px;
-    background: linear-gradient(#131219, #121917) padding-box, linear-gradient(
-          var(--angle),
-          #070707,
-          #00ff55
-        ) border-box;
+    border: 2px solid transparent;
+    border-radius: 2px;
+    background: linear-gradient(rgb(15, 23, 42), rgb(15, 23, 42)) padding-box, 
+                linear-gradient(var(--angle), rgb(6, 182, 212), rgb(16, 185, 129), rgb(6, 182, 212)) border-box;
+    color: rgb(110, 231, 183);
     animation: 1s rotate linear infinite;
+    box-shadow: 0 0 12px rgba(16, 185, 129, 0.4);
   }
   
   .rotating_border {
-
-    border: 2px solid #0000;
-    border-radius: 4px;
-    background: linear-gradient(#131219, #121917) padding-box, linear-gradient(
-          var(--angle),
-          #070707,
-          #00ff55
-        ) border-box;
+    border: 2px solid transparent;
+    border-radius: 2px;
+    background: linear-gradient(rgb(15, 23, 42), rgb(15, 23, 42)) padding-box, 
+                linear-gradient(var(--angle), rgb(6, 182, 212), rgb(16, 185, 129), rgb(6, 182, 212)) border-box;
+    color: rgb(110, 231, 183);
     animation: 4s rotate linear infinite;
+    box-shadow: 0 0 12px rgba(16, 185, 129, 0.4);
   }
   
   @keyframes rotate {

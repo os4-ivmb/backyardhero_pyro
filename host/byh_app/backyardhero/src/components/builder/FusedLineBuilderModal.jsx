@@ -3,7 +3,8 @@ import React, { useState, useEffect } from "react";
 const FusedLineBuilderModal = ({ isOpen, onClose, onAdd, inventory }) => {
   const [fuseType, setFuseType] = useState("");
   const [shellCount, setShellCount] = useState(1);
-  const [spacing, setSpacing] = useState(1);
+  const [spacing, setSpacing] = useState(2.75);
+  const [leadInInches, setLeadInInches] = useState(1);
   const [shellSlots, setShellSlots] = useState([]);
 
   // Filter inventory for FUSE and AERIAL_SHELL types
@@ -28,15 +29,26 @@ const FusedLineBuilderModal = ({ isOpen, onClose, onAdd, inventory }) => {
   };
 
   const handleAddFusedLine = () => {
-    const lead_in_inches = 1
     const last_shell = shellSlots[shellSlots.length-1]
-    const calcDuration = lead_in_inches + parseInt(spacing) * shellSlots.length + last_shell.lift_delay + last_shell.fuse_delay
     const fuse = fuseInventory.find((fuse) => fuse.id === parseInt(fuseType))
+    
+    // Calculate duration: time from lighting fuse until last shell effect appears
+    // Convert fuse lengths (inches) to time (seconds) using burn_rate (seconds per foot)
+    const burn_rate = fuse?.burn_rate || 0;
+    const lead_in_time = (leadInInches / 12) * burn_rate; // Lead-in fuse burn time
+    const total_fuse_length_inches = parseInt(spacing) * shellSlots.length; // Total fuse between shells
+    const fuse_burn_time = (total_fuse_length_inches / 12) * burn_rate; // Time for fuse to burn between shells
+    const last_shell_delays = (last_shell?.lift_delay || 0) + (last_shell?.fuse_delay || 0); // Last shell's delays
+    
+    // Total duration = lead-in time + fuse burn time + last shell delays
+    const calcDuration = lead_in_time + fuse_burn_time + last_shell_delays;
+    
     const name = `${fuse.name} x ${shellSlots.length} shell`
     const fusedLine = {
       type: "FUSED_AERIAL_LINE",
       fuse,
       spacing,
+      leadInInches, // Store lead-in inches for delay calculation
       duration: calcDuration,
       shells: shellSlots,
       name
@@ -73,7 +85,7 @@ const FusedLineBuilderModal = ({ isOpen, onClose, onAdd, inventory }) => {
           </select>
         </div>
 
-        {/* Shell Count and Spacing */}
+        {/* Shell Count, Spacing, and Lead-In */}
         <div className="mb-4 flex space-x-4">
           <div>
             <label className="block mb-2">Count of Shells:</label>
@@ -90,11 +102,22 @@ const FusedLineBuilderModal = ({ isOpen, onClose, onAdd, inventory }) => {
             <label className="block mb-2">Spacing (inches):</label>
             <input
               type="number"
-              min="1"
+              min="0.01"
               step=".01"
               className="w-full p-2 bg-gray-700 rounded"
               value={spacing}
-              onChange={(e) => setSpacing(Math.max(1, parseFloat(e.target.value, 10)))}
+              onChange={(e) => setSpacing(Math.max(0.01, parseFloat(e.target.value, 10)))}
+            />
+          </div>
+          <div>
+            <label className="block mb-2">Lead-In (inches):</label>
+            <input
+              type="number"
+              min="0"
+              step=".01"
+              className="w-full p-2 bg-gray-700 rounded"
+              value={leadInInches}
+              onChange={(e) => setLeadInInches(Math.max(0, parseFloat(e.target.value, 10)))}
             />
           </div>
         </div>

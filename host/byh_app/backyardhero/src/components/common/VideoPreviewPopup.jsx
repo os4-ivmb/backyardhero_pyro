@@ -9,7 +9,7 @@ export default function VideoPreviewPopup({ isVisible, items, onClose }) {
   if (!isVisible) return null;
 
   return (
-    <div className="fixed top-4 left-4 w-auto p-1 bg-gray-800 bg-opacity-50 shadow-lg rounded-lg border border-gray-700 flex w-full z-50">
+    <div className="fixed top-4 left-4 w-auto p-1 bg-gray-800 bg-opacity-50 shadow-lg rounded-lg border border-gray-700 flex w-full z-[100]">
       <button
           onClick={onClose}
           className="text-gray-500 hover:text-gray-800"

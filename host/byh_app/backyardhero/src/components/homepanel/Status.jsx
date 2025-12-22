@@ -97,28 +97,30 @@ export default function Status() {
         return () => clearInterval(intervalId); // Cleanup interval on component unmount
     }, [stateData]);
 
-    // Define base classes for status items for better consistency
-    const statusItemBaseClass = "flex-1 flex items-center justify-center text-xs font-medium shadow-md rounded-md px-2 py-1 min-w-[80px]";
+    // Define base classes for status items for better consistency - futuristic square design
+    const statusItemBaseClass = "flex-1 flex items-center justify-center text-xs font-medium border border-opacity-30 rounded-sm px-2 py-1 min-w-[80px] backdrop-blur-sm transition-all duration-200";
 
-    let showRunClass = "bg-gray-800"
+    let showRunClass = "bg-slate-900 border-slate-600 text-slate-300"
     let showRunLabel = "No Show"
     if(stateData.fw_state?.loaded_show_name){
-        showRunClass = stateData.fw_state?.show_running ? 'bg-green-800' : 'bg-red-800'
+        showRunClass = stateData.fw_state?.show_running 
+            ? 'bg-emerald-950 border-emerald-500 text-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.3)]' 
+            : 'bg-slate-900 border-red-500 text-red-300'
         showRunLabel= stateData.fw_state?.show_running ? 'Show Running' : 'Show Stopped'
     }
 
-    let txClass = "bg-red-800"
+    let txClass = "bg-slate-900 border-red-500 text-red-300"
     let txLabel = "No TX Conn"
     if(stateData.fw_state?.device_running){
         if(stateData.fw_state?.active_protocol){
-            txClass = "bg-green-700"
+            txClass = "bg-slate-900 border-cyan-500 text-cyan-300 shadow-[0_0_8px_rgba(6,182,212,0.3)]"
             txLabel = stateData.fw_state?.active_protocol
         }else{
-            txClass = "bg-yellow-600"
+            txClass = "bg-slate-900 border-amber-500 text-amber-300"
             txLabel = "Unknown TX"
         }
     } else {
-        txClass = "bg-red-700";
+        txClass = "bg-slate-900 border-red-500 text-red-300";
     }
 
     return (
@@ -147,45 +149,92 @@ export default function Status() {
                             connectWebSocket();
                         }
                     }}
-                    className={`${statusItemBaseClass} ${isConnected ? 'bg-green-600 text-white' : 'bg-red-600 text-white hover:bg-red-700'}`}
+                    className={`${statusItemBaseClass} ${isConnected 
+                        ? 'bg-slate-900 border-emerald-500 text-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.3)] hover:shadow-[0_0_12px_rgba(16,185,129,0.5)]' 
+                        : 'bg-slate-900 border-red-500 text-red-300 hover:border-red-400 hover:shadow-[0_0_8px_rgba(239,68,68,0.3)]'}`}
                 >
                     {isConnected ? (<span>Connected</span> ) : <span className="flex items-center"><MdRefresh className="mr-1" /> Reconnect</span>}
                 </button>
-                <div className={`${statusItemBaseClass} ${stateData.fw_state?.daemon_active ? 'bg-green-600 text-white' : 'bg-red-600 text-white'}`}>{stateData.fw_state?.daemon_active ? "Daemon Active" : "Daemon Down"}</div>
-                <div className={`${statusItemBaseClass} group ${txClass} ${txClass.includes('yellow') ? 'text-yellow-900' : 'text-white'}`}>
+                <div className={`${statusItemBaseClass} ${stateData.fw_state?.daemon_active 
+                    ? 'bg-slate-900 border-emerald-500 text-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.3)]' 
+                    : 'bg-slate-900 border-red-500 text-red-300'}`}>
+                    {stateData.fw_state?.daemon_active ? "Daemon Active" : "Daemon Down"}
+                </div>
+                <div className={`${statusItemBaseClass} group ${txClass}`}>
                     <div className="group-hover:hidden">{txLabel}</div>
                     <div className="hidden group-hover:block text-xs p-1">{`${stateData.fw_state?.settings?.rf?.addr}@${stateData.fw_state?.settings?.rf?.baud}`}</div>
                 </div>
-                <div className={`${statusItemBaseClass} ${stateData.fw_state?.manual_fire_active ? 'bg-yellow-500 text-yellow-900' : 'bg-green-600 text-white'}`}>{stateData.fw_state?.manual_fire_active ? "Manual Fire" : "MF Disarm"}</div>
-                <div className={`${statusItemBaseClass} ${stateData.fw_state?.device_is_armed ? 'armed-striped text-black' : 'bg-gray-500 text-white'}`}>{stateData.fw_state?.device_is_armed ? "ARMED" : "DISARMED"}</div>
-                
-                <div className={`${statusItemBaseClass} ${stateData.fw_state?.loaded_show_id ? 'bg-blue-600 text-white' : 'bg-gray-400 text-gray-800'}`}>{stateData.fw_state?.loaded_show_id ? `Show Loaded`: `No show loaded`}</div>
-                <div className={`${statusItemBaseClass} ${stateData.fw_state?.device_is_transmitting ? 'bg-yellow-500 text-yellow-900' : 'bg-gray-400 text-gray-800'}`}>{stateData.fw_state?.device_is_transmitting ? "TX ACTIVE": "NO TX"}</div>
-                <div className={`${statusItemBaseClass} ${(stateData.fw_cursor >= 0 ? 'bg-green-600' : 'bg-blue-600')} text-white flex flex-col items-center justify-center`}>
-                    <span className="text-xxs -mb-0.5 leading-tight">Cursor @</span>
-                    <b className="text-sm leading-tight">{stateData.fw_cursor}</b>
+                <div className={`${statusItemBaseClass} ${stateData.fw_state?.manual_fire_active 
+                    ? 'bg-slate-900 border-amber-500 text-amber-300 shadow-[0_0_8px_rgba(245,158,11,0.3)]' 
+                    : 'bg-slate-900 border-slate-600 text-slate-400'}`}>
+                    {stateData.fw_state?.manual_fire_active ? "Manual Fire" : "MF Disarm"}
                 </div>
-                <div className={`${statusItemBaseClass} ${showRunClass.replace('-800', '-600').replace('-500', '-600')} text-white`}>{showRunLabel}</div>
+                <div className={`${statusItemBaseClass} ${stateData.fw_state?.device_is_armed 
+                    ? 'armed-striped-futuristic' 
+                    : 'bg-slate-900 border-slate-600 text-slate-400'}`}>
+                    {stateData.fw_state?.device_is_armed ? "ARMED" : "DISARMED"}
+                </div>
+                
+                <div className={`${statusItemBaseClass} ${stateData.fw_state?.loaded_show_id 
+                    ? 'bg-slate-900 border-blue-500 text-blue-300 shadow-[0_0_8px_rgba(59,130,246,0.3)]' 
+                    : 'bg-slate-900 border-slate-600 text-slate-400'}`}>
+                    {stateData.fw_state?.loaded_show_id ? `Show Loaded`: `No show loaded`}
+                </div>
+                <div className={`${statusItemBaseClass} ${stateData.fw_state?.device_is_transmitting 
+                    ? 'bg-slate-900 border-amber-500 text-amber-300 shadow-[0_0_8px_rgba(245,158,11,0.3)]' 
+                    : 'bg-slate-900 border-slate-600 text-slate-400'}`}>
+                    {stateData.fw_state?.device_is_transmitting ? "TX ACTIVE": "NO TX"}
+                </div>
+                <div className={`${statusItemBaseClass} ${(stateData.fw_cursor >= 0 
+                    ? 'bg-slate-900 border-emerald-500 text-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.3)]' 
+                    : 'bg-slate-900 border-blue-500 text-blue-300')} flex items-center justify-center gap-1`}>
+                    <span className="text-xs">Time:</span>
+                    <b className="text-sm">{stateData.fw_cursor > 0 ? stateData.fw_cursor : 0}</b>
+                </div>
+                <div className={`${statusItemBaseClass} ${showRunClass} text-white`}>{showRunLabel}</div>
             </div>
 
-            {/* CSS for armed striped background */}
+            {/* CSS for armed striped background - futuristic style */}
             <style jsx>{`
-                .armed-striped {
-                    color: #FFF;
+                .armed-striped-futuristic {
+                    color: #fbbf24;
                     font-size: 20px;
-                    text-shadow: 
-                        2px 2px 0px #000, 
-                        -2px -2px 0px #000, 
-                        2px -2px 0px #000, 
-                        -2px 2px 0px #000;
-                    background: repeating-linear-gradient(
-                        45deg,
-                        #fbbf24,
-                        #fbbf24 10px,
-                        #000000 10px,
-                        #000000 20px
-                    );
                     font-weight: bold;
+                    text-shadow: 
+                        0 0 10px rgba(251, 191, 36, 0.8),
+                        0 0 20px rgba(251, 191, 36, 0.5),
+                        2px 2px 4px rgba(0, 0, 0, 0.8);
+                    background: linear-gradient(
+                        135deg,
+                        #1e293b 0%,
+                        #0f172a 50%,
+                        #1e293b 100%
+                    );
+                    border: 2px solid #fbbf24 !important;
+                    box-shadow: 
+                        0 0 12px rgba(251, 191, 36, 0.4),
+                        inset 0 0 20px rgba(251, 191, 36, 0.1);
+                    position: relative;
+                    overflow: hidden;
+                }
+                .armed-striped-futuristic::before {
+                    content: '';
+                    position: absolute;
+                    top: 0;
+                    left: -100%;
+                    width: 100%;
+                    height: 100%;
+                    background: linear-gradient(
+                        90deg,
+                        transparent,
+                        rgba(251, 191, 36, 0.2),
+                        transparent
+                    );
+                    animation: shine 3s infinite;
+                }
+                @keyframes shine {
+                    0% { left: -100%; }
+                    100% { left: 100%; }
                 }
             `}</style>
         </div>

@@ -1,151 +1,316 @@
 {
-    "host_version":0.08,
-
-    "system": {
-        "dongle_port": "/dev/tty.usbmodem01",
-        "dongle_baud": 115200,
-        "dongle_protocol": "BKYD_TS_HYBRID"
+  "host_version": 0.08,
+  "system": {
+    "dongle_port": "/dev/tty.usbmodem01",
+    "dongle_baud": 115200,
+    "dongle_protocol": "BKYD_TS_HYBRID"
+  },
+  "receivers": {
+    "RX101": {
+      "label": "BYH v0.2 RCV 2",
+      "type": "BKYD_TS_24_1",
+      "cues": {
+        "RX101": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      }
     },
-
-    "receivers": {
-        "RX101": {
-            "label": "BYH v0.2 RCV 2",
-            "type":"BKYD_TS_24_1",
-            "cues": {
-                "RX101": [1, 2, 3, 4, 5, 6, 7, 8]
-            }
-        },
-        "RX110": {
-            "label": "BYH v0.2 RCV 2",
-            "type":"BKYD_TS_24_1",
-            "cues": {
-                "RX110": [1, 2, 3, 4, 5, 6, 7, 8]
-            }
-        },
-        "RX112": {
-            "label": "BYH v0.2 RCV 2",
-            "type":"BKYD_TS_24_1",
-            "cues": {
-                "RX112": [1, 2, 3, 4, 5, 6, 7, 8]
-            }
-        },
-        "RX115": {
-            "label": "BYH v0.2 RCV 2",
-            "type":"BKYD_TS_24_1",
-            "cues": {
-                "RX115": [1, 2, 3, 4, 5, 6, 7, 8]
-            }
-        },
-        "RX116": {
-            "label": "BYH v0.2 RCV 2",
-            "type":"BKYD_TS_24_1",
-            "cues": {
-                "RX116": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-            }
-        },
-        "RX117": {
-            "label": "BYH v0.2 RCV 2",
-            "type":"BKYD_TS_24_1",
-            "cues": {
-                "RX117": [1, 2, 3, 4, 5, 6, 7, 8]
-            }
-        },
-        "RX118": {
-            "label": "BYH v0.2 RCV 2",
-            "type":"BKYD_TS_24_1",
-            "cues": {
-                "RX118": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-            }
-        },
-        "RX119": {
-            "label": "BYH v0.2 RCV 2",
-            "type":"BKYD_TS_24_1",
-            "cues": {
-                "RX119": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-            }
-        },
-        "RX120": {
-            "label": "BYH v0.2 RCV 2",
-            "type":"BKYD_TS_24_1",
-            "cues": {
-                "RX120": [1, 2, 3, 4, 5, 6, 7, 8]
-            }
-        },
-        "RX121": {
-            "label": "BYH v0.2 RCV 2",
-            "type":"BKYD_TS_24_1",
-            "cues": {
-                "RX121": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-            }
-        },
-        "RX122": {
-            "label": "BYH v0.2 RCV 2",
-            "type":"BKYD_TS_24_1",
-            "cues": {
-                "RX122": [1, 2, 3, 4, 5, 6, 7, 8]
-            }
-        },
-
-        "RX124": {
-            "label": "BYH v0.2 RCV 2",
-            "type":"BKYD_TS_24_1",
-            "cues": {
-                "RX124": [1, 2, 3, 4, 5, 6, 7, 8]
-            }
-        },
-       "BILUSOCN1": {
-            "type":"BILUSOCN_433_TX_ONLY",
-            "cues": {
-                "1": [1, 2, 3, 4]
-            }
-        },
-        "BILUSOCN2": {
-            "type":"BILUSOCN_433_TX_ONLY",
-            "cues": {
-                "1": [5, 6, 7, 8]
-            }
-        },
-        "BILUSOCN3": {
-            "type":"BILUSOCN_433_TX_ONLY",
-            "cues": {
-                "1": [9, 10, 11, 12]
-            }
-        }
+    "RX110": {
+      "label": "BYH v0.2 RCV 2",
+      "type": "BKYD_TS_24_1",
+      "cues": {
+        "RX110": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      }
     },
-
-    "DONT FUCK WITH ANYTHING UNDER HERE": "OKAY, I WONT",
-
-    "protocols": {
-        "BKYD_TS_HYBRID":{
-            "label": "Backyard Hero v0.1",
-            "config": {
-                "min_battery_to_fire_pct": 30,
-                "require_continuity": false
-            }
-        }
+    "RX112": {
+      "label": "BYH v0.2 RCV 2",
+      "type": "BKYD_TS_24_1",
+      "cues": {
+        "RX112": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      }
     },
-
-    "types": {
-        "BILUSOCN_433_TX_ONLY":{
-            "supported_protocols": ["BKYD_TS_HYBRID"],
-            "label": "Bilusocn 4ch",
-            "isOneWay": true,
-            "checks": ["TX"],
-            "frequency":0.4339,
-            "canTransmit": false,
-            "addressable": false,
-            "capabilties": [],
-            "configs": {}
-        },
-        "BKYD_TS_24_1":{
-            "label": "BYH v0.2",
-            "supported_protocols": ["BKYD_TS_HYBRID"],
-            "isOneWay": false,
-            "checks": ["TX","CONTINUITY", "MIN_POWER"],
-            "frequency":2.490,
-            "canTransmit": true,
-            "addressable": true,
-            "capabilties": ["CONTINUITY", "POWER", "MESH", "PRELOAD", "SYNC"]
-        }
+    "RX115": {
+      "label": "BYH v0.2 RCV 2",
+      "type": "BKYD_TS_24_1",
+      "cues": {
+        "RX115": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      }
+    },
+    "RX116": {
+      "label": "BYH v0.2 RCV 2",
+      "type": "BKYD_TS_24_1",
+      "cues": {
+        "RX116": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16
+        ]
+      }
+    },
+    "RX117": {
+      "label": "BYH v0.2 RCV 2",
+      "type": "BKYD_TS_24_1",
+      "cues": {
+        "RX117": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      }
+    },
+    "RX118": {
+      "label": "BYH v0.2 RCV 2",
+      "type": "BKYD_TS_24_1",
+      "cues": {
+        "RX118": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16
+        ]
+      }
+    },
+    "RX119": {
+      "label": "BYH v0.2 RCV 2",
+      "type": "BKYD_TS_24_1",
+      "cues": {
+        "RX119": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16
+        ]
+      }
+    },
+    "RX120": {
+      "label": "BYH v0.2 RCV 2",
+      "type": "BKYD_TS_24_1",
+      "cues": {
+        "RX120": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      }
+    },
+    "RX121": {
+      "label": "BYH v0.2 RCV 2",
+      "type": "BKYD_TS_24_1",
+      "cues": {
+        "RX121": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16
+        ]
+      }
+    },
+    "RX122": {
+      "label": "BYH v0.2 RCV 2",
+      "type": "BKYD_TS_24_1",
+      "cues": {
+        "RX122": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      }
+    },
+    "RX124": {
+      "label": "BYH v0.2 RCV 2",
+      "type": "BKYD_TS_24_1",
+      "cues": {
+        "RX124": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      }
+    },
+    "BILUSOCN1": {
+      "type": "BILUSOCN_433_TX_ONLY",
+      "cues": {
+        "1": [
+          1,
+          2,
+          3,
+          4
+        ]
+      }
+    },
+    "BILUSOCN2": {
+      "type": "BILUSOCN_433_TX_ONLY",
+      "cues": {
+        "1": [
+          5,
+          6,
+          7,
+          8
+        ]
+      }
+    },
+    "BILUSOCN3": {
+      "type": "BILUSOCN_433_TX_ONLY",
+      "cues": {
+        "1": [
+          9,
+          10,
+          11,
+          12
+        ]
+      }
     }
+  },
+  "DONT FUCK WITH ANYTHING UNDER HERE": "OKAY, I WONT",
+  "protocols": {
+    "BKYD_TS_HYBRID": {
+      "label": "Backyard Hero v0.1",
+      "config": {
+        "min_battery_to_fire_pct": 30,
+        "require_continuity": true
+      }
+    }
+  },
+  "types": {
+    "BILUSOCN_433_TX_ONLY": {
+      "supported_protocols": [
+        "BKYD_TS_HYBRID"
+      ],
+      "label": "Bilusocn 4ch",
+      "isOneWay": true,
+      "checks": [
+        "TX"
+      ],
+      "frequency": 0.4339,
+      "canTransmit": false,
+      "addressable": false,
+      "capabilties": [],
+      "configs": {}
+    },
+    "BKYD_TS_24_1": {
+      "label": "BYH v0.2",
+      "supported_protocols": [
+        "BKYD_TS_HYBRID"
+      ],
+      "isOneWay": false,
+      "checks": [
+        "TX",
+        "CONTINUITY",
+        "MIN_POWER"
+      ],
+      "frequency": 2.49,
+      "canTransmit": true,
+      "addressable": true,
+      "capabilties": [
+        "CONTINUITY",
+        "POWER",
+        "MESH",
+        "PRELOAD",
+        "SYNC"
+      ]
+    }
+  }
 }

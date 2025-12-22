@@ -160,10 +160,12 @@ const useAppStore = create((set, get) => ({
 
   saveSystemConfig: async (newConfig) => {
     try {
-      await axios.post('/api/system/configg', newConfig);
+      const { data } = await axios.post('/api/system/config', newConfig);
       set({ systemConfig: newConfig }); // Update the local state
+      return data;
     } catch (error) {
       console.error('Failed to save system Config:', error);
+      throw error;
     }
   },
 

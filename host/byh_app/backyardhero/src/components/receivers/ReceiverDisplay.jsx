@@ -12,6 +12,7 @@ import {
   MdAssignment
 } from 'react-icons/md';
 import { FaSpinner } from 'react-icons/fa';
+import ShowHealth from "../homepanel/ShowHealth";
 
 // FW_VERSION: Frontend version tracking for ReceiverDisplay component
 // v1.0.0: Initial version - Basic receiver display with battery, connectivity, and cue status
@@ -64,7 +65,6 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId }) {
   let txmtLatency = 0;
   if (receiver.status && receiver.status.lmt) {
     latency = Date.now() - receiver.status.lmt
-    txmtLatency = receiver.status.lat
     isConnectionGood = (latency <= 10000);
   } else {
     isConnectionGood = receiver.connectionStatus === "good";
@@ -309,6 +309,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
     const { systemConfig, stagedShow } = useAppStore();
     const { stateData } = useStateAppStore()
     const [ targetRcvMap, setTargetRcvMap ] = useState({});
+    const [showUnusedReceivers, setShowUnusedReceivers] = useState(false);
 
     const [receivers, setReceivers] = useState([]);
 
@@ -470,6 +471,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
 
     return (
         <div className="w-full">
+            <ShowHealth />
             {/* System Health Bar - Fixed at top */}
             {(systemHealth.avgLatencyPercent !== null || systemHealth.avgSuccessPercent !== null || systemHealth.continuityPercent !== null) && (
               <div className="sticky top-0 z-10 bg-gray-900 border-b border-gray-700 py-2 px-3">
@@ -559,28 +561,6 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                         </div>
                       </div>
                     )}
-                    {/* Continuity Health Bar */}
-                    {systemHealth.continuityPercent !== null && (
-                      <div className="flex-1">
-                        <div className="text-xs text-gray-500 mb-0.5">Continuity</div>
-                        <div className="relative w-full h-1.5 bg-gray-800 rounded-full overflow-visible">
-                          {/* Continuity bar with full 0-100 color gradient */}
-                          <div
-                            className="absolute h-full transition-all duration-1000 ease-out rounded-full"
-                            style={{
-                              width: `${systemHealth.continuityPercent}%`,
-                              backgroundColor: systemHealth.continuityPercent >= 50 
-                                ? `rgba(${Math.floor(225 * (1 - (systemHealth.continuityPercent - 50) / 50))}, 225, 0, 0.85)` 
-                                : `rgba(225, ${Math.floor(225 * (systemHealth.continuityPercent / 50))}, 0, 0.85)`
-                            }}
-                          />
-                        </div>
-                        {/* Count text below the bar */}
-                        <div className="text-xs text-gray-400 mt-0.5 text-center">
-                          {systemHealth.continuityCount}/{systemHealth.continuityTotal} connected
-                        </div>
-                      </div>
-                    )}
                   </div>
                 </div>
               </div>
@@ -600,11 +580,49 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                 )}
             </div>
             
-            <div className="flex flex-wrap gap-5 p-4 justify-center">
-            {Object.keys(receivers).map((rcv_key, i) => (
-                <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]}  showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id}/>
-            ))}
-            </div>
+            {/* Used Receivers */}
+            {stagedShow && Object.keys(targetRcvMap).length > 0 && (
+                <div className="flex flex-wrap gap-5 p-4 justify-center">
+                    {Object.keys(receivers)
+                        .filter(rcv_key => targetRcvMap[rcv_key])
+                        .map((rcv_key, i) => (
+                            <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id}/>
+                        ))}
+                </div>
+            )}
+
+            {/* Unused Receivers - Collapsible */}
+            {stagedShow && Object.keys(targetRcvMap).length > 0 && (
+                <div className="border-t border-gray-700">
+                    <button
+                        onClick={() => setShowUnusedReceivers(!showUnusedReceivers)}
+                        className="w-full px-4 py-2 text-left text-sm text-slate-400 hover:text-slate-300 hover:bg-slate-800 transition-colors flex items-center justify-between"
+                    >
+                        <span>
+                            Unused Receivers ({Object.keys(receivers).filter(rcv_key => !targetRcvMap[rcv_key]).length})
+                        </span>
+                        <span className="text-xs">{showUnusedReceivers ? '▼' : '▶'}</span>
+                    </button>
+                    {showUnusedReceivers && (
+                        <div className="flex flex-wrap gap-5 p-4 justify-center">
+                            {Object.keys(receivers)
+                                .filter(rcv_key => !targetRcvMap[rcv_key])
+                                .map((rcv_key, i) => (
+                                    <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id}/>
+                                ))}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* All Receivers (when no show is staged) */}
+            {(!stagedShow || Object.keys(targetRcvMap).length === 0) && (
+                <div className="flex flex-wrap gap-5 p-4 justify-center">
+                    {Object.keys(receivers).map((rcv_key, i) => (
+                        <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id}/>
+                    ))}
+                </div>
+            )}
         </div>
     );
 }

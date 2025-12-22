@@ -43,32 +43,33 @@ const MainNav = () => {
 
   return (
     <div>
-        <nav className="bg-gray-800 text-white p-0 w-full border-b border-gray-600">
-        <div className="flex items-center">
+        <nav className="bg-slate-900 text-white w-full border-b border-slate-700">
+        <div className="flex items-center h-12">
             {/* Logo */}
-            <div className="text-2xl font-bold px-4">
-            <Image src="/BYHLOGOv1.png" alt="anImage" width={100} height={60} style={{
+            <div className="text-2xl font-bold px-3 flex items-center h-full">
+            <Image src="/BYHLOGOv1.png" alt="anImage" width={80} height={40} style={{
               filter: 'invert(1)', 
-              height: '70px',
-              
+              height: '40px',
               objectFit: 'contain',
               objectPosition: 'center',
-        
-              margin: '-22px',
-              marginLeft: '-6px',
+              margin: '0',
               clipPath: 'inset(27% 10% 34% 10%)'
             }}/>
             </div>
 
             {/* Menu */}
-            <ul className="flex flex-1 justify-around">
+            <ul className="flex flex-1 justify-around h-full">
             {menuItems.map((item, index) => (
                 <li onClick={()=> setCurrTab(item.key)}
                 key={index}
-                className={`flex items-center space-x-2 px-4 py-2 hover:bg-gray-700 transition flex-1 justify-center ${currTab === item.key ? 'bg-gray-600':''}`}
+                className={`flex items-center space-x-1.5 px-3 py-1 h-full transition-all duration-200 flex-1 justify-center border-b-2 ${
+                  currTab === item.key 
+                    ? 'border-cyan-500 text-cyan-300 bg-slate-800 shadow-[0_0_8px_rgba(6,182,212,0.3)]' 
+                    : 'border-transparent text-slate-400 hover:text-slate-300 hover:border-slate-600'
+                }`}
                 >
-                <span>{item.icon}</span>
-                <span className="text-lg">
+                <span className="text-sm">{item.icon}</span>
+                <span className="text-sm font-medium">
                     {item.label}
                 </span>
                 </li>
@@ -76,7 +77,7 @@ const MainNav = () => {
             </ul>
         </div>
         </nav>
-        <div className="mb-14">
+        <div className="mb-12">
             <div className={`${currTab==='main' ? '' : 'hidden'}`}><StatusPanel setCurrentTab={setCurrTab}/></div>
             <div className={`${currTab==='inventory' ? '' : 'hidden'}`}><InventoryManager/></div>
             <div className={`${currTab==='editor' ? '' : 'hidden'}`}><ShowBuilder/></div>
@@ -85,7 +86,7 @@ const MainNav = () => {
             {currTab==='manual' ? (<ManualFiring/>) : ""}
             {currTab==='setting' ? (<SettingsPanel/>) : ""}
         </div>
-        <div className="absolute bottom-0 left-0 w-full border-t border-gray-600 px-3 " style={{backgroundColor: "#000000aa"}}>
+        <div className="absolute bottom-0 left-0 w-full border-t border-slate-700 px-3 bg-slate-900 bg-opacity-95 backdrop-blur-sm">
             <Status/>
         </div>
     </div>

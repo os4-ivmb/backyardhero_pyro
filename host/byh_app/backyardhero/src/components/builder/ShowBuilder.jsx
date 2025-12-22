@@ -85,6 +85,22 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
       });
       onClose();
     } else if (fusedLine) {
+      // Calculate lead-in fuse burn time
+      // leadInInches is user-provided (from FusedLineBuilderModal)
+      // burn_rate is in seconds per foot (s/f)
+      const lead_in_inches = fusedLine.leadInInches || 0;
+      const lead_in_time_seconds = fusedLine.fuse?.burn_rate 
+        ? (lead_in_inches / 12) * fusedLine.fuse.burn_rate 
+        : 0;
+      
+      // Total delay = metaDelay + lead-in fuse burn + first shell's fuse delay + first shell's lift delay
+      // This is the delay from firing command until first shell effect appears
+      const firstShell = fusedLine.shells?.[0];
+      const delay = (metaDelaySec || 0) 
+        + lead_in_time_seconds  // Time for lead-in fuse to burn to first shell
+        + (firstShell?.fuse_delay || 0)  // Time for first shell's fuse to burn
+        + (firstShell?.lift_delay || 0);  // Time for first shell to lift
+      
       onAdd({ 
         ...fusedLine, 
         startTime, 
@@ -92,7 +108,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
         target, 
         name: metaLabel,  
         metaDelaySec,
-        delay: (metaDelaySec || 0) + (fusedLine.shells[0]?.lift_delay || 0) + (fusedLine.shells[0]?.fuse_delay || 0),
+        delay,
       });
       onClose();
     } else if (selectedType === "GENERIC") {
@@ -987,6 +1003,12 @@ const ShowBuilder = (props) => {
       } else {
         initializeDefaultLocations();
       }
+    } else {
+      // Clear editor when show is unstaged
+      setItems([]);
+      setShowMetadata({name: ""});
+      setAudioFile(null);
+      setReceiverLocations({});
     }
   }, [stagedShow]);
 

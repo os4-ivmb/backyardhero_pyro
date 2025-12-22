@@ -1,14 +1,15 @@
 import useAppStore from "@/store/useAppStore";
 import ShowBrowser from "./ShowBrowser";
 import Timeline from "../common/Timeline";
-import { useState, useEffect, useRef, memo } from "react";
+import { useState, useEffect, useRef, memo, useMemo } from "react";
 import { FaPlay, FaPause, FaListAlt, FaMusic } from "react-icons/fa";
-import { FaCheck, FaClock, FaHandPointDown, FaRocket, FaX } from "react-icons/fa6";
+import { FaCheck, FaClock, FaHandPointDown, FaRocket, FaX, FaTriangleExclamation } from "react-icons/fa6";
 import MultiShowSection from "./MultiShowSection";
 import useStateAppStore from "@/store/useStateAppStore";
 import axios from "axios";
 import VideoPreviewPopup from "../common/VideoPreviewPopup";
 import WaveSurfer from 'wavesurfer.js';
+import ShowHealth from "./ShowHealth";
 
 import styles from './StatusPanel.module.css'
 
@@ -118,7 +119,7 @@ const MinimalAudioWaveform = ({ audioFile, isPlaying, onTimeUpdate }) => {
 };
 
 export default function StatusPanel(props) {
-    const { stagedShow, shows, deleteShow, setStagedShow, loadedShow, setLoadedShow, inventoryById } = useAppStore();
+    const { stagedShow, shows, deleteShow, setStagedShow, loadedShow, setLoadedShow, inventoryById, systemConfig } = useAppStore();
     const { stateData } = useStateAppStore();
     const [timeCursor, setTimeCursor] = useState(0);
     const [isPlaying, setIsPlaying] = useState(false);
@@ -129,6 +130,48 @@ export default function StatusPanel(props) {
     const requestRef = useRef(null);
     const countdownIntervalRef = useRef(null);
     const prevProtoHandlerStatusRef = useRef(null);
+    const useAudioTimeRef = useRef(false); // Track if we should use audio time vs manual time
+
+    // Check if all required receivers are online
+    const allReceiversOnline = useMemo(() => {
+        if (!stagedShow || !stagedShow.items) return true; // No show staged, no issue
+        
+        const receivers = stateData.fw_state?.receivers || systemConfig?.receivers || {};
+        const showReceivers = new Set();
+        
+        // Get all receivers used in the staged show
+        stagedShow.items.forEach((item) => {
+            if (item.zone && item.target) {
+                Object.entries(receivers).forEach(([receiverKey, receiver]) => {
+                    if (receiver.cues && receiver.cues[item.zone] && receiver.cues[item.zone].includes(item.target)) {
+                        showReceivers.add(receiverKey);
+                    }
+                });
+            }
+        });
+
+        // Check if all required receivers are online
+        let allOnline = true;
+        showReceivers.forEach((receiverKey) => {
+            const receiver = receivers[receiverKey];
+            if (receiver) {
+                let isConnectionGood;
+                if (receiver.status && receiver.status.lmt) {
+                    const latency = Date.now() - receiver.status.lmt;
+                    isConnectionGood = latency <= 10000; // 10 second timeout
+                } else {
+                    isConnectionGood = receiver.connectionStatus === "good";
+                }
+                if (!isConnectionGood) {
+                    allOnline = false;
+                }
+            } else {
+                allOnline = false; // Receiver not found
+            }
+        });
+
+        return allOnline;
+    }, [stagedShow, stateData.fw_state?.receivers, systemConfig]);
 
     // Sync UI state with daemon state when page reloads
     useEffect(() => {
@@ -185,10 +228,17 @@ export default function StatusPanel(props) {
         prevProtoHandlerStatusRef.current = currentStatus;
     }, [stateData.fw_state?.proto_handler_status]);
 
-    // Handle audio time updates
+    // Handle audio time updates - sync timeline cursor with audio playback
     const handleAudioTimeUpdate = (time) => {
-        // Optional: sync with show timeline if needed
-        // setTimeCursor(time);
+        if (isPlaying && stagedShow?.audioFile?.url) {
+            // Use audio time as source of truth when audio is playing
+            setTimeCursor(time);
+            useAudioTimeRef.current = true;
+            
+            // Update video items based on audio time
+            const itemsToFire = stagedShow.items.filter(obj => ( obj.startTime-1.5 < time)).sort((a, b) => a.startTime - b.startTime);
+            setVidItems(itemsToFire.map(ob=>({...ob, hide: (ob.startTime+ob.duration < time)})));
+        }
     };
 
     const unloadOrLoadShow = async (isloaded) => {
@@ -273,8 +323,14 @@ export default function StatusPanel(props) {
           );
     }
 
-    // Smooth timer using requestAnimationFrame
+    // Smooth timer using requestAnimationFrame (only used when no audio is playing)
     const updateCursor = (timestamp) => {
+        // If audio is playing, let audio time drive the cursor instead
+        if (stagedShow?.audioFile?.url && useAudioTimeRef.current) {
+            requestRef.current = requestAnimationFrame(updateCursor);
+            return;
+        }
+
         if (!lastUpdateTimeRef.current) {
             lastUpdateTimeRef.current = timestamp;
         }
@@ -349,36 +405,46 @@ export default function StatusPanel(props) {
     const showErrors = (stateData.fw_state?.fire_check_failures || []).concat(stateData.fw_state?.proto_handler_errors || [])
 
     const isReady = stateData.fw_state?.show_loaded && showErrors.length == 0
+    const hasErrors = showErrors.length > 0
     let showFireButton = false
 
-    let showStateLabel=(isReady ? "Ready To Fire" : "Checks Failed")
-    let showStateCls=(isReady ? "bg-green-900 border border-green-800" : "bg-red-900 border border-red-800")
-    let ShowStateIcon=(isReady ? FaCheck : FaX)
+    let showStateLabel = "Not Ready"
+    let showStateCls = "bg-slate-900 border-slate-600 text-slate-400"
+    let ShowStateIcon = FaClock
+    
+    if (isReady) {
+        showStateLabel = "Ready To Fire"
+        showStateCls = "bg-slate-900 border-emerald-500 text-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.3)]"
+        ShowStateIcon = FaCheck
+    } else if (hasErrors && stateData.fw_state?.show_loaded) {
+        showStateLabel = "Checks Failed"
+        showStateCls = "bg-slate-900 border-red-500 text-red-300"
+        ShowStateIcon = FaX
+    }
 
     const handlerInStartPhase = stateData.fw_state?.proto_handler_status ? 
         stateData.fw_state?.proto_handler_status.split('_')[0]?.startsWith("START") : false
 
     if(isReady && stateData.fw_state?.dstc && !stateData.fw_state?.waiting_for_client_start){
         if(handlerInStartPhase){
-            showStateCls="bg-green-900 border border-green-800"
+            showStateCls="bg-slate-900 border-emerald-500 text-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.3)]"
             showStateLabel=stateData.fw_state?.proto_handler_status == "STARTED" ? "Started": "Starting"
             ShowStateIcon= FaPlay
         }else{
-            showStateCls="bg-yellow-900 border border-yellow-800"
+            showStateCls="bg-slate-900 border-amber-500 text-amber-300 shadow-[0_0_8px_rgba(245,158,11,0.3)]"
             showStateLabel="Waiting on Start"
             ShowStateIcon= FaHandPointDown
         }
     }else if(stateData.fw_state?.waiting_for_client_start){
-        showStateCls="bg-green-900 border bg-green-800"
+        showStateCls="bg-slate-900 border-emerald-500 text-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.3)]"
         showStateLabel="Ready To Go"
         showFireButton = true
     }
 
-    const loadedCls = stateData.fw_state?.show_loaded ? "bg-green-900 border border-green-800" : "bg-yellow-900 border border-yellow-800"
-
     return (
         <div className="max-w-auto">
             <ShowBrowser setCurrentTab={props.setCurrentTab} />
+            <ShowHealth />
             {stagedShow?.items ? (
                 <div className="fixed top-10 left-0 right-0 mb-2 bg-gray-1000 text-white p-4 text-center">
                     
@@ -397,20 +463,35 @@ export default function StatusPanel(props) {
                         {/* Play/Pause Buttons */}
                         <div className="flex gap-4 bg-gray-900 p-2">
                             <button
-                                onClick={() => setIsPlaying(true)}
+                                onClick={() => {
+                                    setIsPlaying(true);
+                                    if (!stagedShow?.audioFile?.url) {
+                                        // If no audio, reset to use manual timing
+                                        useAudioTimeRef.current = false;
+                                        setTimeCursor(0);
+                                        lastUpdateTimeRef.current = null;
+                                    }
+                                }}
                                 disabled={isPlaying || stateData.fw_state.show_loaded}
-                                className={`p-3 rounded-full transition-all duration-300 shadow-md ${
-                                    isPlaying ? "bg-gray-700 text-gray-500 cursor-not-allowed" : "bg-gray-800 hover:bg-gray-700 text-white"
+                                className={`p-3 rounded-sm border transition-all duration-200 ${
+                                    isPlaying 
+                                        ? "bg-slate-900 border-slate-600 text-slate-500 cursor-not-allowed" 
+                                        : "bg-slate-900 border-emerald-500 text-emerald-300 hover:border-emerald-400 hover:shadow-[0_0_8px_rgba(16,185,129,0.3)]"
                                 }`}
                             >
                                 <FaPlay size={24} />
                             </button>
 
                             <button
-                                onClick={() => setIsPlaying(false)}
+                                onClick={() => {
+                                    setIsPlaying(false);
+                                    useAudioTimeRef.current = false;
+                                }}
                                 disabled={!isPlaying}
-                                className={`p-3 rounded-full transition-all duration-300 shadow-md ${
-                                    !isPlaying ? "bg-gray-700 text-gray-500 cursor-not-allowed" : "bg-gray-800 hover:bg-gray-700 text-white"
+                                className={`p-3 rounded-sm border transition-all duration-200 ${
+                                    !isPlaying 
+                                        ? "bg-slate-900 border-slate-600 text-slate-500 cursor-not-allowed" 
+                                        : "bg-slate-900 border-amber-500 text-amber-300 hover:border-amber-400 hover:shadow-[0_0_8px_rgba(245,158,11,0.3)]"
                                 }`}
                             >
                                 <FaPause size={24} />
@@ -421,27 +502,41 @@ export default function StatusPanel(props) {
                             <div className="text-lg leading-[3rem] text-center font-semibold ml-12">{stagedShow.name} Timeline</div>
                             <MinimalAudioWaveform 
                                 audioFile={stagedShow.audioFile}
-                                isPlaying={audioIsPlaying}
+                                isPlaying={isPlaying || audioIsPlaying}
                                 onTimeUpdate={handleAudioTimeUpdate}
                             />
-                            <div className={`text-lg leading-[3rem] text-center font-semibold ml-12 px-4 ${loadedCls}`}>
-                                 {stateData.fw_state.show_loaded ? '' : 'Not '} Loaded 
-                                 <button
+                            <div className="flex items-center ml-12 h-[3rem]">
+                                <div className={`text-lg h-full flex items-center justify-center font-semibold px-3 rounded-sm border ${
+                                    stateData.fw_state.show_loaded 
+                                        ? 'bg-slate-900 border-emerald-500 text-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.3)]' 
+                                        : 'bg-slate-900 border-amber-500 text-amber-300'
+                                }`}>
+                                    {stateData.fw_state.show_loaded ? 'Loaded' : 'Not Loaded'}
+                                </div>
+                                <button
                                     onClick={()=>{unloadOrLoadShow(stateData.fw_state.show_loaded)}}
-                                    className="bg-blue-900 hover:bg-blue-700 text-white font-bold px-2 mx-1 rounded focus:outline-none focus:shadow-outline"
+                                    className="bg-slate-900 border border-blue-500 text-blue-300 hover:border-blue-400 hover:shadow-[0_0_8px_rgba(59,130,246,0.3)] font-bold px-3 h-full ml-2 rounded-sm transition-all duration-200 flex items-center justify-center relative"
                                     type="button"
-                                    >
+                                >
                                     {stateData.fw_state.show_loaded ? "Unload" : "Load"}
+                                    {!stateData.fw_state.show_loaded && !allReceiversOnline && (
+                                        <FaTriangleExclamation className="absolute top-0 right-0 text-amber-400 text-xs -mt-1 -mr-1" title="Some receivers are offline. Loading probably wont"/>
+                                    )}
                                 </button>
                             </div>
-                            
-                            <div className={`flex items-center text-lg leading-[3rem] text-center font-semibold ml-6 px-4 ${showStateCls}`}>
-                                <ShowStateIcon className="mr-2"/> {showStateLabel}
-                            </div>
+                            {stateData.fw_state.show_loaded ? (
+                                <div className={`flex items-center text-lg leading-[3rem] text-center font-semibold ml-6 px-4 rounded-sm border ${
+                                    isReady 
+                                        ? 'bg-slate-900 border-emerald-500 text-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.3)]' 
+                                        : 'bg-slate-900 border-red-500 text-red-300'
+                                }`}>
+                                    <ShowStateIcon className="mr-2"/> {showStateLabel}
+                                </div>
+                            ):""}
                             {
                                 (stateData.fw_state?.proto_handler_status == "START_PENDING") && 
                                 (<div 
-                                    className={`flex items-center text-lg leading-[3rem] text-center font-semibold ml-6 px-4 ${styles.rotating_border}`}
+                                    className={`flex items-center text-lg leading-[3rem] text-center font-semibold ml-6 px-4 rounded-sm ${styles.rotating_border}`}
                                 >
                                     <FaListAlt className="mr-2"/> Pre-Start
                                 </div>)
@@ -449,7 +544,7 @@ export default function StatusPanel(props) {
                             {
                                 (stateData.fw_state?.proto_handler_status == "START_CONFIRMED") && 
                                 (<div 
-                                    className={`flex items-center text-lg leading-[3rem] text-center font-semibold ml-6 px-4 ${styles.rotating_border_fast}`}
+                                    className={`flex items-center text-lg leading-[3rem] text-center font-semibold ml-6 px-4 rounded-sm ${styles.rotating_border_fast}`}
                                 >
                                     <FaClock className="mr-2"/> In Countdown! {countdownSeconds !== null && countdownSeconds >= 0 ? formatTime(countdownSeconds) : ""}
                                 </div>)
@@ -459,14 +554,14 @@ export default function StatusPanel(props) {
                                     <div>
                                     { stateData.fw_state?.show_running ||  handlerInStartPhase ? (
                                         <div
-                                            className={`flex items-center text-lg leading-[3rem] text-center font-semibold ml-6 px-4 bg-red-600 hover:bg-red-500 text-white font-bold rounded cursor-pointer border border-red-500`}
+                                            className="flex items-center text-lg leading-[3rem] text-center font-semibold ml-6 px-4 bg-slate-900 border border-red-500 text-red-300 hover:border-red-400 hover:shadow-[0_0_12px_rgba(239,68,68,0.4)] font-bold rounded-sm cursor-pointer transition-all duration-200"
                                             onClick={()=> delegatedShowAction('stop')}
                                         >
                                             <FaX className="mr-2"/> Abort
                                         </div>
                                     ): (
                                         <div 
-                                            className={`flex items-center text-lg leading-[3rem] text-center font-semibold ml-6 px-4 ${styles.pushy_green_border}`}
+                                            className="flex items-center text-lg leading-[3rem] text-center font-semibold ml-6 px-4 bg-slate-900 border border-emerald-500 text-emerald-300 hover:border-emerald-400 hover:shadow-[0_0_12px_rgba(16,185,129,0.5)] font-bold rounded-sm cursor-pointer transition-all duration-200"
                                             onClick={()=> delegatedShowAction('start')}
                                         >
                                             <FaRocket className="mr-2"/> Launch!  
@@ -552,20 +647,20 @@ export default function StatusPanel(props) {
                                                     <button
                                                         onClick={() => handleShowAction("Stage", show)}
                                                         disabled={stagedShow?.id === show.id}
-                                                        className={`bg-green-700 hover:bg-green-600 text-white font-bold py-1 px-3 rounded text-xs mr-1 ${stagedShow?.id === show.id ? "opacity-50 cursor-not-allowed" : ""}`}
+                                                        className={`bg-slate-900 border border-emerald-500 text-emerald-300 hover:border-emerald-400 hover:shadow-[0_0_8px_rgba(16,185,129,0.3)] font-bold py-1 px-3 rounded-sm text-xs mr-1 transition-all duration-200 ${stagedShow?.id === show.id ? "opacity-50 cursor-not-allowed border-slate-600 text-slate-500" : ""}`}
                                                     >
                                                         Stage
                                                     </button>
                                                     <button
                                                         onClick={() => handleShowAction("Load", show)}
                                                         disabled={loadedShow?.id === show.id}
-                                                        className={`bg-yellow-600 hover:bg-yellow-500 text-white font-bold py-1 px-3 rounded text-xs mr-1 ${loadedShow?.id === show.id ? "opacity-50 cursor-not-allowed" : ""}`}
+                                                        className={`bg-slate-900 border border-amber-500 text-amber-300 hover:border-amber-400 hover:shadow-[0_0_8px_rgba(245,158,11,0.3)] font-bold py-1 px-3 rounded-sm text-xs mr-1 transition-all duration-200 ${loadedShow?.id === show.id ? "opacity-50 cursor-not-allowed border-slate-600 text-slate-500" : ""}`}
                                                     >
                                                         Load
                                                     </button>
                                                      <button
                                                         onClick={() => handleShowAction("Delete", show)}
-                                                        className="bg-red-700 hover:bg-red-600 text-white font-bold py-1 px-3 rounded text-xs"
+                                                        className="bg-slate-900 border border-red-500 text-red-300 hover:border-red-400 hover:shadow-[0_0_8px_rgba(239,68,68,0.3)] font-bold py-1 px-3 rounded-sm text-xs transition-all duration-200"
                                                     >
                                                         Delete
                                                     </button>
