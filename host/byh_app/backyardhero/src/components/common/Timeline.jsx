@@ -1,6 +1,7 @@
 import { INV_COLOR_CODE } from "@/constants";
-import React, { useState, useRef, memo } from "react";
+import React, { useState, useRef, memo, useEffect } from "react";
 import { FaTrash } from "react-icons/fa6";
+import axios from "axios";
 
 const Timeline = memo((props) => {
   const [zoom, setZoom] = useState(40); // Zoom level
@@ -9,6 +10,7 @@ const Timeline = memo((props) => {
   const ticksRef = useRef(null); // Reference to the ticks container
   const isReadOnly = props.readOnly
   const MAX_SHOW_TIME_SEC=props.timeCapSeconds || 1800
+  const [firingProfiles, setFiringProfiles] = useState({}); // Map of itemId -> firing profile
 
   const handleWheel = (e) => {
     //e.preventDefault();
@@ -183,6 +185,37 @@ const Timeline = memo((props) => {
   };
   const stackedItems = calculateStack();
 
+  // Fetch firing profiles for CAKE_200G and CAKE_500G items
+  useEffect(() => {
+    const fetchFiringProfiles = async () => {
+      const profiles = {};
+      const cakeItems = items.filter(item => 
+        (item.type === 'CAKE_200G' || item.type === 'CAKE_500G') && item.itemId
+      );
+      
+      const promises = cakeItems.map(async (item) => {
+        try {
+          const response = await axios.get(`/api/inventory/${item.itemId}/firing-profile`);
+          if (response.data) {
+            profiles[item.itemId] = response.data;
+          }
+        } catch (error) {
+          // Profile doesn't exist for this item, which is fine
+          if (error.response?.status !== 404) {
+            console.error(`Error fetching firing profile for item ${item.itemId}:`, error);
+          }
+        }
+      });
+      
+      await Promise.all(promises);
+      setFiringProfiles(profiles);
+    };
+
+    if (items.length > 0) {
+      fetchFiringProfiles();
+    }
+  }, [items]);
+
   const tickInterval = zoom >= 3 ? (zoom >= 40 ? (zoom >= 200 ? 0.5 : 1) : 10) : 60; // Use 10-second ticks at high zoom, 1-minute ticks at low zoom
 
   const handleItemClick = (e, item) => {
@@ -320,28 +353,70 @@ const Timeline = memo((props) => {
             const selectedItems = props.selectedItems || [];
             const isSelected = selectedItems.some(selected => selected.id === item.id);
 
+            // Get firing profile for this item if it's a cake
+            const firingProfile = (item.type === 'CAKE_200G' || item.type === 'CAKE_500G') && item.itemId
+              ? firingProfiles[item.itemId]
+              : null;
+            const shots = firingProfile?.shot_timestamps || [];
+
             return (
-              <div
-                key={item.id}
-                className={`absolute text-white text-xs rounded px-2 py-1 cursor-move drop-shadow-xs ${
-                  isSelected ? 'ring-2 ring-blue-400 ring-opacity-75' : ''
-                }`}
-                style={{
-                  left: `${start}%`,
-                  width: `${width}%`,
-                  top: `${top * 40 + 20}px`, // Add padding above items
-                  transform: `scaleX(1)`, // Adjust width scaling with zoom
-                  transformOrigin: "left center",
-                  backgroundColor: INV_COLOR_CODE[item.type]+"CC",
-                  textShadow: "0px 0px 3px black",
-                  border: isSelected ? '2px solid #60A5FA' : 'none'
-                }}
-                draggable
-                onDragStart={(e) => (isReadOnly ? (()=>{}) : handleDragStart(e, item.id))}
-                onClick={(e) => handleItemClick(e, item)}
-              >
-                {item.name} @ {item.zone}:{item.target}
-              </div>
+              <React.Fragment key={item.id}>
+                {/* Main bar */}
+                <div
+                  className={`absolute text-white text-xs rounded px-2 py-1 cursor-move drop-shadow-xs ${
+                    isSelected ? 'ring-2 ring-blue-400 ring-opacity-75' : ''
+                  }`}
+                  style={{
+                    left: `${start}%`,
+                    width: `${width}%`,
+                    top: `${top * 40 + 20}px`, // Add padding above items
+                    transform: `scaleX(1)`, // Adjust width scaling with zoom
+                    transformOrigin: "left center",
+                    backgroundColor: INV_COLOR_CODE[item.type]+"CC",
+                    textShadow: "0px 0px 3px black",
+                    border: isSelected ? '2px solid #60A5FA' : 'none'
+                  }}
+                  draggable
+                  onDragStart={(e) => (isReadOnly ? (()=>{}) : handleDragStart(e, item.id))}
+                  onClick={(e) => handleItemClick(e, item)}
+                >
+                  {item.name} @ {item.zone}:{item.target}
+                </div>
+                
+                {/* Shot profile overlays - positioned as siblings to avoid affecting bar layout */}
+                {shots.length > 0 && shots.map((shot, shotIndex) => {
+                  const [shotStartMs, shotEndMs] = shot;
+                  // Convert milliseconds to seconds, then to percentage of item duration
+                  const shotStartSec = shotStartMs / 1000;
+                  const shotEndSec = shotEndMs / 1000;
+                  const shotDuration = shotEndSec - shotStartSec;
+                  
+                  // Position relative to the item's start time and duration
+                  const shotLeftPercent = (shotStartSec / item.duration) * 100;
+                  const shotWidthPercent = (shotDuration / item.duration) * 100;
+                  
+                  // Calculate absolute position on timeline
+                  const shotStartTime = item.startTime + shotStartSec;
+                  const shotLeft = calculatePosition(shotStartTime);
+                  const shotWidth = (shotDuration / maxTime) * 100;
+                  
+                  return (
+                    <div
+                      key={`${item.id}-shot-${shotIndex}`}
+                      className="absolute pointer-events-none"
+                      style={{
+                        left: `${shotLeft}%`,
+                        width: `${shotWidth}%`,
+                        top: `${top * 40 + 20}px`,
+                        height: '24px', // Match the bar height
+                        backgroundColor: 'rgba(255, 255, 255, 0.4)', // More opaque overlay
+                        borderRadius: '2px',
+                        zIndex: 1
+                      }}
+                    />
+                  );
+                })}
+              </React.Fragment>
             );
           })}
         </div>

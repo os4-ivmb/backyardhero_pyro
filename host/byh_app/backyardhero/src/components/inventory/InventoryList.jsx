@@ -1,6 +1,8 @@
 import { MdEdit } from "react-icons/md";
-import React, { useState, useMemo } from "react";
-import { FaImage, FaVideo } from "react-icons/fa6";
+import React, { useState, useMemo, useEffect } from "react";
+import { FaImage, FaVideo, FaChartLine } from "react-icons/fa6";
+import axios from "axios";
+import ShotProfileModal from "./ShotProfileModal";
 
 export default function InventoryList({inventory, setActiveItem}) {
 
@@ -12,6 +14,9 @@ export default function InventoryList({inventory, setActiveItem}) {
     const [sortKey, setSortKey] = useState("name"); // Key to sort by
     const [sortDirection, setSortDirection] = useState("asc"); // 'asc' or 'desc'
     const [filterType, setFilterType] = useState(""); // Filter by type
+    const [firingProfiles, setFiringProfiles] = useState({}); // Map of inventory_id -> firing profile
+    const [selectedProfileItem, setSelectedProfileItem] = useState(null); // Item for which to show profile modal
+    const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
 
     // Handle sorting
     const sortedInventory = useMemo(() => {
@@ -37,6 +42,42 @@ export default function InventoryList({inventory, setActiveItem}) {
         setSortKey(key);
         setSortDirection("asc");
         }
+    };
+
+    // Fetch firing profiles for all inventory items
+    useEffect(() => {
+        const fetchFiringProfiles = async () => {
+            const profiles = {};
+            const promises = inventory.map(async (item) => {
+                try {
+                    const response = await axios.get(`/api/inventory/${item.id}/firing-profile`);
+                    if (response.data) {
+                        profiles[item.id] = response.data;
+                    }
+                } catch (error) {
+                    // Profile doesn't exist for this item, which is fine
+                    if (error.response?.status !== 404) {
+                        console.error(`Error fetching firing profile for item ${item.id}:`, error);
+                    }
+                }
+            });
+            await Promise.all(promises);
+            setFiringProfiles(profiles);
+        };
+
+        if (inventory.length > 0) {
+            fetchFiringProfiles();
+        }
+    }, [inventory]);
+
+    const handleShowProfile = (item) => {
+        setSelectedProfileItem(item);
+        setIsProfileModalOpen(true);
+    };
+
+    const handleCloseProfileModal = () => {
+        setIsProfileModalOpen(false);
+        setSelectedProfileItem(null);
     };
 
     return (
@@ -98,10 +139,21 @@ export default function InventoryList({inventory, setActiveItem}) {
                         <td className="p-1 px-4">{inv.lift_delay}</td>
                         <td className="p-1 px-4">{inv.burn_rate}</td>
                         <td className="p-1 px-1">
-                            {inv.image ? <FaImage/> : ""}
-                            {inv.youtube_link ? (
-                                <a className="hover:text-blue-300" href={inv.youtube_link} target="_blank"><FaVideo/></a>
-                            ) : ""}
+                            <div className="flex items-center gap-2">
+                                {inv.image ? <FaImage/> : ""}
+                                {inv.youtube_link ? (
+                                    <a className="hover:text-blue-300" href={inv.youtube_link} target="_blank"><FaVideo/></a>
+                                ) : ""}
+                                {firingProfiles[inv.id] && (
+                                    <button
+                                        onClick={() => handleShowProfile(inv)}
+                                        className="hover:text-blue-300 text-blue-400"
+                                        title="View Shot Profile"
+                                    >
+                                        <FaChartLine/>
+                                    </button>
+                                )}
+                            </div>
                         </td>
                         <td className="p-1 px-4" style={{backgroundColor: `${inv.color}${inv.color? 'FF' : ''}`}}></td>
                         <td className="p-1 px-4">
@@ -115,6 +167,12 @@ export default function InventoryList({inventory, setActiveItem}) {
             })}
             </tbody>
             </table>
+            <ShotProfileModal
+                isVisible={isProfileModalOpen}
+                item={selectedProfileItem}
+                firingProfile={selectedProfileItem ? firingProfiles[selectedProfileItem.id] : null}
+                onClose={handleCloseProfileModal}
+            />
         </div>
     )
 }

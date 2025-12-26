@@ -38,11 +38,26 @@ function initializeDatabase() {
     );
   `;
 
+  const createInventoryFiringProfileTable = `
+    CREATE TABLE IF NOT EXISTS inventoryFiringProfile (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      inventory_id INTEGER NOT NULL,
+      youtube_link TEXT NOT NULL,
+      youtube_link_start_sec INTEGER NOT NULL,
+      shot_timestamps TEXT NOT NULL, -- JSON array of [start_ms, end_ms] pairs: [[start1, end1], [start2, end2], ...]
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+      FOREIGN KEY (inventory_id) REFERENCES inventory(id) ON DELETE CASCADE,
+      UNIQUE(inventory_id)
+    );
+  `;
+
   try {
     db.exec(createShowTable);
     console.log("Checked/created Show table.");
     db.exec(createInventoryTable);
     console.log("Checked/created inventory table.");
+    db.exec(createInventoryFiringProfileTable);
+    console.log("Checked/created inventoryFiringProfile table.");
   } catch (err) {
     console.error("Error initializing database tables:", err.message);
   }
@@ -64,4 +79,10 @@ export const inventoryQueries = {
                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   getAll: db.prepare(`SELECT * FROM inventory`),
   update: db.prepare(`UPDATE inventory SET name = ?, type = ?, duration = ?, fuse_delay = ?, lift_delay = ?, burn_rate = ?, color = ?, available_ct = ?, youtube_link = ?, youtube_link_start_sec = ?, image = ? WHERE id = ?`),
+};
+
+/** FIRING PROFILE TABLE OPERATIONS */
+export const firingProfileQueries = {
+  getByInventoryId: db.prepare(`SELECT * FROM inventoryFiringProfile WHERE inventory_id = ?`),
+  getAll: db.prepare(`SELECT * FROM inventoryFiringProfile`),
 };

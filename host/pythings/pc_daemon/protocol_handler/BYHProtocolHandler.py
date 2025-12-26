@@ -437,6 +437,15 @@ class BYHProtocolHandler:
         """
         errors = []
 
+        # Reload config to get latest settings from file (in case UI updated them)
+        try:
+            with open(cfg_filepath, 'r') as file:
+                data = json.load(file)
+            self.config = data.get('protocols',{}).get(self.protocol).get('config', {})
+        except (FileNotFoundError, json.JSONDecodeError, AttributeError) as e:
+            print(f"Warning: Could not reload config in run_precheck: {e}")
+            # Continue with existing self.config if reload fails
+
         # 1) Load thresholds
         min_batt_pct = self.config.get('min_battery_to_fire_pct', 0)
         require_cont = self.config.get('require_continuity', False)

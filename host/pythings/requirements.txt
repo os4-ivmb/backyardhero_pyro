@@ -3,3 +3,6 @@ flask==2.3.3  # Only needed if you plan to add an API
 pyserial
 websockets
 psutil
+yt-dlp
+librosa
+numpy

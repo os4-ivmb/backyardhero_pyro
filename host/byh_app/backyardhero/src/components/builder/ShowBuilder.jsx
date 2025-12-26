@@ -73,6 +73,11 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
 
 
     if (selectedItem) {
+      // For aerial shells, include both fuse_delay and lift_delay in the delay calculation
+      // This matches the behavior for fused lines
+      const itemDelay = (selectedItem.fuse_delay || selectedItem.fuseDelay || 0) 
+        + (selectedItem.type === "AERIAL_SHELL" ? (selectedItem.lift_delay || 0) : 0);
+      
       onAdd({ 
         ...selectedItem, 
         startTime, 
@@ -80,7 +85,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
         target, 
         name: metaLabel, 
         metaDelaySec, 
-        delay: (metaDelaySec || 0) + (selectedItem.fuseDelay || 0),
+        delay: (metaDelaySec || 0) + itemDelay,
         itemId: selectedItem.id 
       });
       onClose();
