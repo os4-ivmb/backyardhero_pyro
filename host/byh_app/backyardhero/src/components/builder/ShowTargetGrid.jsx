@@ -6,13 +6,43 @@ import {
   closestCenter,
   DragOverlay,
 } from "@dnd-kit/core";
+import { MdEdit } from "react-icons/md";
 import { INV_COLOR_CODE } from "@/constants";
 
 export default function ShowTargetGrid(props) {
-    const { items, setItems } = props;
+    const { items, setItems, receiverLabels, setReceiverLabels } = props;
     const [activeItem, setActiveItem] = useState(null);
+    const [editingZone, setEditingZone] = useState(null);
+    const [editValue, setEditValue] = useState("");
 
     const availableDevices = props.availableDevices
+    
+    const handleLabelEdit = (zoneName) => {
+      setEditingZone(zoneName);
+      setEditValue(receiverLabels[zoneName] || zoneName);
+    };
+    
+    const handleLabelSave = (zoneName) => {
+      setReceiverLabels(prev => ({
+        ...prev,
+        [zoneName]: editValue || zoneName
+      }));
+      setEditingZone(null);
+      setEditValue("");
+    };
+    
+    const handleLabelCancel = () => {
+      setEditingZone(null);
+      setEditValue("");
+    };
+    
+    const handleLabelKeyDown = (e, zoneName) => {
+      if (e.key === 'Enter') {
+        handleLabelSave(zoneName);
+      } else if (e.key === 'Escape') {
+        handleLabelCancel();
+      }
+    };
   
     const handleDragStart = (event) => {
       const item = items.find((i) => i.id === event.active.id);
@@ -55,7 +85,39 @@ export default function ShowTargetGrid(props) {
         <div className="flex flex-col gap-4 mb-12">
           {Object.keys(availableDevices).map((zoneName, zoneIndex) => (
             <div key={zoneIndex} className="flex flex-col">
-              <h3 className="text-lg font-semibold mb-2">{zoneName}</h3>
+              <div className="flex items-center gap-2 mb-2">
+                {editingZone === zoneName ? (
+                  <input
+                    type="text"
+                    value={editValue}
+                    onChange={(e) => setEditValue(e.target.value)}
+                    onBlur={() => handleLabelSave(zoneName)}
+                    onKeyDown={(e) => handleLabelKeyDown(e, zoneName)}
+                    className="text-lg font-semibold bg-gray-700 text-white px-2 py-1 rounded border border-gray-600 focus:outline-none focus:border-blue-500"
+                    autoFocus
+                  />
+                ) : (
+                  <>
+                    <h3 className="text-lg font-semibold flex items-center gap-2">
+                      {receiverLabels[zoneName] ? (
+                        <>
+                          <span>{receiverLabels[zoneName]}</span>
+                          <span className="text-gray-500 text-sm font-normal">({zoneName})</span>
+                        </>
+                      ) : (
+                        <span>{zoneName}</span>
+                      )}
+                    </h3>
+                    <button
+                      onClick={() => handleLabelEdit(zoneName)}
+                      className="text-gray-400 hover:text-white transition-colors"
+                      title="Edit receiver label"
+                    >
+                      <MdEdit size={18} />
+                    </button>
+                  </>
+                )}
+              </div>
               <div className={`grid grid-cols-12 gap-4`} style={{gridTemplateColumns: 'repeat(6, minmax(0, 1fr))'}}>
                 {availableDevices[zoneName].map((target, targetIndex) => {
                   const item = items.find(

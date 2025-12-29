@@ -21,7 +21,7 @@ import ShowHealth from "../homepanel/ShowHealth";
 // v1.3.0: Added latency scale bar (1s=100%/green, 10s=0%/red) with smooth animations, moved health bar to bottom with percentage text
 const FW_VERSION = "1.3.0";
 
-function SingleReceiver({ rcv_name, receiver, showMapping, showId }) {
+function SingleReceiver({ rcv_name, receiver, showMapping, showId, receiverLabel }) {
   const [popup, setPopup] = useState(null);
   const receiverRef = useRef(null);
   const [smoothedLatency, setSmoothedLatency] = useState(0);
@@ -138,7 +138,16 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId }) {
     >
       {/* Receiver Header */}
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">{rcv_name}</h2>
+        <h2 className="text-lg font-semibold flex items-center gap-2">
+          {receiverLabel ? (
+            <>
+              <span>{receiverLabel}</span>
+              <span className="text-gray-500 text-sm font-normal">({rcv_name})</span>
+            </>
+          ) : (
+            <span>{rcv_name}</span>
+          )}
+        </h2>
 
         {isConnectionGood ? (
         <div className="flex items-center gap-2">
@@ -310,8 +319,25 @@ export default function ReceiverDisplay({ setCurrentTab }) {
     const { stateData } = useStateAppStore()
     const [ targetRcvMap, setTargetRcvMap ] = useState({});
     const [showUnusedReceivers, setShowUnusedReceivers] = useState(false);
+    const [receiverLabels, setReceiverLabels] = useState({});
 
     const [receivers, setReceivers] = useState([]);
+    
+    // Load receiver labels from show data
+    useEffect(() => {
+      if (stagedShow?.receiverLabels) {
+        setReceiverLabels(stagedShow.receiverLabels);
+      } else if (stagedShow?.receiver_labels) {
+        try {
+          const parsedLabels = JSON.parse(stagedShow.receiver_labels);
+          setReceiverLabels(parsedLabels);
+        } catch (e) {
+          console.error('Failed to parse receiver_labels for show:', stagedShow.id, e);
+        }
+      } else {
+        setReceiverLabels({});
+      }
+    }, [stagedShow]);
 
     useEffect(() => {
       let receiversTmp = systemConfig?.receivers || {};
@@ -586,7 +612,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                     {Object.keys(receivers)
                         .filter(rcv_key => targetRcvMap[rcv_key])
                         .map((rcv_key, i) => (
-                            <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id}/>
+                            <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id} receiverLabel={receiverLabels[rcv_key]}/>
                         ))}
                 </div>
             )}
@@ -608,7 +634,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                             {Object.keys(receivers)
                                 .filter(rcv_key => !targetRcvMap[rcv_key])
                                 .map((rcv_key, i) => (
-                                    <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id}/>
+                                    <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id} receiverLabel={receiverLabels[rcv_key]}/>
                                 ))}
                         </div>
                     )}
@@ -619,7 +645,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
             {(!stagedShow || Object.keys(targetRcvMap).length === 0) && (
                 <div className="flex flex-wrap gap-5 p-4 justify-center">
                     {Object.keys(receivers).map((rcv_key, i) => (
-                        <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id}/>
+                        <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id} receiverLabel={receiverLabels[rcv_key]}/>
                     ))}
                 </div>
             )}

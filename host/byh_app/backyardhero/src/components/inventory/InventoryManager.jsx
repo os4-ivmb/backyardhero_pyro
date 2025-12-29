@@ -112,7 +112,12 @@ const AddInventoryForm = (props) => {
   
     useEffect(() => {
       if (props.activeItem?.id) {
-        setFormObject(props.activeItem);
+        // Preserve metadata when loading item into form
+        setFormObject({
+          ...props.activeItem,
+          // Ensure metadata is preserved (might be parsed object or string)
+          metadata: props.activeItem.metadata || null
+        });
       }
     }, [props.activeItem]);
   
@@ -239,7 +244,29 @@ export default function InventoryManager(props){
 
     const addOrCreateItem = (inv_item) => {
         if(inv_item.id){
-            updateInventoryItem(inv_item.id, inv_item)
+            // Preserve existing metadata if not provided in the update
+            const existingItem = inventory.find(item => item.id === inv_item.id);
+            let metadataToSave = null;
+            
+            // If metadata is explicitly in the form object, use it
+            if (inv_item.metadata !== undefined) {
+                metadataToSave = inv_item.metadata;
+            } else if (existingItem?.metadata) {
+                // Otherwise, preserve existing metadata
+                metadataToSave = existingItem.metadata;
+            }
+            
+            // If metadata is an object (parsed), stringify it for the API
+            if (metadataToSave && typeof metadataToSave === 'object') {
+                metadataToSave = JSON.stringify(metadataToSave);
+            }
+            
+            const updateData = {
+                ...inv_item,
+                metadata: metadataToSave
+            };
+            
+            updateInventoryItem(inv_item.id, updateData)
         }else{
             createInventoryItem(inv_item)
         }

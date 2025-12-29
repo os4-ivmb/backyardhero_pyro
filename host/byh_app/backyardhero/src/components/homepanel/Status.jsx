@@ -124,7 +124,7 @@ export default function Status() {
     }
 
     return (
-        <div className="w-full items-center justify-center p-2 space-y-2">
+        <div className="w-full items-center justify-center p-2 space-y-2" style={{ zIndex: '2' }}>
             {/* Top Row: System Status & Errors - REMOVED */}
             {/* <div className="text-xs flex flex-row items-center gap-x-4">
                 <div className="flex items-center gap-x-2 flex-wrap">

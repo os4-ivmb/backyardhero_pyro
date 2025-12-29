@@ -11,6 +11,7 @@ const Timeline = memo((props) => {
   const isReadOnly = props.readOnly
   const MAX_SHOW_TIME_SEC=props.timeCapSeconds || 1800
   const [firingProfiles, setFiringProfiles] = useState({}); // Map of itemId -> firing profile
+  const [inventory, setInventory] = useState([]); // Inventory for RACK_SHELLS calculations
 
   const handleWheel = (e) => {
     //e.preventDefault();
@@ -216,6 +217,22 @@ const Timeline = memo((props) => {
     }
   }, [items]);
 
+  // Fetch inventory if we have RACK_SHELLS items
+  useEffect(() => {
+    const hasRackShells = items.some(item => item.type === 'RACK_SHELLS');
+    if (hasRackShells && inventory.length === 0) {
+      const fetchInventory = async () => {
+        try {
+          const response = await axios.get('/api/inventory');
+          setInventory(response.data || []);
+        } catch (error) {
+          console.error('Failed to fetch inventory for RACK_SHELLS:', error);
+        }
+      };
+      fetchInventory();
+    }
+  }, [items, inventory.length]);
+
   const tickInterval = zoom >= 3 ? (zoom >= 40 ? (zoom >= 200 ? 0.5 : 1) : 10) : 60; // Use 10-second ticks at high zoom, 1-minute ticks at low zoom
 
   const handleItemClick = (e, item) => {
@@ -357,7 +374,97 @@ const Timeline = memo((props) => {
             const firingProfile = (item.type === 'CAKE_200G' || item.type === 'CAKE_500G') && item.itemId
               ? firingProfiles[item.itemId]
               : null;
-            const shots = firingProfile?.shot_timestamps || [];
+            let shots = firingProfile?.shot_timestamps || [];
+
+            // Calculate shot timings for fused lines
+            // Note: item.startTime represents when the first shot fires (the click point)
+            // The delay (lead-in + first shell delays) is only used by the firing system
+            // to know when to light the fuse, not for the visual timeline
+            if ((item.type === 'FUSED_AERIAL_LINE' || item.type === 'FUSED_SHELL_LINE') && item.shells && item.fuse && item.spacing) {
+              const burn_rate = item.fuse.burn_rate || 0;
+              const spacing_inches = parseFloat(item.spacing) || 0;
+              const fuse_burn_time_per_shell = (spacing_inches / 12) * burn_rate;
+              
+              shots = item.shells.map((shell, index) => {
+                if (!shell) return null;
+                
+                // Calculate time from item start to when this shell's effect appears
+                // First shell fires at startTime (0 relative to item start)
+                let shotStartSec = 0;
+                
+                if (index > 0) {
+                  // Subsequent shells: add fuse burn time for spacing between each shell
+                  for (let i = 1; i <= index; i++) {
+                    shotStartSec += fuse_burn_time_per_shell;
+                  }
+                }
+                
+                // Shot duration is 1 second
+                const shotEndSec = shotStartSec + 1.0;
+                
+                // Return in milliseconds format like cake shots: [start_ms, end_ms]
+                return [shotStartSec * 1000, shotEndSec * 1000];
+              }).filter(shot => shot !== null);
+            }
+
+            // Calculate shot timings for rack shells
+            // Note: item.startTime represents when the first shot fires (the click point)
+            // The delay (lead-in + first shell delays) is only used by the firing system
+            // to know when to light the fuse, not for the visual timeline
+            if (item.type === 'RACK_SHELLS' && item.fireableItem && item.rackSpacing && inventory.length > 0) {
+              const fireableItem = item.fireableItem;
+              const rackSpacing = item.rackSpacing;
+              
+              if (fireableItem.type === 'fused' && fireableItem.fuse && fireableItem.cellData && fireableItem.cells) {
+                // For fused rack items, calculate when each shell effect appears
+                const fuse = fireableItem.fuse;
+                const fuseItem = inventory.find(inv => inv.type === 'FUSE' && inv.id === parseInt(fuse.type));
+                const burn_rate = fuseItem?.burn_rate || 0;
+                
+                shots = fireableItem.cellData.map((cellData, index) => {
+                  if (!cellData || !cellData.shellId) return null;
+                  
+                  // First shell fires at startTime (0 relative to item start)
+                  let shotStartSec = 0;
+                  
+                  if (index > 0) {
+                    // Subsequent shells: add fuse burn time for spacing between each shell
+                    for (let i = 1; i <= index; i++) {
+                      // Calculate distance between previous cell and current cell
+                      const prevCellKey = fireableItem.cells[i - 1];
+                      const currentCellKey = fireableItem.cells[i];
+                      const [x1, y1] = prevCellKey.split('_').map(Number);
+                      const [x2, y2] = currentCellKey.split('_').map(Number);
+                      
+                      // Calculate distance using rack spacing (in inches)
+                      const xDiff = Math.abs(x2 - x1);
+                      const yDiff = Math.abs(y2 - y1);
+                      const distance_inches = (xDiff * rackSpacing.x) + (yDiff * rackSpacing.y);
+                      
+                      // Time for fuse to burn this distance: (distance in feet) * burn_rate
+                      const fuse_burn_time = (distance_inches / 12) * burn_rate;
+                      shotStartSec += fuse_burn_time;
+                    }
+                  }
+                  
+                  // Shot duration is 0.5 seconds
+                  const shotEndSec = shotStartSec + 0.5;
+                  
+                  // Return in milliseconds format like cake shots: [start_ms, end_ms]
+                  return [shotStartSec * 1000, shotEndSec * 1000];
+                }).filter(shot => shot !== null);
+              } else if (fireableItem.type === 'single' && fireableItem.cellData && fireableItem.cellData[0]) {
+                // For single shell rack items
+                const cellData = fireableItem.cellData[0];
+                const shell = inventory.find(inv => inv.id === cellData.shellId);
+                if (shell) {
+                  // Single shell fires at startTime (0 relative to item start)
+                  const shotStartSec = 0;
+                  const shotEndSec = shotStartSec + 0.5;
+                  shots = [[shotStartSec * 1000, shotEndSec * 1000]];
+                }
+              }
+            }
 
             return (
               <React.Fragment key={item.id}>
@@ -372,7 +479,7 @@ const Timeline = memo((props) => {
                     top: `${top * 40 + 20}px`, // Add padding above items
                     transform: `scaleX(1)`, // Adjust width scaling with zoom
                     transformOrigin: "left center",
-                    backgroundColor: INV_COLOR_CODE[item.type]+"CC",
+                    backgroundColor: (INV_COLOR_CODE[item.type] || '#888888')+"CC",
                     textShadow: "0px 0px 3px black",
                     border: isSelected ? '2px solid #60A5FA' : 'none'
                   }}
@@ -380,12 +487,16 @@ const Timeline = memo((props) => {
                   onDragStart={(e) => (isReadOnly ? (()=>{}) : handleDragStart(e, item.id))}
                   onClick={(e) => handleItemClick(e, item)}
                 >
-                  {item.name} @ {item.zone}:{item.target}
+                  {item.name} @ {props.receiverLabels?.[item.zone] || item.zone}:{item.target}
                 </div>
                 
                 {/* Shot profile overlays - positioned as siblings to avoid affecting bar layout */}
                 {shots.length > 0 && shots.map((shot, shotIndex) => {
-                  const [shotStartMs, shotEndMs] = shot;
+                  // Handle both [start, end] and [start, end, color] formats
+                  const shotStartMs = shot[0];
+                  const shotEndMs = shot[1];
+                  const shotColor = shot.length >= 3 ? shot[2] : null;
+                  
                   // Convert milliseconds to seconds, then to percentage of item duration
                   const shotStartSec = shotStartMs / 1000;
                   const shotEndSec = shotEndMs / 1000;
@@ -400,6 +511,9 @@ const Timeline = memo((props) => {
                   const shotLeft = calculatePosition(shotStartTime);
                   const shotWidth = (shotDuration / maxTime) * 100;
                   
+                  // Base overlay with default semi-transparent white
+                  const baseBackgroundColor = 'rgba(255, 255, 255, 0.4)';
+                  
                   return (
                     <div
                       key={`${item.id}-shot-${shotIndex}`}
@@ -409,11 +523,26 @@ const Timeline = memo((props) => {
                         width: `${shotWidth}%`,
                         top: `${top * 40 + 20}px`,
                         height: '24px', // Match the bar height
-                        backgroundColor: 'rgba(255, 255, 255, 0.4)', // More opaque overlay
+                        backgroundColor: baseBackgroundColor,
                         borderRadius: '2px',
                         zIndex: 1
                       }}
-                    />
+                    >
+                      {/* Color stripe at top if shot has a color */}
+                      {shotColor && (
+                        <div
+                          style={{
+                            position: 'absolute',
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            height: '3px',
+                            backgroundColor: shotColor,
+                            borderRadius: '2px 2px 0 0'
+                          }}
+                        />
+                      )}
+                    </div>
                   );
                 })}
               </React.Fragment>

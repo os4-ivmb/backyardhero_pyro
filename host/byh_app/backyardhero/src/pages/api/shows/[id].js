@@ -23,7 +23,7 @@ export default function handler(req, res) {
       return res.status(500).json({ error: "Failed to delete show." });
     }
   } else if (req.method === 'PATCH') {
-    const { name, duration, version, runtime_version, display_payload, runtime_payload, authorization_code, protocol, audioFile, receiver_locations } = req.body;
+    const { name, duration, version, runtime_version, display_payload, runtime_payload, authorization_code, protocol, audioFile, receiver_locations, receiver_labels } = req.body;
 
     if (!name || !duration || !version || !runtime_version || !display_payload || !runtime_payload || !authorization_code || !protocol) {
       return res.status(400).json({ error: 'All fields are required.' });
@@ -43,6 +43,7 @@ export default function handler(req, res) {
         protocol,
         audio_file,
         receiver_locations,
+        receiver_labels,
         id
       );
       if (result.changes === 0) return res.status(404).json({ error: "Show not found." });

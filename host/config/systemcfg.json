@@ -6,22 +6,6 @@
     "dongle_protocol": "BKYD_TS_HYBRID"
   },
   "receivers": {
-    "RX101": {
-      "label": "BYH v0.2 RCV 2",
-      "type": "BKYD_TS_24_1",
-      "cues": {
-        "RX101": [
-          1,
-          2,
-          3,
-          4,
-          5,
-          6,
-          7,
-          8
-        ]
-      }
-    },
     "RX110": {
       "label": "BYH v0.2 RCV 2",
       "type": "BKYD_TS_24_1",
@@ -227,39 +211,6 @@
           6,
           7,
           8
-        ]
-      }
-    },
-    "BILUSOCN1": {
-      "type": "BILUSOCN_433_TX_ONLY",
-      "cues": {
-        "1": [
-          1,
-          2,
-          3,
-          4
-        ]
-      }
-    },
-    "BILUSOCN2": {
-      "type": "BILUSOCN_433_TX_ONLY",
-      "cues": {
-        "1": [
-          5,
-          6,
-          7,
-          8
-        ]
-      }
-    },
-    "BILUSOCN3": {
-      "type": "BILUSOCN_433_TX_ONLY",
-      "cues": {
-        "1": [
-          9,
-          10,
-          11,
-          12
         ]
       }
     }

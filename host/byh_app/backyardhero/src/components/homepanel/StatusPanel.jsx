@@ -455,9 +455,6 @@ export default function StatusPanel(props) {
                         readOnly={true} 
                         timeCapSeconds={stagedShow.duration} 
                     />
-                    {vidItems.length ? (
-                        <VideoPreviewPopup items={vidItems} isVisible={isPlaying && vidItems.length}/>
-                    ):""}
                     {/* Play/Pause Controls & Time Display */}
                     <div className="flex justify-between items-center mb-4 bg-gray-900 ">
                         {/* Play/Pause Buttons */}
@@ -572,6 +569,9 @@ export default function StatusPanel(props) {
                             }
                         </div>
                     </div>
+                    {vidItems.length ? (
+                        <VideoPreviewPopup items={vidItems} isVisible={isPlaying && vidItems.length}/>
+                    ):""}
                     <div className="p-3 bg-gray-800 w-full">
                         <MultiShowSection errorsForShow={showErrors} protoHandlerStatus={stateData.fw_state?.proto_handler_status}/>
                     </div>

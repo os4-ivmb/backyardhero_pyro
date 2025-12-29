@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from "react";
 import useAppStore from '@/store/useAppStore';
 
-export default function ShowStateHeader({ items, showMetadata, setShowMetadata, refreshInventoryFnc , protocols, clearEditor }) {
+export default function ShowStateHeader({ items, showMetadata, setShowMetadata, refreshInventoryFnc , protocols, clearEditor, receiverLabels }) {
   const { createShow, updateShow, setStagedShow} = useAppStore();
 
   const handleUpsertShow = async () => {
@@ -11,7 +11,7 @@ export default function ShowStateHeader({ items, showMetadata, setShowMetadata, 
       authorization_code = prompt("Please enter an auth code for this show. It will be used to both edit and launch the show.")
     }
 
-    const allowedAttributes = ["id", "startTime", "itemId", "zone", "target", "type", "name", "duration", "delay"];
+    const allowedAttributes = ["id", "startTime", "itemId", "zone", "target", "type", "name", "duration", "delay", "rackId", "rackCells", "rackName", "rackSpacing", "fireableItem", "fireableItemId", "fuse", "spacing", "leadInInches", "shells"];
 
     const compressedItems = items.map(obj =>
         allowedAttributes.reduce((acc, key) => {
@@ -33,7 +33,9 @@ export default function ShowStateHeader({ items, showMetadata, setShowMetadata, 
         // Include audio file info if present
         audioFile: showMetadata.audioFile || null,
         // Include receiver locations as JSON if present
-        receiver_locations: showMetadata.receiver_locations ? JSON.stringify(showMetadata.receiver_locations) : null
+        receiver_locations: showMetadata.receiver_locations ? JSON.stringify(showMetadata.receiver_locations) : null,
+        // Include receiver labels as JSON if present
+        receiver_labels: receiverLabels && Object.keys(receiverLabels).length > 0 ? JSON.stringify(receiverLabels) : null
     }
 
 

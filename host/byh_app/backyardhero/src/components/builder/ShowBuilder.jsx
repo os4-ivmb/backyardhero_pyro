@@ -6,6 +6,8 @@ import ShowTargetGrid from "./ShowTargetGrid";
 import ShowStateHeader from "./ShowStateHeader";
 import VideoPreviewPopup from "../common/VideoPreviewPopup";
 import SpatialLayoutMap from "./SpatialLayoutMap";
+import RacksTab from "./RacksTab";
+import RackShellsSelector from "./RackShellsSelector";
 import WaveSurfer from 'wavesurfer.js';
 
 export const mergeCues = (receivers) => {
@@ -26,11 +28,13 @@ export const mergeCues = (receivers) => {
   return mergedCues;
 }
 
-const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, availableDevices }) => {
+const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, availableDevices, receiverLabels, showMetadata }) => {
   const [selectedType, setSelectedType] = useState("CAKE_FOUNTAIN");
   const [selectedItem, setSelectedItem] = useState(null);
   const [fusedLine, setFusedLine] = useState(null); // Store the completed fused line
+  const [rackShells, setRackShells] = useState(null); // Store the selected rack shells
   const [isFusedBuilderOpen, setFusedBuilderOpen] = useState(false);
+  const [isRackShellsOpen, setIsRackShellsOpen] = useState(false);
   const [zone, setZone] = useState(null);
   const [target, setTarget] = useState(null);
   const [metaLabel, setMetaLabel] = useState("");
@@ -48,6 +52,34 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
       }
     }
   }, [availableDevices, zone]);
+
+  // Helper function to check if a zone+target combination is occupied
+  const isOccupied = (zoneName, targetValue) => {
+    return items.some(item => item.zone === zoneName && item.target === targetValue);
+  };
+
+  // Check if all targets in a zone are occupied
+  const isZoneFullyOccupied = (zoneName) => {
+    if (!availableDevices[zoneName]) return false;
+    const targets = availableDevices[zoneName];
+    return targets.every(target => isOccupied(zoneName, target));
+  };
+
+  // Update target if current selection becomes occupied
+  useEffect(() => {
+    if (zone && target !== null && availableDevices[zone]) {
+      const isCurrentlyOccupied = items.some(item => item.zone === zone && item.target === target);
+      if (isCurrentlyOccupied) {
+        // Current target is occupied, find first available target in this zone
+        const availableTarget = availableDevices[zone].find(
+          t => !items.some(item => item.zone === zone && item.target === t)
+        );
+        if (availableTarget !== undefined) {
+          setTarget(availableTarget);
+        }
+      }
+    }
+  }, [items, zone, target, availableDevices]);
 
   const filteredInventory = inventory.filter((item) => item.type === selectedType).sort((a, b) => a.name.localeCompare(b.name));
 
@@ -116,6 +148,84 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
         delay,
       });
       onClose();
+    } else if (rackShells) {
+      // Calculate timing for rack shells
+      let delay = metaDelaySec || 0;
+      let duration = 2; // Default duration
+      
+      const fireableItem = rackShells.fireableItem;
+      const rackSpacing = rackShells.rackSpacing || { x: 2.75, y: 2.75 };
+      
+      if (fireableItem?.type === 'fused' && fireableItem.fuse) {
+        // For fused links, calculate timing similar to fused shell lines
+        const fuse = fireableItem.fuse;
+        const fuseItem = inventory.find(item => item.type === 'FUSE' && item.id === parseInt(fuse.type));
+        const burn_rate = fuseItem?.burn_rate || 0;
+        const leadInInches = fuse.leadIn || 0;
+        
+        // Calculate total fuse length between cells
+        // Sum up the distances between consecutive cells
+        let total_fuse_length_inches = 0;
+        for (let i = 0; i < fireableItem.cells.length - 1; i++) {
+          const cell1 = fireableItem.cells[i];
+          const cell2 = fireableItem.cells[i + 1];
+          const [x1, y1] = cell1.split('_').map(Number);
+          const [x2, y2] = cell2.split('_').map(Number);
+          
+          // Calculate distance using rack spacing
+          const xDiff = Math.abs(x2 - x1);
+          const yDiff = Math.abs(y2 - y1);
+          const distance = (xDiff * rackSpacing.x) + (yDiff * rackSpacing.y);
+          total_fuse_length_inches += distance;
+        }
+        
+        // Lead-in fuse burn time
+        const lead_in_time = (leadInInches / 12) * burn_rate;
+        
+        // Fuse burn time between cells
+        const fuse_burn_time = (total_fuse_length_inches / 12) * burn_rate;
+        
+        // Get the last shell's delays
+        const lastCellData = fireableItem.cellData?.[fireableItem.cellData.length - 1];
+        const lastShellId = lastCellData?.shellId;
+        const lastShell = inventory.find(item => item.id === lastShellId);
+        //const last_shell_delays = (lastShell?.lift_delay || 0) + (lastShell?.fuse_delay || 0);
+        
+        // Duration = fuse burn time between shells + last shell delays
+        // Note: lead-in time is NOT included because startTime represents when the first shot fires,
+        // and the lead-in happens before that (accounted for in delay, used by firing system)
+        // + 0.5 seconds for the shell to "go off"
+        duration = fuse_burn_time + 0.5;
+        
+        // Delay = metaDelay + lead-in fuse burn + first shell's fuse delay + first shell's lift delay
+        const firstCellData = fireableItem.cellData?.[0];
+        const firstShellId = firstCellData?.shellId;
+        const firstShell = inventory.find(item => item.id === firstShellId);
+        delay = (metaDelaySec || 0)
+          + lead_in_time  // Time for lead-in fuse to burn to first shell
+          + (firstShell?.fuse_delay || 0)  // Time for first shell's fuse to burn
+          + (firstShell?.lift_delay || 0);  // Time for first shell to lift
+      } else if (fireableItem?.type === 'single' && fireableItem.cellData) {
+        // For single shells, use the shell's delays
+        const cellData = fireableItem.cellData;
+        const shell = inventory.find(item => item.id === cellData.shellId);
+        if (shell) {
+          delay = (metaDelaySec || 0) + (shell.fuse_delay || 0) + (shell.lift_delay || 0);
+          duration = (shell.duration || 2);
+        }
+      }
+      
+      onAdd({
+        ...rackShells,
+        startTime,
+        zone,
+        target,
+        name: metaLabel || rackShells.rackName,
+        metaDelaySec,
+        delay,
+        duration
+      });
+      onClose();
     } else if (selectedType === "GENERIC") {
       console.log("GENERIC ADD")
       onAdd({ 
@@ -135,7 +245,9 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
     setSelectedType("CAKE_FOUNTAIN");
     setSelectedItem(null);
     setFusedLine(null);
+    setRackShells(null);
     setFusedBuilderOpen(false);
+    setIsRackShellsOpen(false);
     setMetaLabel("");
     setMetaDelaySec(0);
   };
@@ -172,8 +284,11 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
               setSelectedItem(null)
               if (newType === "FUSED_SHELL_LINE") {
                 setFusedBuilderOpen(true);
+              } else if (newType === "RACK_SHELLS") {
+                setIsRackShellsOpen(true);
               } else {
                 setFusedLine(null);
+                setRackShells(null);
               }
             }}
           >
@@ -184,6 +299,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
             <option value="GENERIC">Generic</option>
             <option value="FUSE">Fuse</option>
             <option value="FUSED_SHELL_LINE">Fused Shell Line</option>
+            <option value="RACK_SHELLS">Rack Shells</option>
           </select>
         </div>
 
@@ -208,8 +324,41 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
           </div>
         )}
 
+        {/* Rack Shells Preview */}
+        {rackShells && (
+          <div className="mb-4 p-4 bg-gray-700 rounded">
+            <h3 className="text-lg mb-2">Rack Shells Preview:</h3>
+            <p><strong>Rack:</strong> {rackShells.rackName}</p>
+            <p>
+              <strong>Fireable Item:</strong>{" "}
+              {rackShells.fireableItem?.type === 'single' 
+                ? `Single Shell (Cell ${rackShells.fireableItem.cells[0]})`
+                : `Fused Link (${rackShells.fireableItem?.cells.length || 0} shells)`
+              }
+            </p>
+            {rackShells.fireableItemId && (
+              <p><strong>ID:</strong> {rackShells.fireableItemId}</p>
+            )}
+            <p><strong>Cells:</strong> {rackShells.rackCells?.join(', ') || 'N/A'}</p>
+            {rackShells.fireableItem?.type === 'fused' && rackShells.fireableItem.fuse && (
+              <>
+                <p>
+                  <strong>Fuse:</strong>{" "}
+                  {(() => {
+                    const fuseItem = inventory.find(item => item.type === 'FUSE' && item.id === parseInt(rackShells.fireableItem.fuse.type));
+                    return fuseItem ? (
+                      <span style={{ color: fuseItem.color }}>{fuseItem.name}</span>
+                    ) : 'Unknown';
+                  })()}
+                </p>
+                <p><strong>Lead-In:</strong> {rackShells.fireableItem.fuse.leadIn || 0}"</p>
+              </>
+            )}
+          </div>
+        )}
+
         {/* Select Item for non-fused types */}
-        {!fusedLine && selectedType !== "FUSED_SHELL_LINE" && selectedType !== "GENERIC" && (
+        {!fusedLine && !rackShells && selectedType !== "FUSED_SHELL_LINE" && selectedType !== "RACK_SHELLS" && selectedType !== "GENERIC" && (
           <div className="mb-4">
             <label className="block mb-2">Select Item:</label>
             <ul className="h-32 overflow-y-auto bg-gray-700 p-2 rounded">
@@ -238,41 +387,72 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
           />
         </div>
 
-        {/* Zone, Target, and Meta Delay (in line) */}
+        {/* Additional Delay */}
+        <div className="mb-4">
+          <label className="block mb-2">Additional Delay (sec):</label>
+          <input
+            type="number"
+            className="w-full p-2 bg-gray-700 rounded text-white"
+            value={metaDelaySec}
+            onChange={(e) => setMetaDelaySec(parseFloat(e.target.value))}
+            placeholder="Delay in sec"
+          />
+        </div>
+
+        {/* Zone and Target (in line) */}
         <div className="mb-4 flex space-x-4 items-end">
-          <div>
+          <div className="flex-1">
             <label className="block mb-2">Zone:</label>
             <select
               value={zone}
-              onChange={(e) => setZone(e.target.value)}
+              onChange={(e) => {
+                const newZone = e.target.value;
+                setZone(newZone);
+                // Reset target to first available target in new zone
+                if (newZone && availableDevices[newZone]) {
+                  const firstAvailableTarget = availableDevices[newZone].find(
+                    t => !isOccupied(newZone, t)
+                  ) || availableDevices[newZone][0];
+                  setTarget(firstAvailableTarget);
+                }
+              }}
               className="block appearance-none w-full border border-gray-400 hover:border-gray-500 px-4 py-2 rounded shadow leading-tight focus:outline-none focus:shadow-outline"
             >
-              {Object.keys(availableDevices).map((k, i) => (
-                <option key={i} value={k}>{k}</option>
-              ))}
+              {Object.keys(availableDevices).map((k, i) => {
+                const label = receiverLabels?.[k];
+                const displayText = label ? `${label} (${k})` : k;
+                return (
+                  <option 
+                    key={i} 
+                    value={k}
+                    disabled={isZoneFullyOccupied(k)}
+                  >
+                    {displayText}{isZoneFullyOccupied(k) ? ' (X)' : ''}
+                  </option>
+                );
+              })}
             </select>
           </div>
-          <div>
+          <div className="flex-1">
             <label className="block mb-2">Target:</label>
             <select
               value={target}
               onChange={(e) => setTarget(parseInt(e.target.value))}
               className="block appearance-none w-full border border-gray-400 hover:border-gray-500 px-4 py-2 rounded shadow leading-tight focus:outline-none focus:shadow-outline"
             >
-              {zone && availableDevices[zone].map((k, i) => (
-                <option key={i} value={k}>{k}</option>
-              ))}
+              {zone && availableDevices[zone].map((k, i) => {
+                const occupied = isOccupied(zone, k);
+                return (
+                  <option 
+                    key={i} 
+                    value={k}
+                    disabled={occupied}
+                  >
+                    {k}{occupied ? ' (X)' : ''}
+                  </option>
+                );
+              })}
             </select>
-          </div>
-          <div>
-            <label className="block mb-2">Additional Delay (sec):</label>
-            <input
-              type="number"
-              className="w-full p-2 bg-gray-700 rounded text-white"
-              value={metaDelaySec}
-              onChange={(e) => setMetaDelaySec(parseFloat(e.target.value))}
-              placeholder="Delay in sec"
-            />
           </div>
         </div>
 
@@ -287,7 +467,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
           <button
             className="bg-blue-600 px-4 py-2 rounded"
             onClick={handleAdd}
-            disabled={!selectedItem && !fusedLine && !(selectedType === "GENERIC")}
+            disabled={!selectedItem && !fusedLine && !rackShells && !(selectedType === "GENERIC")}
           >
             Add
           </button>
@@ -302,6 +482,31 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
           onAdd={handleFusedLineAdd}
           inventory={inventory}
         />
+      )}
+
+      {/* RackShellsSelector */}
+      {isRackShellsOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+          <div className="bg-gray-800 text-white p-6 rounded shadow-lg w-96 relative z-50">
+            <h2 className="text-xl mb-4">Select Rack Shells</h2>
+            <RackShellsSelector
+              onSelect={(rackShells) => {
+                setRackShells(rackShells);
+                setIsRackShellsOpen(false);
+                if (!metaLabel) {
+                  setMetaLabel(rackShells.rackName);
+                }
+              }}
+              onClose={() => {
+                setIsRackShellsOpen(false);
+                setSelectedType("CAKE_FOUNTAIN");
+              }}
+              items={items}
+              inventory={inventory}
+              showId={showMetadata?.id}
+            />
+          </div>
+        </div>
       )}
     </div>
   );
@@ -397,7 +602,7 @@ const ChainTimingModal = ({ isOpen, onClose, onApply, selectedItems }) => {
   );
 };
 
-const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex }) => {
+const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex, inventory, inventoryById, availableDevices }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [selectedReceivers, setSelectedReceivers] = useState([]);
   const [startTime, setStartTime] = useState(5);
@@ -531,6 +736,69 @@ const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex 
     onGenerate(newItems);
   };
 
+  const handleTestAllCakes = () => {
+    if (!inventory || !availableDevices || Object.keys(availableDevices).length === 0) {
+      alert("No inventory or available devices found");
+      return;
+    }
+
+    // Filter for 200g and 500g cakes
+    const cakeItems = inventory.filter(item => 
+      item.type === "CAKE_200G" || item.type === "CAKE_500G"
+    );
+
+    if (cakeItems.length === 0) {
+      alert("No 200g or 500g cakes found in inventory");
+      return;
+    }
+
+    // Create a flat list of all available zone/target combinations
+    const availableSlots = [];
+    Object.entries(availableDevices).forEach(([zone, targets]) => {
+      targets.forEach(target => {
+        availableSlots.push({ zone, target });
+      });
+    });
+
+    if (availableSlots.length === 0) {
+      alert("No available device slots found");
+      return;
+    }
+
+    // Generate items, assigning each cake to an available slot and chaining them back-to-back
+    const newItems = [];
+    let itemId = currentIndex;
+    let currentTime = startTime;
+    let slotIndex = 0;
+
+    cakeItems.forEach((cakeItem) => {
+      // Get the next available slot (wrap around if needed)
+      const slot = availableSlots[slotIndex % availableSlots.length];
+      slotIndex++;
+
+      // Use the cake's actual duration, default to 5 seconds if not set
+      const duration = cakeItem.duration || 5;
+
+      newItems.push({
+        id: itemId++,
+        itemId: cakeItem.id,
+        type: cakeItem.type,
+        name: cakeItem.name,
+        startTime: currentTime,
+        zone: slot.zone,
+        target: slot.target,
+        duration: duration,
+        delay: 0
+      });
+
+      // Next cake starts when this one ends
+      currentTime += duration;
+    });
+
+    setCurrentIndex(itemId);
+    onGenerate(newItems);
+  };
+
   return (
     <div className="mb-4 p-3 bg-gray-800 rounded-lg border border-gray-700">
       <div className="flex items-center justify-between">
@@ -542,13 +810,21 @@ const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex 
           Test Show Builder
         </button>
         {isExpanded && (
-          <button
-            onClick={handleGenerate}
-            className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded text-sm"
-            disabled={selectedReceivers.length === 0}
-          >
-            Generate
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={handleTestAllCakes}
+              className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded text-sm"
+            >
+              Test All Cakes
+            </button>
+            <button
+              onClick={handleGenerate}
+              className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded text-sm"
+              disabled={selectedReceivers.length === 0}
+            >
+              Generate
+            </button>
+          </div>
         )}
       </div>
       
@@ -860,11 +1136,27 @@ const ShowBuilder = (props) => {
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
   const [availableDevices, setAvailableDevices] = useState({});
   const [receiverLocations, setReceiverLocations] = useState({});
+  const [receiverLabels, setReceiverLabels] = useState({});
   const [currentIndex, setCurrentIndex] = useState(50);
   const [itemsFixed, setItemsFixed] = useState(false);
   const [filteredReceivers, setFilteredReceivers] = useState({});
+  const [activeTab, setActiveTab] = useState("target"); // "target", "racks", "test", "layout"
 
   const [isInitialized, setIsInitialized] = useState(false);
+
+  const handleTabChange = (tabName) => {
+    // Save current scroll position
+    const scrollY = window.scrollY;
+    setActiveTab(tabName);
+    // Restore scroll position using requestAnimationFrame for better timing
+    requestAnimationFrame(() => {
+      window.scrollTo(0, scrollY);
+      // Also restore on next frame in case DOM updates cause reflow
+      requestAnimationFrame(() => {
+        window.scrollTo(0, scrollY);
+      });
+    });
+  };
 
   useEffect(() => {
 
@@ -1001,6 +1293,7 @@ const ShowBuilder = (props) => {
         try {
           const parsedLocations = JSON.parse(stagedShow.receiver_locations);
           setReceiverLocations(parsedLocations);
+          setShowMetadata(prev => ({ ...prev, receiver_locations: parsedLocations }));
         } catch (e) {
           console.error('Failed to parse receiver_locations for show:', stagedShow.id, e);
           initializeDefaultLocations();
@@ -1008,12 +1301,31 @@ const ShowBuilder = (props) => {
       } else {
         initializeDefaultLocations();
       }
+      
+      // Load existing receiver labels from show data
+      if (stagedShow.receiver_labels) {
+        try {
+          const parsedLabels = JSON.parse(stagedShow.receiver_labels);
+          setReceiverLabels(parsedLabels);
+          setShowMetadata(prev => ({ ...prev, receiver_labels: parsedLabels }));
+        } catch (e) {
+          console.error('Failed to parse receiver_labels for show:', stagedShow.id, e);
+          setReceiverLabels({});
+        }
+      } else if (stagedShow.receiverLabels) {
+        // Handle parsed labels from store
+        setReceiverLabels(stagedShow.receiverLabels);
+        setShowMetadata(prev => ({ ...prev, receiver_labels: stagedShow.receiverLabels }));
+      } else {
+        setReceiverLabels({});
+      }
     } else {
       // Clear editor when show is unstaged
       setItems([]);
       setShowMetadata({name: ""});
       setAudioFile(null);
       setReceiverLocations({});
+      setReceiverLabels({});
     }
   }, [stagedShow]);
 
@@ -1229,6 +1541,7 @@ const ShowBuilder = (props) => {
         setShowMetadata={setShowMetadata}
         clearEditor={clearEditorFnc}
         protocols={systemConfig.protocols}
+        receiverLabels={receiverLabels}
       />
       {availableDevices && Object.keys(availableDevices).length > 0 ? (
         <div>
@@ -1252,14 +1565,6 @@ const ShowBuilder = (props) => {
               </button>
             </div>
           )}
-          
-          {/* Test Show Builder */}
-          <TestShowBuilder
-            receivers={filteredReceivers}
-            onGenerate={handleTestShowGenerate}
-            currentIndex={currentIndex}
-            setCurrentIndex={setCurrentIndex}
-          />
           
           {/* Chain Timing Button */}
           {selectedItems.length >= 2 && (
@@ -1288,7 +1593,122 @@ const ShowBuilder = (props) => {
             clearSelection={clearSelection}
             timeCursor={audioCurrentTime}
             setTimeCursor={setAudioCurrentTime}
+            receiverLabels={receiverLabels}
           />
+          
+          {/* Tabs Section */}
+          <div className="mt-4">
+            {/* Tab Navigation */}
+            <div className="flex border-b border-gray-700 mb-4">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleTabChange("target");
+                  e.currentTarget.blur();
+                }}
+                className={`px-4 py-2 font-medium text-sm ${
+                  activeTab === "target"
+                    ? "text-blue-400 border-b-2 border-blue-400"
+                    : "text-gray-400 hover:text-gray-300"
+                }`}
+              >
+                Target Grid
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleTabChange("racks");
+                  e.currentTarget.blur();
+                }}
+                className={`px-4 py-2 font-medium text-sm ${
+                  activeTab === "racks"
+                    ? "text-blue-400 border-b-2 border-blue-400"
+                    : "text-gray-400 hover:text-gray-300"
+                }`}
+              >
+                Racks
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleTabChange("test");
+                  e.currentTarget.blur();
+                }}
+                className={`px-4 py-2 font-medium text-sm ${
+                  activeTab === "test"
+                    ? "text-blue-400 border-b-2 border-blue-400"
+                    : "text-gray-400 hover:text-gray-300"
+                }`}
+              >
+                Test Show Builder
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleTabChange("layout");
+                  e.currentTarget.blur();
+                }}
+                className={`px-4 py-2 font-medium text-sm ${
+                  activeTab === "layout"
+                    ? "text-blue-400 border-b-2 border-blue-400"
+                    : "text-gray-400 hover:text-gray-300"
+                }`}
+              >
+                Show Layout
+              </button>
+            </div>
+            
+            {/* Tab Content */}
+            <div className="tab-content">
+              {activeTab === "target" && (
+                <ShowTargetGrid  
+                  items={items} 
+                  setItems={setItems} 
+                  availableDevices={availableDevices}
+                  receiverLabels={receiverLabels}
+                  setReceiverLabels={(labels) => {
+                    setReceiverLabels(labels);
+                    setShowMetadata(prev => ({ ...prev, receiver_labels: labels }));
+                  }}
+                />
+              )}
+              
+              {activeTab === "racks" && (
+                <RacksTab inventory={inventory} showId={showMetadata.id} />
+              )}
+              
+              {activeTab === "test" && (
+                <TestShowBuilder
+                  receivers={filteredReceivers}
+                  onGenerate={handleTestShowGenerate}
+                  currentIndex={currentIndex}
+                  setCurrentIndex={setCurrentIndex}
+                  inventory={inventory}
+                  inventoryById={inventoryById}
+                  availableDevices={availableDevices}
+                />
+              )}
+              
+              {activeTab === "layout" && (
+                <SpatialLayoutMap
+                  receivers={systemConfig.receivers}
+                  items={items}
+                  receiverLocations={receiverLocations}
+                  setReceiverLocations={setReceiverLocations}
+                  onSaveLocations={saveReceiverLocations}
+                />
+              )}
+            </div>
+          </div>
+          
           <AddItemModal
             isOpen={isAddModalOpen}
             onClose={closeModal}
@@ -1297,6 +1717,8 @@ const ShowBuilder = (props) => {
             items={items}
             inventory={inventory}
             availableDevices={availableDevices}
+            receiverLabels={receiverLabels}
+            showMetadata={showMetadata}
           />
           <ChainTimingModal
             isOpen={isChainTimingModalOpen}
@@ -1313,20 +1735,6 @@ const ShowBuilder = (props) => {
           ) : (
             ""
           )}
-          <ShowTargetGrid  
-            items={items} 
-            setItems={setItems} 
-            availableDevices={availableDevices} 
-          />
-          
-          {/* Spatial Layout Section */}
-          <SpatialLayoutMap
-            receivers={systemConfig.receivers}
-            items={items}
-            receiverLocations={receiverLocations}
-            setReceiverLocations={setReceiverLocations}
-            onSaveLocations={saveReceiverLocations}
-          />
         </div>
       ) : (
         <div className="text-center p-8">

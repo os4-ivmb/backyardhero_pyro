@@ -32,16 +32,20 @@ const FusedLineBuilderModal = ({ isOpen, onClose, onAdd, inventory }) => {
     const last_shell = shellSlots[shellSlots.length-1]
     const fuse = fuseInventory.find((fuse) => fuse.id === parseInt(fuseType))
     
-    // Calculate duration: time from lighting fuse until last shell effect appears
+    // Calculate duration: time from first shot to last shot effect appears
+    // Note: startTime represents when the first shot fires, so duration should not include lead-in
     // Convert fuse lengths (inches) to time (seconds) using burn_rate (seconds per foot)
     const burn_rate = fuse?.burn_rate || 0;
-    const lead_in_time = (leadInInches / 12) * burn_rate; // Lead-in fuse burn time
-    const total_fuse_length_inches = parseInt(spacing) * shellSlots.length; // Total fuse between shells
+    // Calculate total fuse length between shells (not including lead-in)
+    // For n shells, there are (n-1) gaps between them
+    const total_fuse_length_inches = parseInt(spacing) * (shellSlots.length - 1); // Total fuse between shells
     const fuse_burn_time = (total_fuse_length_inches / 12) * burn_rate; // Time for fuse to burn between shells
     const last_shell_delays = (last_shell?.lift_delay || 0) + (last_shell?.fuse_delay || 0); // Last shell's delays
     
-    // Total duration = lead-in time + fuse burn time + last shell delays
-    const calcDuration = lead_in_time + fuse_burn_time + last_shell_delays;
+    // Duration = fuse burn time between shells + last shell delays
+    // Note: lead-in time is NOT included because startTime represents when the first shot fires,
+    // and the lead-in happens before that (accounted for in delay, used by firing system)
+    const calcDuration = fuse_burn_time + last_shell_delays;
     
     const name = `${fuse.name} x ${shellSlots.length} shell`
     const fusedLine = {
@@ -53,7 +57,6 @@ const FusedLineBuilderModal = ({ isOpen, onClose, onAdd, inventory }) => {
       shells: shellSlots,
       name
     };
-    console.log("HAFL")
     onAdd(fusedLine); // Add the item to the timeline
     onClose(false); // Close the modal
   };

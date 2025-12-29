@@ -18,5 +18,7 @@ export const INV_COLOR_CODE = {
     AERIAL_SHELL: '#FF0000',
     GENERIC: '#FFFFFF',
     FUSE: '#00FF00',
-    FUSED_AERIAL_LINE: '#23cf53'
+    FUSED_AERIAL_LINE: '#23cf53',
+    FUSED_SHELL_LINE: '#23cf53',
+    RACK_SHELLS: '#FF8C00'
 }

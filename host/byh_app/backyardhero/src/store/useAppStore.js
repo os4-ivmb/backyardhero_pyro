@@ -35,6 +35,18 @@ const useAppStore = create((set, get) => ({
           show.receiverLocations = null;
         }
         
+        // Parse receiver_labels JSON string if it exists
+        if (show.receiver_labels) {
+          try {
+            show.receiverLabels = JSON.parse(show.receiver_labels);
+          } catch (e) {
+            console.error('Failed to parse receiver_labels for show:', show.id, e);
+            show.receiverLabels = null;
+          }
+        } else {
+          show.receiverLabels = null;
+        }
+        
         acc[show.id] = show;
         return acc;
       }, {});
@@ -103,6 +115,15 @@ const useAppStore = create((set, get) => ({
     try {
       const { data } = await axios.get('/api/inventory');
       const inventoryById = data.reduce((acc, item) => {
+        // Parse metadata JSON string if it exists
+        if (item.metadata) {
+          try {
+            item.metadata = JSON.parse(item.metadata);
+          } catch (e) {
+            console.error('Failed to parse metadata for item:', item.id, e);
+            item.metadata = null;
+          }
+        }
         acc[item.id] = item;
         return acc;
       }, {});
@@ -127,16 +148,20 @@ const useAppStore = create((set, get) => ({
     console.log("ID")
     console.log(id)
     try {
+      // Preserve existing metadata if not provided in updatedData
+      const existingItem = get().inventoryById[id];
+      if (existingItem && !updatedData.metadata && existingItem.metadata) {
+        // If metadata exists but wasn't in the update, preserve it
+        // Stringify if it's an object (parsed metadata)
+        updatedData.metadata = typeof existingItem.metadata === 'string' 
+          ? existingItem.metadata 
+          : JSON.stringify(existingItem.metadata);
+      }
+      
       await axios.patch(`/api/inventory/${id}`, updatedData);
-      set((state) => ({
-        inventory: state.inventory.map((item) =>
-          item.id === id ? { ...item, ...updatedData } : item
-        ),
-        inventoryById: {
-          ...state.inventoryById,
-          [id]: { ...state.inventoryById[id], ...updatedData },
-        },
-      }));
+      
+      // After update, refresh inventory to get the latest data
+      await get().fetchInventory();
     } catch (error) {
       console.error('Failed to update inventory item:', error);
     }
