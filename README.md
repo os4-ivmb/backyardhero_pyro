@@ -1,5 +1,13 @@
 # Backyard Hero: An excessively DIY Firework Control System
 
+## Images
+
+<div align="center">
+  <img src="doc_img/PXL_20250430_043232515.jpg" alt="Backyard Hero System" width="800">
+  <img src="doc_img/PXL_20250430_043406282.jpg" alt="Hardware Components" width="800">
+</div>
+Uses custom, purpose-built boards and firmware/software built from the ground up to provide an effective, feature packed firing system for less than $100 (one dongle, one receiever and 2 8cue modules). Scales cheaply, at another receiver @ about 30 bucks and an 8 shot cue module for about 9 bucks. A receiver can take up to 128 cues, though it looks absolutely ridiculous. 
+
 ## Overview
 
 Backyard Hero is an open-source firework control system designed for enthusiasts who want a powerful, flexible, and cost-effective solution. It features a local web interface for show design and execution, and supports both existing Bilusocn one-way receivers and a custom 2.4GHz bidirectional hardware platform.
@@ -10,6 +18,7 @@ This project provides the complete software, firmware, and hardware design resou
 
 ## Table of Contents
 
+*   [Images](#images)
 *   [Project Structure](#project-structure)
 *   [System Capabilities](#system-capabilities)
     *   [Custom Hardware](#custom-hardware)
