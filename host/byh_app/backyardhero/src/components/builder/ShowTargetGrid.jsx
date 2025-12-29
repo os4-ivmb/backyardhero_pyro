@@ -6,7 +6,8 @@ import {
   closestCenter,
   DragOverlay,
 } from "@dnd-kit/core";
-import { MdEdit } from "react-icons/md";
+import { MdEdit, MdSwapHoriz } from "react-icons/md";
+import { FaX } from "react-icons/fa6";
 import { INV_COLOR_CODE } from "@/constants";
 
 export default function ShowTargetGrid(props) {
@@ -14,6 +15,8 @@ export default function ShowTargetGrid(props) {
     const [activeItem, setActiveItem] = useState(null);
     const [editingZone, setEditingZone] = useState(null);
     const [editValue, setEditValue] = useState("");
+    const [migrateSourceZone, setMigrateSourceZone] = useState(null);
+    const [showMigrateModal, setShowMigrateModal] = useState(false);
 
     const availableDevices = props.availableDevices
     
@@ -42,6 +45,47 @@ export default function ShowTargetGrid(props) {
       } else if (e.key === 'Escape') {
         handleLabelCancel();
       }
+    };
+
+    // Get receivers (zones) that don't have any cues assigned
+    const getAvailableTargetReceivers = (sourceZone) => {
+      return Object.keys(availableDevices).filter((zoneName) => {
+        // Skip the source zone
+        if (zoneName === sourceZone) return false;
+        
+        // Check if this zone has any items assigned
+        const hasItems = items.some((item) => item.zone === zoneName);
+        return !hasItems;
+      });
+    };
+
+    const handleMigrateClick = (sourceZone) => {
+      setMigrateSourceZone(sourceZone);
+      setShowMigrateModal(true);
+    };
+
+    const handleMigrateConfirm = (targetZone) => {
+      if (!migrateSourceZone || !targetZone) return;
+
+      // Get all items from the source zone
+      const sourceItems = items.filter((item) => item.zone === migrateSourceZone);
+
+      // Update items: change zone from source to target, keep same target numbers
+      const updatedItems = items.map((item) => {
+        if (item.zone === migrateSourceZone) {
+          return { ...item, zone: targetZone };
+        }
+        return item;
+      });
+
+      setItems(updatedItems);
+      setShowMigrateModal(false);
+      setMigrateSourceZone(null);
+    };
+
+    const handleMigrateCancel = () => {
+      setShowMigrateModal(false);
+      setMigrateSourceZone(null);
     };
   
     const handleDragStart = (event) => {
@@ -77,6 +121,7 @@ export default function ShowTargetGrid(props) {
     };
   
     return (
+      <>
       <DndContext
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
@@ -115,6 +160,16 @@ export default function ShowTargetGrid(props) {
                     >
                       <MdEdit size={18} />
                     </button>
+                    {/* Only show migrate button if this receiver has items assigned */}
+                    {items.some((item) => item.zone === zoneName) && (
+                      <button
+                        onClick={() => handleMigrateClick(zoneName)}
+                        className="text-blue-400 hover:text-blue-300 transition-colors"
+                        title="Migrate all cues to another receiver"
+                      >
+                        <MdSwapHoriz size={18} />
+                      </button>
+                    )}
                   </>
                 )}
               </div>
@@ -176,6 +231,62 @@ export default function ShowTargetGrid(props) {
           ) : null}
         </DragOverlay>
       </DndContext>
+
+      {/* Migrate Modal */}
+      {showMigrateModal && migrateSourceZone && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4 border border-gray-700">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xl font-semibold text-white">
+                Migrate Cues from {receiverLabels[migrateSourceZone] || migrateSourceZone}
+              </h3>
+              <button
+                onClick={handleMigrateCancel}
+                className="text-gray-400 hover:text-white transition-colors"
+              >
+                <FaX size={20} />
+              </button>
+            </div>
+            
+            <p className="text-gray-300 mb-4 text-sm">
+              Select a target receiver to move all cues to. Only receivers without assigned cues are shown.
+            </p>
+
+            <div className="space-y-2 max-h-64 overflow-y-auto">
+              {getAvailableTargetReceivers(migrateSourceZone).length === 0 ? (
+                <p className="text-gray-400 text-sm text-center py-4">
+                  No available receivers. All receivers have cues assigned.
+                </p>
+              ) : (
+                getAvailableTargetReceivers(migrateSourceZone).map((targetZone) => (
+                  <button
+                    key={targetZone}
+                    onClick={() => handleMigrateConfirm(targetZone)}
+                    className="w-full text-left px-4 py-3 bg-gray-700 hover:bg-gray-600 rounded border border-gray-600 hover:border-blue-500 transition-colors"
+                  >
+                    <div className="font-medium text-white">
+                      {receiverLabels[targetZone] || targetZone}
+                    </div>
+                    {receiverLabels[targetZone] && (
+                      <div className="text-sm text-gray-400">{targetZone}</div>
+                    )}
+                  </button>
+                ))
+              )}
+            </div>
+
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                onClick={handleMigrateCancel}
+                className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      </>
     );
   }
   

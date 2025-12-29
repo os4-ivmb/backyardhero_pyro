@@ -9,8 +9,8 @@
 // v7: 2025-01-XX - Migrated from RF24Mesh to pure RF24 with deterministic addressing
 #define BOARD_VERISON 7
 #define FW_VERSION 7
-#define NODE_ID 124
-const char RECEIVER_IDENT[] = "RX124";
+#define NODE_ID 125
+const char RECEIVER_IDENT[] = "RX125";
 
 const bool RECEIVER_USES_V1_CUES = false;
  

@@ -2,7 +2,9 @@
 
 ## Overview
 
-Backyard Hero is an open-source firework control system designed for enthusiasts who want a powerful, flexible, and cost-effective solution. It features a local web interface for show design and execution, and supports both existing Bilusocn one-way receivers and a custom 2.4GHz bidirectional mesh-networked hardware platform.
+Backyard Hero is an open-source firework control system designed for enthusiasts who want a powerful, flexible, and cost-effective solution. It features a local web interface for show design and execution, and supports both existing Bilusocn one-way receivers and a custom 2.4GHz bidirectional hardware platform.
+
+**Version NYE2025.01** introduces major improvements including rack editing, YouTube video processing for firing profiles, enhanced receiver telemetry, pyromusical support, and significant reliability improvements.
 
 This project provides the complete software, firmware, and hardware design resources.
 
@@ -44,7 +46,7 @@ These components are orchestrated by `supervisord` within the Docker container.
 
 The `devices/` directory includes resources for:
 
-*   `os4_receiver/`: Custom 2.4GHz mesh-networked receiver.
+*   `os4_receiver/`: Custom 2.4GHz receiver with direct point-to-point communication (1000+ yard range).
 *   `os4_cuemodule/`: Chainable 8-cue modules (expandable).
 *   `os4_dongle/`: USB dongle for host communication with custom receivers and 433MHz systems.
 
@@ -56,11 +58,11 @@ Each directory contains firmware, enclosure CAD files, and PCB design details.
 
 The custom 2.4GHz hardware platform offers significant advantages:
 
-*   **Mesh Networking:** Receivers form a mesh network, enabling virtually unlimited range as long as nodes are within ~1500ft of each other.
+*   **Direct RF Communication:** Receivers use raw point-to-point communication (non-mesh) with 1000+ yard range. Mesh networking was removed as it added unnecessary overhead - the direct range is more than sufficient for most applications.
 *   **Superior RF Performance:** Meticulous PCB design and impedance matching maximize the performance of the onboard PA/LNA, ensuring robust communication.
 *   **Long Battery Life:** On-board lithium batteries are rechargeable via USB-C PD (12V for fast charging) and provide well over 24 hours of continuous runtime.
 *   **Expandable & Modular Cues:** Each receiver supports up to 128 cues via chainable 8-cue modules.
-*   **Realtime Telemetry:** The system provides real-time feedback on cue continuity, signal latency, and receiver battery levels.
+*   **Advanced Telemetry:** The system provides comprehensive real-time feedback including cue continuity, signal latency, ready count, success percentage, and receiver battery levels. All metrics are displayed in the UI with visual health indicators.
 *   **Rugged Design:** 3D-printable enclosures are designed for durability and can be made water-resistant.. if you want.
 *   **Dual-Frequency Dongle:** The custom dongle interfaces with the 2.4GHz custom receivers and also includes a 433MHz frontend for compatibility with BILUSOCN and similar one-way systems.
 *   **Cost-Effectiveness:**
@@ -73,9 +75,12 @@ The custom 2.4GHz hardware platform offers significant advantages:
 
 The local web application, runnable on a laptop or a dedicated device like a Raspberry Pi, offers:
 
-*   **Show Design:** A graphical interface for creating and managing firework shows.
-*   **Inventory Management:** Keep track of your pyro stock.
-*   **Advanced Fusing Logic:** The show builder can automatically incorporate delays for fused lines in racks, ensuring precise timing.
+*   **Show Design:** A graphical interface for creating and managing firework shows with an improved UI.
+*   **Rack Editing:** Create custom racks with configurable dimensions, assign shells to specific cells, and build fuse lines with visual representation. Racks can be assigned to receivers and integrated into shows.
+*   **Inventory Management:** Keep track of your pyro stock with support for shell packs, firing profiles, and metadata. Automatically process lists of mortar effects - paste shell descriptions and the system extracts colors and effects, mapping them to standardized types for easy rack spot selection.
+*   **YouTube Video Processing:** Automatically crawl YouTube videos and extract firing profiles by analyzing audio. The system can identify shot timings and optionally populate color information for shells.
+*   **Pyromusical Support:** Upload audio files and synchronize show timing with music. The timeline includes waveform visualization for precise cue placement.
+*   **Advanced Fusing Logic:** The show builder automatically incorporates delays for fused lines in racks, ensuring precise timing based on fuse burn rates.
 *   **Cross-Platform Compatibility:** Designed to run on OSX and Windows (via `start.sh` and `start.bat` respectively in the `host` directory).
 
 ### Show Control Lifecycle
@@ -156,6 +161,19 @@ This project is for pyrotechnic hobbyists and DIY electronics enthusiasts lookin
 
 While the custom RF hardware designs would require FCC certification for commercial sale, the complete software, firmware, and design concepts are provided. The maintainer welcomes collaboration, especially on the hardware aspects, and is willing to share detailed design/production resources and potentially provide hardware modules for testing to active contributors (at material cost).
 
+## Version History
+
+### NYE2025.01 (Current)
+
+*   **Rack Editing System:** Full rack creation and management - design custom rack layouts, assign shells to cells, create and visualize fuse lines, and assign racks to receivers. Auto-processing of shell description lists extracts colors and effects, making it easy to choose shells for rack spots based on color/effect filters.
+*   **Auto Shell Description Processing:** Paste lists of mortar shell descriptions and the system automatically extracts colors and effects, maps them to standardized types, and creates inventory entries. Makes it easy to filter and select shells by color or effect when building racks.
+*   **YouTube Video Processing:** Automated firing profile extraction from YouTube videos with audio analysis. Supports color detection and population for shells.
+*   **Enhanced Receiver Telemetry:** Comprehensive telemetry including ready count, latency tracking, success percentage, and real-time health monitoring.
+*   **RF Protocol Improvements:** Switched from mesh networking to direct point-to-point communication. Achieves 1000+ yard range without mesh overhead, improving reliability and reducing complexity.
+*   **Pyromusical Support:** Audio file upload and timeline synchronization with waveform visualization for music-synchronized shows.
+*   **Reliability & Resiliency:** Numerous fixes and improvements to receiver/transmitter communication, error handling, and recovery mechanisms.
+*   **UI Revamp:** Improved user interface in multiple areas including show builder, receiver status displays, and inventory management.
+
 ## What's Next?
 
 This project is actively evolving. Here are some potential areas for future development:
@@ -164,7 +182,7 @@ This project is actively evolving. Here are some potential areas for future deve
 *   **Expanded Hardware Support:**
     *   Developing more pre-designed hardware modules, maybe a DMX module instead of an 8 cue. 
     *   Official support and documentation for Raspberry Pi as a dedicated host device.
-*   **Advanced Show Synchronization:** Exploring options for synchronizing shows with music or other external triggers.
+*   **Advanced Show Synchronization:** Pyromusical support is now available - upload audio files and sync cues to music with waveform visualization.
 *   **Community Features:** Building a platform or forum for users to share show files, hardware mods, and experiences.
 *   **Comprehensive Documentation:** Expanding documentation for developers, hardware builders, and end-users.
 *   **Windows Native Support:** Improving native Windows support beyond the current Docker-based `start.bat`.

@@ -2,16 +2,24 @@
 import useStateAppStore from '@/store/useStateAppStore';
 import { useEffect, useState, useRef } from 'react';
 import { MdRefresh } from "react-icons/md";
+import Toast from '../common/Toast';
 
 const checkIfLogIsRecent = (log) => {
     // Extract the timestamp from the string
     const timestampMatch = log.match(/\[([^\]]+)\]/); // Match content inside brackets
     if (!timestampMatch) {
-    console.error("No valid timestamp found in the string.");
-    } else {
+        console.error("No valid timestamp found in the string.");
+        return false; // If no timestamp, don't show as recent
+    }
+    
     const timestamp = timestampMatch[1]; // Extract the matched timestamp
     const logTime = new Date(timestamp); // Convert to a Date object
-
+    
+    // Check if date is valid
+    if (isNaN(logTime.getTime())) {
+        console.error("Invalid timestamp format:", timestamp);
+        return false;
+    }
 
     // Get the current time and calculate the difference
     const now = new Date();
@@ -19,8 +27,7 @@ const checkIfLogIsRecent = (log) => {
     const diffInMinutes = diffInMs / (1000 * 60); // Convert to minutes
 
     // Check if the log time is within the last 5 minutes
-    return (diffInMinutes <= 5)
-    }
+    return (diffInMinutes <= 5);
 }
 
 export default function Status() {
@@ -30,6 +37,8 @@ export default function Status() {
     const [sysIsArmed, setSysIsArmed] = useState(false);
     const [status, setStatus] = useState("Inactive"); // State for "Active" or "Inactive"
     const socketRef = useRef(null); // Use ref to keep track of the WebSocket instance
+    const [toasts, setToasts] = useState([]);
+    const previousErrorsRef = useRef(new Set());
 
     const connectWebSocket = () => {
         // Initialize the WebSocket connection
@@ -97,6 +106,85 @@ export default function Status() {
         return () => clearInterval(intervalId); // Cleanup interval on component unmount
     }, [stateData]);
 
+    // Watch for new errors and show them as toasts
+    useEffect(() => {
+        const currentErrors = new Set();
+        
+        // Collect all errors from various sources
+        const fireCheckFailures = stateData.fw_state?.fire_check_failures || [];
+        const protoHandlerErrors = stateData.fw_state?.proto_handler_errors || [];
+        const fwErrors = stateData.fw_error || [];
+        const fwDErrors = stateData.fw_d_error || [];
+        
+        // Helper to convert error to string
+        const errorToString = (error) => {
+            if (typeof error === 'string') return error;
+            if (typeof error === 'object' && error !== null) {
+                return JSON.stringify(error);
+            }
+            return String(error);
+        };
+        
+        // Helper to extract error message from log format (removes timestamp)
+        const extractErrorMessage = (logEntry) => {
+            if (typeof logEntry !== 'string') {
+                return errorToString(logEntry);
+            }
+            // Remove timestamp pattern [timestamp] from the beginning
+            return logEntry.replace(/^\[[^\]]+\]\s*/, '').trim();
+        };
+        
+        // Add fire check failures
+        fireCheckFailures.forEach((error) => {
+            const errorMessage = errorToString(error);
+            const errorKey = `fire_check_${errorMessage}`;
+            currentErrors.add(errorKey);
+            if (!previousErrorsRef.current.has(errorKey)) {
+                setToasts((prev) => [...prev, { id: Date.now() + Math.random(), message: errorMessage }]);
+            }
+        });
+        
+        // Add proto handler errors
+        protoHandlerErrors.forEach((error) => {
+            const errorMessage = errorToString(error);
+            const errorKey = `proto_handler_${errorMessage}`;
+            currentErrors.add(errorKey);
+            if (!previousErrorsRef.current.has(errorKey)) {
+                setToasts((prev) => [...prev, { id: Date.now() + Math.random(), message: errorMessage }]);
+            }
+        });
+        
+        // Add fw errors
+        fwErrors.forEach((error) => {
+            const errorMessage = errorToString(error);
+            const errorKey = `fw_error_${errorMessage}`;
+            currentErrors.add(errorKey);
+            if (!previousErrorsRef.current.has(errorKey)) {
+                setToasts((prev) => [...prev, { id: Date.now() + Math.random(), message: errorMessage }]);
+            }
+        });
+        
+        // Add fw_d_error (daemon errors) - only show recent ones (within 5 minutes)
+        fwDErrors.forEach((errorLog) => {
+            // Check if the log is recent (within 5 minutes)
+            if (checkIfLogIsRecent(errorLog)) {
+                const errorMessage = extractErrorMessage(errorLog);
+                const errorKey = `fw_d_error_${errorLog}`; // Use full log as key to track duplicates
+                currentErrors.add(errorKey);
+                if (!previousErrorsRef.current.has(errorKey)) {
+                    setToasts((prev) => [...prev, { id: Date.now() + Math.random(), message: errorMessage }]);
+                }
+            }
+        });
+        
+        // Update previous errors
+        previousErrorsRef.current = currentErrors;
+    }, [stateData.fw_state?.fire_check_failures, stateData.fw_state?.proto_handler_errors, stateData.fw_error, stateData.fw_d_error]);
+
+    const handleDismissToast = (id) => {
+        setToasts((prev) => prev.filter((toast) => toast.id !== id));
+    };
+
     // Define base classes for status items for better consistency - futuristic square design
     const statusItemBaseClass = "flex-1 flex items-center justify-center text-xs font-medium border border-opacity-30 rounded-sm px-2 py-1 min-w-[80px] backdrop-blur-sm transition-all duration-200";
 
@@ -124,19 +212,20 @@ export default function Status() {
     }
 
     return (
-        <div className="w-full items-center justify-center p-2 space-y-2" style={{ zIndex: '2' }}>
-            {/* Top Row: System Status & Errors - REMOVED */}
-            {/* <div className="text-xs flex flex-row items-center gap-x-4">
-                <div className="flex items-center gap-x-2 flex-wrap">
-                    <span className="font-semibold text-gray-700 dark:text-gray-300 mr-1">System:</span>
-                    <span className="text-gray-600 dark:text-gray-400"><b>Temp:</b> {stateData.fw_system?.temp}°F</span>
-                    <span className="text-gray-600 dark:text-gray-400"><b>CPU:</b> {stateData.fw_system?.usage?.cpu_percent}%</span>
-                    <span className="text-gray-600 dark:text-gray-400"><b>Mem:</b> {stateData.fw_system?.usage?.memory_percent}%</span>
-                </div>
-                <div className="flex-grow text-right">
-                    <span className="ml-4 text-red-500 dark:text-red-400">{recentError ? recentError : ''}</span>
-                </div>
-            </div> */}
+        <>
+            {/* Toast Notifications - Bottom Left */}
+            <div className="fixed bottom-4 left-4 z-[10000] flex flex-col-reverse">
+                {toasts.map((toast) => (
+                    <Toast
+                        key={toast.id}
+                        message={toast.message}
+                        onDismiss={() => handleDismissToast(toast.id)}
+                        duration={30000}
+                    />
+                ))}
+            </div>
+
+            <div className="w-full items-center justify-center p-2 space-y-2" style={{ zIndex: '2' }}>
 
             {/* Bottom Row: Main Status Indicators - All items in a single wrapping container */}
             <div className={`flex flex-row flex-wrap w-full gap-2 ${stateData.fw_state?.daemon_active ? '' : 'opacity-60'}`}>
@@ -237,6 +326,7 @@ export default function Status() {
                     100% { left: 100%; }
                 }
             `}</style>
-        </div>
+            </div>
+        </>
     );
 }
