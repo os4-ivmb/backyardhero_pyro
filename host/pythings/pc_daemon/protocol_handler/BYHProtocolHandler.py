@@ -79,6 +79,11 @@ class BYHProtocolHandler:
         
         # Track latency samples for sliding average (max 20 samples per receiver)
         self.latency_samples = {}  # Key: receiver ident, Value: list of latency values
+        
+        # Track receiver online state
+        self.receiver_was_online = {}  # Key: receiver ident, Value: bool
+        self.last_config_query_time = 0  # Timestamp of last config query cycle
+        self.last_clock_sync_time = 0  # Timestamp of last clock sync
 
         self.load_initial_receiver_cfg()
         print(f"Initialized Protocol {self.protocol}")
@@ -87,11 +92,21 @@ class BYHProtocolHandler:
     #Just something that runs periodically to then invoke housekeeping things
     def bounce(self):
         self.sync_tx_clock()
+        self.query_receiver_configs_periodic()
 
     def sync_tx_clock(self):
-        sync_message = "msync 0 " + str(int(time.time() * 1000)) + "\n"
-        print("Syncing tx host clock:", sync_message.strip())
-        self.parent.send_serial_command(sync_message)
+        """Sync dongle's clock with Python daemon's time, but only at configured interval"""
+        # Get dongle sync interval from parent's LED handler settings (default 10000ms = 10s)
+        # This is separate from clock_sync_interval_ms which is for dongle→receiver syncs
+        dongle_sync_interval_ms = self.parent.led_handler.led_states.get('dongle_sync_interval_ms', 20000)
+        current_time = int(time.time() * 1000)
+        
+        # Only sync if enough time has passed since last sync
+        if current_time - self.last_clock_sync_time >= dongle_sync_interval_ms:
+            self.last_clock_sync_time = current_time
+            sync_message = "msync 0 " + str(current_time) + "\n"
+            print("Syncing tx host clock:", sync_message.strip())
+            self.parent.send_serial_command(sync_message)
 
     def load_initial_receiver_cfg(self):
         try:
@@ -102,6 +117,10 @@ class BYHProtocolHandler:
             self.config = data.get('protocols',{}).get(self.protocol).get('config')
             if(not self.receivers):
                 self.parent.write_error("Config did not contain any receivers!")
+            
+            # Initialize online state tracking for all known receivers
+            for receiver_ident in self.receivers.keys():
+                self.receiver_was_online[receiver_ident] = False
 
         except FileNotFoundError:
             print(f"Error: The file '{cfg_filepath}' does not exist.")
@@ -148,60 +167,251 @@ class BYHProtocolHandler:
 
 
     def process_status_msg(self, msg_obj):
-        self.last_status_ts = msg_obj.get('timestamp', 0)
+        """Process status message from dongle
+        
+        Status message format (array-based for compactness):
+        {"type":"status","t":timestamp,"l":avgLatency,"r":[[ident, nodeID, battery, showId, loadComplete, startReady, lastMsgTime, latency, successPercent, [continuity0, continuity1]], ...]}
+        
+        Receiver array index mapping:
+        0: ident (string)
+        1: nodeID
+        2: batteryLevel
+        3: showId
+        4: loadComplete (0/1)
+        5: startReady (0/1)
+        6: lastMessageTime
+        7: latency
+        8: successPercent
+        9: continuity array [cont64_0, cont64_1]
+        """
+        self.last_status_ts = msg_obj.get('t', 0)  # Compressed: t -> timestamp
 
-        # Define a mapping for abbreviated keys to full keys
-        key_map = {
-            'i': 'ident',
-            'n': 'node',
-            'b': 'battery',
-            's': 'showId',
-            't': 'lmt',
-            'l': 'loadComplete',
-            'r': 'startReady',
-            'c': 'continuity',
-            'x': 'lat',
-            'sp': 'successPercent'
-        }
+        lmtoffset = int(time.time() * 1000) - msg_obj.get('t', 0)
 
-        lmtoffset = int(time.time() * 1000) - msg_obj.get('timestamp', 0)
-
-        for receiver in msg_obj.get('receivers', []):
-            if receiver.get('i') in self.receivers:
-                receiver_ident = receiver.get('i')
-                # Create a new dictionary with full keys
-                full_receiver = {}
-                for abbr_key, full_key in key_map.items():
-                    if abbr_key in receiver:
-                        full_receiver[full_key] = receiver[abbr_key]
-                        if(abbr_key == 't'):
-                            full_receiver[full_key] = full_receiver[full_key] + lmtoffset
-                        elif(abbr_key == 'x'):
-                            # Apply sliding average to latency
-                            latency_value = receiver[abbr_key]
-                            
-                            # Add to sliding window (initialize if needed)
-                            if receiver_ident not in self.latency_samples:
-                                self.latency_samples[receiver_ident] = []
-                            
-                            # Add new sample
-                            self.latency_samples[receiver_ident].append(latency_value)
-                            
-                            # Keep only last 20 samples
-                            if len(self.latency_samples[receiver_ident]) > 20:
-                                self.latency_samples[receiver_ident].pop(0)
-                            
-                            # Calculate average of available samples (up to 20)
-                            avg_latency = sum(self.latency_samples[receiver_ident]) / len(self.latency_samples[receiver_ident])
-                            
-                            # Round to whole number and set
-                            full_receiver[full_key] = round(avg_latency)
-                self.receivers[receiver['i']]['drift'] = lmtoffset
-                self.receivers[receiver['i']]['status'] = full_receiver
+        for receiver_data in msg_obj.get('r', []):  # Compressed: r -> receivers
+            # Parse array format
+            if not isinstance(receiver_data, list) or len(receiver_data) < 10:
+                continue
+                
+            receiver_ident = receiver_data[0]  # Index 0: ident
+            
+            if receiver_ident in self.receivers:
+                # Get existing status to preserve timestamp if new one is stale
+                existing_status = self.receivers[receiver_ident].get('status', {})
+                existing_timestamp = existing_status.get('lmt', 0)
+                
+                # Parse array data
+                node_id = receiver_data[1] if len(receiver_data) > 1 else 0
+                battery = receiver_data[2] if len(receiver_data) > 2 else 0
+                show_id = receiver_data[3] if len(receiver_data) > 3 else 0
+                load_complete = receiver_data[4] if len(receiver_data) > 4 else 0
+                start_ready = receiver_data[5] if len(receiver_data) > 5 else 0
+                last_msg_time = receiver_data[6] if len(receiver_data) > 6 else 0
+                latency = receiver_data[7] if len(receiver_data) > 7 else 0
+                success_percent = receiver_data[8] if len(receiver_data) > 8 else 0
+                continuity = receiver_data[9] if len(receiver_data) > 9 else []
+                
+                # Create full receiver status dict
+                full_receiver = {
+                    'ident': receiver_ident,
+                    'node': node_id,
+                    'battery': battery,
+                    'showId': show_id,
+                    'loadComplete': bool(load_complete),
+                    'startReady': bool(start_ready),
+                    'lat': latency,
+                    'successPercent': success_percent,
+                    'continuity': continuity if isinstance(continuity, list) else []
+                }
+                
+                # Handle timestamp with stale data protection
+                adjusted_timestamp = last_msg_time + lmtoffset
+                timestamp_diff = adjusted_timestamp - existing_timestamp
+                if timestamp_diff > -1000:  # Allow up to 1 second backward jump for clock adjustments
+                    full_receiver['lmt'] = adjusted_timestamp
+                else:
+                    # Keep existing timestamp if new one is significantly stale
+                    full_receiver['lmt'] = existing_timestamp
+                
+                # Apply sliding average to latency
+                if receiver_ident not in self.latency_samples:
+                    self.latency_samples[receiver_ident] = []
+                
+                # Add new sample
+                self.latency_samples[receiver_ident].append(latency)
+                
+                # Keep only last 20 samples
+                if len(self.latency_samples[receiver_ident]) > 20:
+                    self.latency_samples[receiver_ident].pop(0)
+                
+                # Calculate average of available samples (up to 20)
+                avg_latency = sum(self.latency_samples[receiver_ident]) / len(self.latency_samples[receiver_ident])
+                
+                # Round to whole number and set
+                full_receiver['lat'] = round(avg_latency)
+                
+                # Preserve existing values for keys not in current message
+                for key in existing_status:
+                    if key not in full_receiver:
+                        full_receiver[key] = existing_status[key]
+                
+                # Preserve timestamp if it wasn't updated (stale data)
+                if 'lmt' not in full_receiver and 'lmt' in existing_status:
+                    full_receiver['lmt'] = existing_status['lmt']
+                
+                self.receivers[receiver_ident]['drift'] = lmtoffset
+                self.receivers[receiver_ident]['status'] = full_receiver
+                
+                # Update online state tracking
+                is_now_online = self.receiver_is_connected(receiver_ident)
+                self.receiver_was_online[receiver_ident] = is_now_online
             else:
-                print(f"Receiver {receiver.get('i')} is not known. Ignoring.")
+                print(f"Receiver {receiver_ident} is not known. Ignoring.")
         
         self.updateRelevantStates()
+
+    def process_config_msg(self, msg_obj):
+        """Process config message from receiver
+        
+        Config message format (array-based for compactness):
+        {"type":"config","i":"RX121","d":[numBoards, boardVersion, fwVersion, secondsOnline, txPower, fireMsDuration, statusInterval, unsolicitedStatusCount, connTimeoutCount]}
+        
+        Array index mapping:
+        0: numBoards
+        1: boardVersion
+        2: fwVersion
+        3: secondsOnline
+        4: txPower
+        5: fireMsDuration
+        6: statusInterval
+        7: unsolicitedStatusCount
+        8: connTimeoutCount
+        """
+        receiver_ident = msg_obj.get('i')  # Compressed key for ident
+        config_data = msg_obj.get('d', [])  # Array of config values
+        
+        if receiver_ident and receiver_ident in self.receivers:
+            # Store config in receiver dict
+            if 'config' not in self.receivers[receiver_ident]:
+                self.receivers[receiver_ident]['config'] = {}
+            
+            # Parse array data using index mapping
+            if len(config_data) >= 9:
+                self.receivers[receiver_ident]['config'] = {
+                    'numBoards': config_data[0] if config_data[0] is not None else 0,
+                    'boardVersion': config_data[1] if config_data[1] is not None else 0,
+                    'fwVersion': config_data[2] if config_data[2] is not None else 0,
+                    'secondsOnline': config_data[3] if config_data[3] is not None else 0,
+                    'txPower': config_data[4] if config_data[4] is not None else 3,
+                    'fireMsDuration': config_data[5] if config_data[5] is not None else 1000,
+                    'statusInterval': config_data[6] if config_data[6] is not None else 2000,
+                    'unsolicitedStatusCount': config_data[7] if config_data[7] is not None else 0,
+                    'connTimeoutCount': config_data[8] if config_data[8] is not None else 0
+                }
+            else:
+                # Fallback for incomplete data (backward compatibility)
+                self.receivers[receiver_ident]['config'] = {
+                    'numBoards': config_data[0] if len(config_data) > 0 else 0,
+                    'boardVersion': config_data[1] if len(config_data) > 1 else 0,
+                    'fwVersion': config_data[2] if len(config_data) > 2 else 0,
+                    'secondsOnline': config_data[3] if len(config_data) > 3 else 0,
+                    'txPower': config_data[4] if len(config_data) > 4 else 3,
+                    'fireMsDuration': config_data[5] if len(config_data) > 5 else 1000,
+                    'statusInterval': config_data[6] if len(config_data) > 6 else 2000,
+                    'unsolicitedStatusCount': config_data[7] if len(config_data) > 7 else 0,
+                    'connTimeoutCount': config_data[8] if len(config_data) > 8 else 0
+                }
+            
+            if(self.parent.debug_mode):
+                print(f"Updated config for {receiver_ident}: {self.receivers[receiver_ident]['config']}")
+        else:
+            if(self.parent.debug_mode):
+                print(f"Config received for unknown receiver: {receiver_ident}")
+    
+    def query_receiver_config(self, receiver_ident, fire_ms_duration=None, status_interval=None, tx_power=None):
+        """Send GET_CONFIG or SET_CONFIG command to a specific receiver"""
+        if receiver_ident in self.receivers:
+            if fire_ms_duration is not None or status_interval is not None or tx_power is not None:
+                # Send config with settings using SET_CONFIG
+                # Use defaults if not provided
+                fire_ms = fire_ms_duration if fire_ms_duration is not None else 1000
+                status_int = status_interval if status_interval is not None else 2000
+                tx_pwr = tx_power if tx_power is not None else 3
+                cmd = f"setconfig {receiver_ident} {fire_ms} {status_int} {tx_pwr} 1"
+                if(self.parent.debug_mode):
+                    print(f"Sent SET_CONFIG to {receiver_ident}: fire={fire_ms}ms, status={status_int}ms, tx={tx_pwr}")
+            else:
+                # Just request config using GET_CONFIG
+                cmd = f"getconfig {receiver_ident} 1"
+                if(self.parent.debug_mode):
+                    print(f"Sent GET_CONFIG to {receiver_ident}")
+            self.parent.send_serial_command(cmd)
+    
+    def set_all_receiver_settings(self, fire_ms_duration=None, status_interval=None, tx_power=None):
+        """Send settings to all connected receivers"""
+        # Get all connected receivers
+        connected_receivers = [ident for ident in self.receivers.keys() 
+                              if self.receiver_is_connected(ident)]
+        
+        if not connected_receivers:
+            if(self.parent.debug_mode):
+                print("No connected receivers to update settings for")
+            return
+        
+        # Use provided values or defaults
+        fire_ms = fire_ms_duration if fire_ms_duration is not None else 1000
+        status_int = status_interval if status_interval is not None else 2000
+        tx_pwr = tx_power if tx_power is not None else 3
+        
+        if(self.parent.debug_mode):
+            print(f"Sending settings to {len(connected_receivers)} receivers: fire={fire_ms}ms, status={status_int}ms, tx={tx_pwr}")
+        
+        # Send settings to each connected receiver with small delay between to avoid queue overflow
+        for receiver_ident in connected_receivers:
+            cmd = f"setconfig {receiver_ident} {fire_ms} {status_int} {tx_pwr} 1"
+            self.parent.send_serial_command(cmd)
+            time.sleep(0.1)  # Small delay between commands
+    
+    def query_receiver_configs_periodic(self):
+        """Periodically query config for all connected receivers"""
+        # Get config query interval from parent's LED handler settings (default 60000ms = 1 minute)
+        config_interval_ms = self.parent.led_handler.led_states.get('config_query_interval_ms', 60000)
+        current_time = int(time.time() * 1000)
+        
+        # Check if enough time has passed since last query cycle
+        if current_time - self.last_config_query_time >= config_interval_ms:
+            self.last_config_query_time = current_time
+            
+            # Query config for all connected receivers
+            connected_receivers = [ident for ident in self.receivers.keys() 
+                                  if self.receiver_is_connected(ident)]
+            
+            if connected_receivers:
+                if(self.parent.debug_mode):
+                    print(f"Periodic config query for {len(connected_receivers)} receivers")
+                
+                # Query each connected receiver (with small delay between to avoid queue overflow)
+                for receiver_ident in connected_receivers:
+                    self.query_receiver_config(receiver_ident)
+                    time.sleep(0.1)  # Small delay between queries
+    
+    def query_all_receiver_configs(self):
+        """Manually query config for all connected receivers"""
+        # Query config for all connected receivers
+        connected_receivers = [ident for ident in self.receivers.keys() 
+                              if self.receiver_is_connected(ident)]
+        
+        if connected_receivers:
+            if(self.parent.debug_mode):
+                print(f"Manual config query for {len(connected_receivers)} receivers")
+            
+            # Query each connected receiver (with small delay between to avoid queue overflow)
+            for receiver_ident in connected_receivers:
+                self.query_receiver_config(receiver_ident)
+                time.sleep(0.1)  # Small delay between queries
+        else:
+            if(self.parent.debug_mode):
+                print("No connected receivers to query config for")
 
     def process_serial_in(self, msg):
         if(self.parent.debug_mode):
@@ -214,10 +424,39 @@ class BYHProtocolHandler:
 
                 if(msg_type == 'status'):
                     self.process_status_msg(msg_obj)
+                elif(msg_type == 'config'):
+                    self.process_config_msg(msg_obj)
+                elif(msg_type == 'cmd'):
+                    self.process_cmd_msg(msg_obj)
             except json.JSONDecodeError as e:
                 print("Bad JSON status")
 
         return True
+    
+    def process_cmd_msg(self, msg_obj):
+        """Process command debug message from dongle and append to command.log"""
+        import os
+        from datetime import datetime
+        
+        log_path = '/data/log/command.log'
+        log_dir = os.path.dirname(log_path)
+        
+        # Create directory if it doesn't exist
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+        
+        # Get timestamp
+        timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S.%f]")[:-3]  # Include milliseconds
+        
+        # Format the log entry
+        log_entry = f"{timestamp} {json.dumps(msg_obj)}\n"
+        
+        try:
+            # Append to log file
+            with open(log_path, 'a') as f:
+                f.write(log_entry)
+        except Exception as e:
+            print(f"Error writing to command.log: {e}")
 
     def receiver_is_connected(self, receiver_id):
         rcv = self.receivers.get(receiver_id, None)
@@ -392,8 +631,7 @@ class BYHProtocolHandler:
 
     def send_to_active_nodes(self, cmdpre, cmdpost="", repeat=1, rcv_dict_override=None):
         receiver_dict = self.receivers.items()
-        print("STAN")
-        print(rcv_dict_override)
+
         if(rcv_dict_override):
             receiver_dict = rcv_dict_override.items()
 
@@ -405,7 +643,7 @@ class BYHProtocolHandler:
                 self.parent.send_serial_command(cmd)
                 # Add delay between commands to prevent queue overflow with blocking approach
                 # Each command waits for response (~150-250ms), so space them out
-                time.sleep(0.25)
+                time.sleep(0.15)
             else:
                 print(f"Not sendinf to {rcv} as not connected.")
         

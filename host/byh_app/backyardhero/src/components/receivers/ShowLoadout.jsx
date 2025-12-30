@@ -44,11 +44,15 @@ function ShowLoadout({ setCurrentTab }) {
       const lookupTable = {};
       Object.keys(receiversTmp).forEach((receiverKey) => {
         const receiver = receiversTmp[receiverKey];
-        Object.keys(receiver.cues).forEach((zoneKey) => {
-          receiver.cues[zoneKey].forEach((target) => {
-            lookupTable[`${zoneKey}:${target}`] = receiverKey;
+        if (receiver.cues) {
+          Object.keys(receiver.cues).forEach((zoneKey) => {
+            if (receiver.cues[zoneKey] && Array.isArray(receiver.cues[zoneKey])) {
+              receiver.cues[zoneKey].forEach((target) => {
+                lookupTable[`${zoneKey}:${target}`] = receiverKey;
+              });
+            }
           });
-        });
+        }
       });
 
       // If stagedShow exists, process display_payload and filter receivers
@@ -170,11 +174,15 @@ function ShowLoadout({ setCurrentTab }) {
     const lookupTable = {};
     Object.keys(receiversTmp).forEach((receiverKey) => {
       const receiver = receiversTmp[receiverKey];
-      Object.keys(receiver.cues).forEach((zoneKey) => {
-        receiver.cues[zoneKey].forEach((target) => {
-          lookupTable[`${zoneKey}:${target}`] = receiverKey;
+      if (receiver.cues) {
+        Object.keys(receiver.cues).forEach((zoneKey) => {
+          if (receiver.cues[zoneKey] && Array.isArray(receiver.cues[zoneKey])) {
+            receiver.cues[zoneKey].forEach((target) => {
+              lookupTable[`${zoneKey}:${target}`] = receiverKey;
+            });
+          }
         });
-      });
+      }
     });
 
     // Map each rack cell to its show item and receiver/cue
@@ -293,7 +301,7 @@ function ShowLoadout({ setCurrentTab }) {
     if (!loadoutRef.current) return;
 
     try {
-      const pdf = new jsPDF('p', 'mm', 'a4');
+      const pdf = new jsPDF('p', 'mm', 'a4', true); // Enable compression
       const pageWidth = 190; // A4 width minus margins
       const pageHeight = 277; // A4 height minus margins
       let currentY = 10; // Starting Y position
@@ -304,11 +312,14 @@ function ShowLoadout({ setCurrentTab }) {
         tempContainer.style.position = 'absolute';
         tempContainer.style.left = '-9999px';
         tempContainer.style.top = '0';
-        tempContainer.style.width = '800px';
+        tempContainer.style.width = '600px'; // Reduced from 800px for smaller file size
         tempContainer.style.backgroundColor = '#ffffff';
         tempContainer.style.padding = '20px';
         tempContainer.style.fontFamily = 'Arial, sans-serif';
         tempContainer.style.color = '#000000';
+        tempContainer.style.overflow = 'visible';
+        tempContainer.style.height = 'auto';
+        tempContainer.style.minHeight = '0';
         
         // Clone the section
         const sectionClone = sectionElement.cloneNode(true);
@@ -351,6 +362,16 @@ function ShowLoadout({ setCurrentTab }) {
             element.style.borderColor = '#dee2e6';
           }
           
+          // Ensure images and other elements are visible and optimize size
+          if (element.tagName === 'IMG') {
+            element.style.display = 'block';
+            element.style.maxWidth = '150px'; // Limit image size for PDF
+            element.style.maxHeight = '150px';
+            element.style.width = 'auto';
+            element.style.height = 'auto';
+            element.style.objectFit = 'contain';
+          }
+          
           // Recursively process child elements
           Array.from(element.children).forEach(convertToLightTheme);
         };
@@ -370,28 +391,77 @@ function ShowLoadout({ setCurrentTab }) {
         const tempContainer = createSectionContainer(sectionElement);
         document.body.appendChild(tempContainer);
 
+        // Wait a bit for the container to fully render
+        await new Promise(resolve => setTimeout(resolve, 100));
+
         const canvas = await html2canvas(tempContainer, {
-          scale: 2,
+          scale: 1, // Reduced from 2 for smaller file size
           useCORS: true,
           allowTaint: true,
           backgroundColor: '#ffffff',
-          width: 800,
-          height: tempContainer.scrollHeight
+          width: 600, // Reduced from 800
+          height: tempContainer.scrollHeight,
+          logging: false,
+          imageTimeout: 0
         });
 
         document.body.removeChild(tempContainer);
 
-        const imgData = canvas.toDataURL('image/png');
+        // Convert to JPEG with compression for smaller file size
+        const imgData = canvas.toDataURL('image/jpeg', 0.75); // 75% quality
         const imgHeight = (canvas.height * pageWidth) / canvas.width;
         
-        // Check if content fits on current page
-        if (currentY + imgHeight > pageHeight) {
-          pdf.addPage();
-          currentY = 10;
+        // Split tall images across multiple pages
+        const maxHeightPerPage = pageHeight - currentY - 10; // Leave margin at bottom
+        
+        if (imgHeight <= maxHeightPerPage) {
+          // Content fits on current page
+          if (currentY + imgHeight > pageHeight - 10) {
+            pdf.addPage();
+            currentY = 10;
+          }
+          pdf.addImage(imgData, 'JPEG', 10, currentY, pageWidth, imgHeight);
+          currentY += imgHeight + 10;
+        } else {
+          // Content is too tall, split across multiple pages
+          let sourceY = 0;
+          let remainingHeight = imgHeight;
+          const sourceCanvas = canvas;
+          
+          while (remainingHeight > 0) {
+            // Check if we need a new page
+            if (currentY + 20 > pageHeight) {
+              pdf.addPage();
+              currentY = 10;
+            }
+            
+            const availableHeight = pageHeight - currentY - 10; // Leave some margin at bottom
+            const heightToAdd = Math.min(remainingHeight, availableHeight);
+            
+            // Calculate the source rectangle for this chunk (in canvas pixels)
+            const sourceHeightPixels = Math.round((heightToAdd / imgHeight) * sourceCanvas.height);
+            
+            // Create a temporary canvas for this chunk
+            const chunkCanvas = document.createElement('canvas');
+            chunkCanvas.width = sourceCanvas.width;
+            chunkCanvas.height = sourceHeightPixels;
+            const chunkCtx = chunkCanvas.getContext('2d');
+            
+            // Draw the portion of the source canvas to the chunk canvas
+            chunkCtx.drawImage(
+              sourceCanvas,
+              0, sourceY, sourceCanvas.width, sourceHeightPixels,  // Source rectangle
+              0, 0, sourceCanvas.width, sourceHeightPixels          // Destination rectangle
+            );
+            
+            const chunkImgData = chunkCanvas.toDataURL('image/jpeg', 0.75); // JPEG with compression
+            pdf.addImage(chunkImgData, 'JPEG', 10, currentY, pageWidth, heightToAdd);
+            
+            currentY += heightToAdd + 10;
+            sourceY += sourceHeightPixels;
+            remainingHeight -= heightToAdd;
+          }
         }
-
-        pdf.addImage(imgData, 'PNG', 10, currentY, pageWidth, imgHeight);
-        currentY += imgHeight + 10;
       };
 
       // Get all sections
@@ -479,7 +549,13 @@ function ShowLoadout({ setCurrentTab }) {
         {Object.keys(receivers).map((rcv_key, receiverIndex) => {
           const receiver = receivers[rcv_key];
           const receiverMapping = targetRcvMap[rcv_key];
+          
+          // Only render if receiver has cues
+          if (!receiver.cues) return null;
+          
           const firstZone = Object.keys(receiver.cues)[0];
+          if (!firstZone) return null;
+          
           const cues = receiver.cues[firstZone] || [];
           
           // Only render if there are cues

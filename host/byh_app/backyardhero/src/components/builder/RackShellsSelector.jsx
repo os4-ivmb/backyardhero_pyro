@@ -13,15 +13,23 @@ export default function RackShellsSelector({ onSelect, onClose, items, inventory
     if (showId) {
       fetchRacks();
     }
-    // Extract used cells from existing items
+  }, [showId]);
+
+  // Extract used cells from existing items for the currently selected rack
+  useEffect(() => {
     const used = new Set();
-    items.forEach(item => {
-      if (item.type === 'RACK_SHELLS' && item.rackCells) {
-        item.rackCells.forEach(cell => used.add(cell));
-      }
-    });
+    if (selectedRackId) {
+      items.forEach(item => {
+        // Only consider cells from items that belong to the current rack
+        const itemRackId = item.rackId ? parseInt(item.rackId) : null;
+        const currentRackId = parseInt(selectedRackId);
+        if (item.type === 'RACK_SHELLS' && item.rackCells && itemRackId === currentRackId) {
+          item.rackCells.forEach(cell => used.add(cell));
+        }
+      });
+    }
     setUsedCells(used);
-  }, [items, showId]);
+  }, [items, selectedRackId]);
 
   const fetchRacks = async () => {
     if (!showId) return;

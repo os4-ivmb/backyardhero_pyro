@@ -7,10 +7,13 @@
 // v5: Baseline version before tracking system (date unknown)
 // v6: 2025-01-XX - Added FW_VERSION tracking system with version history comments (fixed typo: FW_VERISON -> FW_VERSION)
 // v7: 2025-01-XX - Migrated from RF24Mesh to pure RF24 with deterministic addressing
+// v8: 2025-12-30 - Added FIRE_MS_DURATION to the firmware, fire reference time is now millis() instead of getSynchronizedTime()
+// v9: 2025-12-30 - Added config message handling
+// v11: 2025-12-30 - Config stuff 
 #define BOARD_VERISON 7
-#define FW_VERSION 7
-#define NODE_ID 125
-const char RECEIVER_IDENT[] = "RX125";
+#define FW_VERSION 11
+#define NODE_ID 118
+const char RECEIVER_IDENT[] = "RX118";
 
 const bool RECEIVER_USES_V1_CUES = false;
  
@@ -24,7 +27,8 @@ const bool RECEIVER_USES_V1_CUES = false;
 
 
 
-#define FIRE_MS_DURATION 1000
+// Configurable settings (can be set via GetConfigMessage)
+uint32_t FIRE_MS_DURATION = 1000;  // Default 1000ms
 
 #define LED_PIN 11
 #define BATT_VOLTAGE_PIN 3
@@ -43,7 +47,7 @@ int NUM_LEDS = (8 * NUM_BOARDS);
 #define SHIFT_IN_LATCH 5
 #define SHIFT_IN_DATA 12
 
-const uint16_t STATUS_INTERVAL = 2000;
+uint16_t STATUS_INTERVAL = 2000;  // Default 2000ms, configurable via GetConfigMessage
 const uint8_t FAILED_TX_THRESHOLD = 4;
 const uint16_t INPUT_MODE_INTERVAL = 100;
 
@@ -56,6 +60,8 @@ bool gotCommand = false;
 bool timedOut = false;
 uint64_t lastCmdReceived = 0;
 uint64_t lastInputModeRunTime = 0;
+int8_t connTimeoutCount = 0;
+uint32_t unsolicitedStatusCount = 0;
 
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -77,7 +83,10 @@ enum MessageType {
   GENERIC_PAUSE   = 8,
   SHOW_START      = 9,
   RECEIVER_STATUS = 10,
-  RESET_DVC       = 12
+  RESET_DVC       = 12,
+  GET_CONFIG      = 13,
+  SEND_CONFIG     = 14,
+  SET_CONFIG      = 15
 };
  
 struct ManualFireMessage {
@@ -125,6 +134,31 @@ struct ReceiverStatusMessage {
   uint64_t cont64_1;
 } __attribute__((packed));
 
+struct GetConfigMessage {
+  uint8_t type;  // Just GET_CONFIG, no payload - just requests current config
+} __attribute__((packed));
+
+struct SetConfigMessage {
+  uint8_t type;  // SET_CONFIG
+  uint32_t fireMsDuration;
+  uint16_t statusInterval;
+  uint8_t txPower;  // 1=MIN, 2=LOW, 3=HIGH, 4=MAX
+} __attribute__((packed));
+
+struct SendConfigMessage {
+  uint8_t type;
+  uint8_t numBoards;
+  uint8_t boardVersion;
+  uint8_t fwVersion;
+  uint32_t secondsOnline;
+  char ident[10];
+  uint8_t txPower;  // Current TX power level (1=MIN, 2=LOW, 3=HIGH, 4=MAX)
+  uint32_t fireMsDuration;  // Current fire duration setting
+  uint16_t statusInterval;  // Current status interval setting
+  uint32_t unsolicitedStatusCount;  // Diagnostic: count of unsolicited status messages sent
+  uint8_t connTimeoutCount;  // Diagnostic: connection timeout counter
+} __attribute__((packed));
+
 RF24 radio(RF24_CE_PIN, RF24_CSN_PIN);
 
 // RF24 addressing scheme (Star Topology):
@@ -138,11 +172,13 @@ RF24 radio(RF24_CE_PIN, RF24_CSN_PIN);
 
 int8_t failed_tx_ct = 0;
 int8_t txSetting = 0;
+uint8_t txPowerLevel = 3;  // Default RF24_PA_HIGH (1=MIN, 2=LOW, 3=HIGH, 4=MAX)
  
 
 
 
 int64_t ADDITIONAL_CLOCK_TX_OFFSET = 40;
+int8_t MAX_CONN_TIMEOUT_COUNT = 30;
 
 int64_t clock_offset = 0;
 uint32_t targetTimes[257];
@@ -153,7 +189,7 @@ bool loadComplete = false;
 bool startReady = false;
 uint64_t showStartTime = 0;
 uint64_t showPauseTimeAcc = 0;
-uint8_t txForgivenessCt=0;
+// connTimeoutCount is defined earlier in the file
 
 bool isPlaying = false;
 bool isPaused = false;
@@ -288,9 +324,8 @@ void resetSystem(){
 }
 
 void fireTarget(uint8_t target_pos){
-  uint64_t now = getSynchronizedTime();
   targetFiring[target_pos] = true;
-  fireStartTime[target_pos] = now;
+  fireStartTime[target_pos] = millis();  // Use millis() for duration tracking
 
   Serial.print("Firing target at position: ");
   Serial.println(target_pos);
@@ -342,7 +377,6 @@ void handleGeneric(GenericMessage* msg){
 
 
 void sendStatus(){
-  Serial.println("Stat send");
   int bval = analogRead(BATT_VOLTAGE_PIN)/2;
   if(bval > 3700){
     bval=253;
@@ -411,6 +445,36 @@ void sendStatus(){
   }
 }
 
+void sendConfig(){
+  SendConfigMessage msg;
+  msg.type = SEND_CONFIG;
+  msg.numBoards = NUM_BOARDS;
+  msg.boardVersion = BOARD_VERISON;
+  msg.fwVersion = FW_VERSION;
+  msg.secondsOnline = (uint32_t)(millis() / 1000);
+  strncpy(msg.ident, RECEIVER_IDENT, sizeof(msg.ident));
+  msg.ident[sizeof(msg.ident)-1] = '\0';
+  msg.txPower = txPowerLevel;
+  msg.fireMsDuration = FIRE_MS_DURATION;
+  msg.statusInterval = STATUS_INTERVAL;
+  msg.unsolicitedStatusCount = unsolicitedStatusCount;
+  msg.connTimeoutCount = connTimeoutCount;
+
+  // Ensure radio is ready before transmitting
+  if (!radio.isChipConnected()) {
+    Serial.println("ERROR: Radio chip not connected!");
+    return;
+  }
+  
+  radio.stopListening();
+  delayMicroseconds(200);
+  radio.openWritingPipe((uint64_t)MASTER_WRITE_ADDRESS);
+  radio.writeFast(&msg, sizeof(msg));
+  radio.txStandBy();
+  delayMicroseconds(150);
+  radio.startListening();
+}
+
 void sendToShiftRegister(uint64_t pos1, uint64_t pos2){
 
 }
@@ -443,13 +507,13 @@ void runPlayLoop(){
             Serial.print(" | ");
             Serial.println(elapsed);
             targetFiring[i] = true;
-            fireStartTime[i] = now;
+            fireStartTime[i] = millis();  // Use millis() for duration tracking
             targetFired[i] = true;
             fireChanged=true;
           }
           
           else if (targetFiring[i]) {
-            if (now - fireStartTime[i] >= FIRE_MS_DURATION) {
+            if (millis() - fireStartTime[i] >= FIRE_MS_DURATION) {
               targetFiring[i] = false;
               fireChanged=true;
               Serial.println("FIRED");
@@ -1008,9 +1072,12 @@ void setup(){
   }
   radio.setDataRate(RF24_250KBPS);
 
+  // Initialize TX power based on board version (can be overridden via config)
   if(BOARD_VERISON < 6){
+    txPowerLevel = 3;  // HIGH
     radio.setPALevel(RF24_PA_HIGH);
   }else{
+    txPowerLevel = 4;  // MAX
     radio.setPALevel(RF24_PA_MAX);
   }
   radio.setChannel(85);
@@ -1079,13 +1146,67 @@ void loop(){
         break;
       case RESET_DVC:
         resetSystem();
+        break;
+      case GET_CONFIG:
+        {
+          Serial.println("GetConfig received");
+          // Just send current config, no settings to apply
+          sendConfig();
+        }
+        break;
+      case SET_CONFIG:
+        {
+          SetConfigMessage* configMsg = (SetConfigMessage*)buf;
+          Serial.println("SetConfig received");
+          
+          // Apply settings
+          // Update fire duration
+          if (configMsg->fireMsDuration >= 100 && configMsg->fireMsDuration <= 10000) {
+            FIRE_MS_DURATION = configMsg->fireMsDuration;
+            Serial.print("FIRE_MS_DURATION set to: ");
+            Serial.println(FIRE_MS_DURATION);
+          }
+          
+          // Update status interval
+          if (configMsg->statusInterval >= 500 && configMsg->statusInterval <= 30000) {
+            STATUS_INTERVAL = configMsg->statusInterval;
+            Serial.print("STATUS_INTERVAL set to: ");
+            Serial.println(STATUS_INTERVAL);
+          }
+          
+          // Update TX power level
+          if (configMsg->txPower >= 1 && configMsg->txPower <= 4) {
+            txPowerLevel = configMsg->txPower;
+            switch(txPowerLevel) {
+              case 1:
+                radio.setPALevel(RF24_PA_MIN);
+                Serial.println("TX Power set to: MIN");
+                break;
+              case 2:
+                radio.setPALevel(RF24_PA_LOW);
+                Serial.println("TX Power set to: LOW");
+                break;
+              case 3:
+                radio.setPALevel(RF24_PA_HIGH);
+                Serial.println("TX Power set to: HIGH");
+                break;
+              case 4:
+                radio.setPALevel(RF24_PA_MAX);
+                Serial.println("TX Power set to: MAX");
+                break;
+            }
+          }
+          
+          // Send config back after applying settings
+          sendConfig();
+        }
+        break;
       default:
         Serial.print("Unknown message type: ");
         Serial.println(mType);
         break;
     }
-    Serial.println("Cmd in status out");
-    Serial.println(now);
+
     // Small delay to ensure dongle is back in listening mode
     delay(2);
     sendStatus();
@@ -1100,35 +1221,41 @@ void loop(){
     lastCmdReceived = now;
   }
 
-  uint16_t lst = 2000;
-  if(getSynchronizedTime()<showStartTime && isPlaying){
+  // LED sync flashing based on synchronized time
+  // Uses elapsed time checks instead of modulo for better reliability
+  // All receivers using synchronized time will flash in perfect sync
+  uint16_t lst = 2000;  // Light sync period (ms)
+  if(getSynchronizedTime() < showStartTime && isPlaying){
     lst = 500;
   }
 
-  uint64_t lastSyncTime = now;
-  if(lastSyncTime%lst == 0 && lastSyncLightTime != now){
-    lastSyncLightTime= lastSyncTime;
-    digitalWrite(LED_BUILTIN, LOW);
-  }
-
-  uint16_t flashTime = 100;
+  uint16_t flashTime = 100;  // Duration LED stays HIGH (ms) - brief flash
   if(isPlaying){
-    if(now<showStartTime){
+    if(now < showStartTime){
       flashTime = 900;
     }else{
       flashTime = 300;
     }
   }else if(startReady){
-    flashTime = 400;
+    flashTime = 600;
   }
 
-  if((lastSyncTime+flashTime) % lst == 0 && lastSyncLightTime != now){
-    lastSyncLightTime= lastSyncTime;
-    digitalWrite(LED_BUILTIN, HIGH);
+  // Calculate position in sync cycle (0 to lst-1)
+  // Using synchronized time ensures all receivers are in sync
+  uint64_t cyclePosition = now % lst;
+  
+  // Determine desired state: HIGH for brief flash, LOW for rest of cycle
+  // This creates a brief flash at the start of each cycle
+  bool desiredState = (cyclePosition < flashTime);
+  
+  // Only update LED if state changed (avoids unnecessary writes and jitter)
+  if(desiredState != lastSyncLightState){
+    lastSyncLightState = desiredState;
+    digitalWrite(LED_BUILTIN, desiredState ? HIGH : LOW);
   }
 
   
-  if(now - lastCmdReceived > 10000 && gotCommand && !timedOut){
+  if(now - lastCmdReceived > 20000 && gotCommand && !timedOut){
     Serial.println("Disconnect detected. Will try to ping again.");
     Serial.println(now);
     if(isPlaying){
@@ -1145,8 +1272,10 @@ void loop(){
   bool doRefresh=false;
   for (uint8_t i = 0; i < 128; i++) {
     if (targetFiring[i]) {
-        if (now - fireStartTime[i] >= FIRE_MS_DURATION) {
+        if (millis() - fireStartTime[i] >= FIRE_MS_DURATION) {
           targetFiring[i] = false;
+          Serial.println("FIRED (OS SHOW)");
+          Serial.println(i);
           doRefresh=true;
         }
     }
@@ -1165,6 +1294,11 @@ void loop(){
   if(millis() - lastStatus > STATUS_INTERVAL && !gotCommand){
     if(timedOut){
       // Re-initialize radio if timed out
+      if(connTimeoutCount > MAX_CONN_TIMEOUT_COUNT){
+        connTimeoutCount = 0;
+        unsolicitedStatusCount = 0;
+      }
+      connTimeoutCount++;
       radio.powerDown();
       delay(10);
       radio.powerUp();
@@ -1176,9 +1310,10 @@ void loop(){
     Serial.println("TOS");
     sendStatus();
     lastStatus = millis();
-    txForgivenessCt++;
+    unsolicitedStatusCount++;
+    connTimeoutCount++;
 
-    if(txForgivenessCt > 30){
+    if(connTimeoutCount > 30){
       if(failed_tx_ct > 0){
         Serial.print(RECEIVER_IDENT);
         Serial.println(": Failed TX count forgiven.");

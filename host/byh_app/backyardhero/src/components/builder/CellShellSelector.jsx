@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 
-export default function CellShellSelector({ isOpen, onClose, onSelect, cellData, inventory, isBatch = false }) {
+export default function CellShellSelector({ isOpen, onClose, onSelect, cellData, inventory, isBatch = false, showItems = [] }) {
   const [selectedShellId, setSelectedShellId] = useState(cellData?.shellId || null);
   const [selectedShellNumber, setSelectedShellNumber] = useState(cellData?.shellNumber || null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -41,6 +41,40 @@ export default function CellShellSelector({ isOpen, onClose, onSelect, cellData,
       };
     });
   }, [inventory]);
+
+  // Count shell usage across all racks in the show
+  const shellUsageCounts = useMemo(() => {
+    const counts = new Map(); // Map of "shellId_shellNumber" -> count
+    
+    showItems.forEach(item => {
+      if (item.type === 'RACK_SHELLS' && item.fireableItem && item.fireableItem.cellData) {
+        // Handle both single object and array cases
+        let cellDataArray = [];
+        if (Array.isArray(item.fireableItem.cellData)) {
+          cellDataArray = item.fireableItem.cellData;
+        } else if (item.fireableItem.cellData && typeof item.fireableItem.cellData === 'object') {
+          // Single cellData object - wrap it in an array
+          cellDataArray = [item.fireableItem.cellData];
+        }
+        
+        cellDataArray.forEach(cellData => {
+          if (cellData && cellData.shellId !== null && cellData.shellId !== undefined) {
+            // Create key: shellId_shellNumber (or shellId_null for "ANY")
+            const key = `${cellData.shellId}_${cellData.shellNumber || 'null'}`;
+            counts.set(key, (counts.get(key) || 0) + 1);
+          }
+        });
+      }
+    });
+    
+    return counts;
+  }, [showItems]);
+
+  // Get usage count for a specific shell
+  const getShellUsageCount = (shellId, shellNumber) => {
+    const key = `${shellId}_${shellNumber || 'null'}`;
+    return shellUsageCounts.get(key) || 0;
+  };
 
   // Get all unique colors from all shells
   const availableColors = useMemo(() => {
@@ -267,7 +301,20 @@ export default function CellShellSelector({ isOpen, onClose, onSelect, cellData,
                       }`}
                     >
                       <div className="flex-1 min-w-0">
-                        <div className="font-semibold truncate">{result.item.name}</div>
+                        <div className="font-semibold truncate flex items-center gap-2">
+                          {result.item.name}
+                          {(() => {
+                            const usageCount = getShellUsageCount(result.item.id, result.shell?.number || null);
+                            if (usageCount > 0) {
+                              return (
+                                <span className="text-xs bg-blue-500 text-white px-2 py-0.5 rounded">
+                                  Used {usageCount}x
+                                </span>
+                              );
+                            }
+                            return null;
+                          })()}
+                        </div>
                         {result.shell ? (
                           <>
                             <div className="text-sm text-gray-300">

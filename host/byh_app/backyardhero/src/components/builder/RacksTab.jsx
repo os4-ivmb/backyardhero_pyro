@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import RackGrid from './RackGrid';
 
-export default function RacksTab({ inventory, showId }) {
+export default function RacksTab({ inventory, showId, showItems = [] }) {
   const [racks, setRacks] = useState([]);
   const [showAddForm, setShowAddForm] = useState(false);
   const [editingRackId, setEditingRackId] = useState(null);
@@ -288,6 +288,7 @@ export default function RacksTab({ inventory, showId }) {
               rack={rack}
               inventory={inventory}
               onUpdate={(updatedRack) => handleUpdateRack(rack.id, updatedRack)}
+              showItems={showItems}
             />
           </div>
         ))}

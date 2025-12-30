@@ -379,6 +379,7 @@ export default function InventoryList({inventory, setActiveItem}) {
                 >
                 Type {sortKey === "type" && (sortDirection === "asc" ? "↑" : "↓")}
                 </th>
+                <th className="py-3 px-2 text-left">QA</th>
                 <th className="py-3 px-6 text-left">Duration</th>
                 <th className="py-3 px-6 text-left">Fuse Delay</th>
                 <th className="py-3 px-6 text-left">Lift Delay</th>
@@ -396,6 +397,7 @@ export default function InventoryList({inventory, setActiveItem}) {
                 } hover:bg-gray-700`}>
                         <td className="p-1 px-4">{inv.name}</td>
                         <td className="p-1 px-4">{inv.type}</td>
+                        <td className="p-1 px-2 text-center">{inv.available_ct ?? 0}</td>
                         <td className="p-1 px-4">{inv.duration}</td>
                         <td className="p-1 px-4">{inv.fuse_delay}</td>
                         <td className="p-1 px-4">{inv.lift_delay}</td>

@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import CellShellSelector from './CellShellSelector';
 import FuseModal from './FuseModal';
 
-export default function RackGrid({ rack, inventory, onUpdate }) {
+export default function RackGrid({ rack, inventory, onUpdate, showItems = [] }) {
   // Filter inventory for shells and fuses
   const aerialShells = inventory.filter(item => item.type === 'AERIAL_SHELL');
   const [selectedCells, setSelectedCells] = useState(new Set());
@@ -344,6 +344,7 @@ export default function RackGrid({ rack, inventory, onUpdate }) {
           onSelect={handleShellSelected}
           cellData={getCellData(clickedCell.x, clickedCell.y)}
           inventory={inventory}
+          showItems={showItems}
         />
       )}
 
@@ -355,6 +356,7 @@ export default function RackGrid({ rack, inventory, onUpdate }) {
           cellData={null}
           inventory={inventory}
           isBatch={true}
+          showItems={showItems}
         />
       )}
 

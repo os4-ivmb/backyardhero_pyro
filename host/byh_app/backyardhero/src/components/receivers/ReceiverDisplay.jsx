@@ -1,6 +1,7 @@
 import useAppStore from "@/store/useAppStore"
 import useStateAppStore from "@/store/useStateAppStore";
 import { useEffect, useRef, useState } from "react";
+import axios from "axios";
 import { 
   MdBatteryFull, 
   MdBatteryAlert, 
@@ -9,7 +10,9 @@ import {
   MdSignalWifiOff, 
   MdPlayArrow,
   MdAccessTime,
-  MdAssignment
+  MdAssignment,
+  MdWarning,
+  MdRefresh
 } from 'react-icons/md';
 import { FaSpinner } from 'react-icons/fa';
 import ShowHealth from "../homepanel/ShowHealth";
@@ -21,7 +24,7 @@ import ShowHealth from "../homepanel/ShowHealth";
 // v1.3.0: Added latency scale bar (1s=100%/green, 10s=0%/red) with smooth animations, moved health bar to bottom with percentage text
 const FW_VERSION = "1.3.0";
 
-function SingleReceiver({ rcv_name, receiver, showMapping, showId, receiverLabel }) {
+function SingleReceiver({ rcv_name, receiver, showMapping, showId, receiverLabel, showConfig, showBars }) {
   const [popup, setPopup] = useState(null);
   const receiverRef = useRef(null);
   const [smoothedLatency, setSmoothedLatency] = useState(0);
@@ -128,8 +131,25 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId, receiverLabel
         : MdBatteryAlert
       : MdBatteryUnknown;
 
-  const firstZone = Object.keys(receiver.cues)[0]
+  const firstZone = receiver.cues ? Object.keys(receiver.cues)[0] : null
   const bgColor = "bg-gray-800" + (isConnectionGood ? " opacity-100" : " opacity-50")
+
+  // Check if board count matches configured cues
+  let boardCountMismatch = null;
+  if (receiver.config && receiver.config.numBoards && receiver.cues) {
+    const expectedCueCount = receiver.config.numBoards * 8;
+    // Flatten all cues from all zones
+    const actualCues = Object.values(receiver.cues).flat();
+    const actualCueCount = actualCues.length;
+    
+    if (actualCueCount !== expectedCueCount) {
+      boardCountMismatch = {
+        expected: expectedCueCount,
+        actual: actualCueCount,
+        numBoards: receiver.config.numBoards
+      };
+    }
+  }
 
   return (
     <div
@@ -193,10 +213,23 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId, receiverLabel
         )}
       </div>
 
+      {/* Board Count Mismatch Warning */}
+      {boardCountMismatch && (
+        <div className="flex items-center gap-2 p-2 bg-yellow-900/30 border border-yellow-600 rounded text-yellow-200 text-xs">
+          <MdWarning className="flex-shrink-0" />
+          <span>
+            Board count mismatch: Config has {boardCountMismatch.numBoards} board(s) 
+            (expects {boardCountMismatch.expected} cues) but {boardCountMismatch.actual} cues are configured
+          </span>
+        </div>
+      )}
+
       {/* Cues Section */}
-      <b className="text-gray-300 mt-1 mb-1">Cues</b>
-      <div className="flex flex-wrap gap-2 mt-1">
-        {firstZone && receiver.cues[firstZone] && receiver.cues[firstZone].map((target, k) => {
+      {receiver.cues && firstZone && (
+        <>
+          <b className="text-gray-300 mt-1 mb-1">Cues</b>
+          <div className="flex flex-wrap gap-2 mt-1">
+            {receiver.cues[firstZone] && receiver.cues[firstZone].map((target, k) => {
           // In the previous version, showMapping was keyed by zone. With a single zone, we assume:
           const item = showMapping?.[firstZone]?.[target]
           const borderClass = item ? "border-4 border-purple-800" : "border border-gray-500";
@@ -225,7 +258,9 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId, receiverLabel
             </div>
           );
         })}
-      </div>
+          </div>
+        </>
+      )}
 
       {/* Popup for Item Details */}
       {popup && (
@@ -256,7 +291,7 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId, receiverLabel
       )}
 
       {/* New Latency Display Section */}
-      {isConnectionGood && (
+      {isConnectionGood && showBars && (
         <div className="text-sm text-gray-400 mt-auto pt-2 border-t border-gray-700">
           <div className="flex items-center justify-center gap-1 mb-2">
             <MdAccessTime />
@@ -283,7 +318,7 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId, receiverLabel
       )}
 
       {/* Health Bar - Muted at bottom */}
-      {healthPercent !== null && (
+      {healthPercent !== null && showBars && (
         <div className="relative w-full mt-2">
           {/* Percentage text above the bar end */}
           <div
@@ -310,6 +345,29 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId, receiverLabel
           </div>
         </div>
       )}
+
+      {/* Config Data - Small text at bottom edge */}
+      {showConfig && receiver.config && (
+        <div className="text-[10px] text-gray-500 mt-2 pt-2 border-t border-gray-700">
+          <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+            <span>FW: v{receiver.config.fwVersion}</span>
+            <span>Board: v{receiver.config.boardVersion}</span>
+            <span>Boards: {receiver.config.numBoards}</span>
+            {receiver.config.secondsOnline !== undefined && (
+              <span>Uptime: {Math.floor(receiver.config.secondsOnline / 60)}m {receiver.config.secondsOnline % 60}s</span>
+            )}
+            <span>Unsolicited: {receiver.config.unsolicitedStatusCount !== undefined ? receiver.config.unsolicitedStatusCount : 'N/A'}</span>
+            <span>TX Forgive: {receiver.config.txForgivenessCt !== undefined ? receiver.config.txForgivenessCt : 'N/A'}</span>
+            <span>TX: {receiver.config.txPower !== undefined ? (receiver.config.txPower === 1 ? 'MIN' : receiver.config.txPower === 2 ? 'LOW' : receiver.config.txPower === 3 ? 'HIGH' : 'MAX') : 'N/A'}</span>
+            {receiver.config && receiver.config.fireMsDuration !== undefined && (
+              <span>Fire: {receiver.config.fireMsDuration}ms</span>
+            )}
+            {receiver.config && receiver.config.statusInterval !== undefined && (
+              <span>Status: {receiver.config.statusInterval}ms</span>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -320,6 +378,9 @@ export default function ReceiverDisplay({ setCurrentTab }) {
     const [ targetRcvMap, setTargetRcvMap ] = useState({});
     const [showUnusedReceivers, setShowUnusedReceivers] = useState(false);
     const [receiverLabels, setReceiverLabels] = useState({});
+    const [showConfig, setShowConfig] = useState(false);
+    const [showBars, setShowBars] = useState(true);
+    const [isRefreshingConfig, setIsRefreshingConfig] = useState(false);
 
     const [receivers, setReceivers] = useState([]);
     
@@ -358,11 +419,15 @@ export default function ReceiverDisplay({ setCurrentTab }) {
         const lookupTable = {};
         Object.keys(receiversTmp).forEach((receiverKey) => {
           const receiver = receiversTmp[receiverKey];
-          Object.keys(receiver.cues).forEach((zoneKey) => {
-            receiver.cues[zoneKey].forEach((target) => {
-              lookupTable[`${zoneKey}:${target}`] = receiverKey; // Create a key for zone:target
+          if (receiver.cues) {
+            Object.keys(receiver.cues).forEach((zoneKey) => {
+              if (receiver.cues[zoneKey] && Array.isArray(receiver.cues[zoneKey])) {
+                receiver.cues[zoneKey].forEach((target) => {
+                  lookupTable[`${zoneKey}:${target}`] = receiverKey; // Create a key for zone:target
+                });
+              }
             });
-          });
+          }
         });
 
   
@@ -457,7 +522,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
           if (!receiverMapping || !receiver.cues) return;
           
           // Iterate through all zones and targets in the receiver
-          Object.entries(receiver.cues).forEach(([zoneKey, targets]) => {
+          Object.entries(receiver.cues || {}).forEach(([zoneKey, targets]) => {
             const zoneMapping = receiverMapping[zoneKey];
             if (!zoneMapping) return;
             
@@ -494,6 +559,19 @@ export default function ReceiverDisplay({ setCurrentTab }) {
     };
 
     const systemHealth = calculateSystemHealth();
+
+    const handleRefreshConfig = async () => {
+        setIsRefreshingConfig(true);
+        try {
+            await axios.post("/api/system/cmd_daemon", {
+                type: "query_all_receiver_configs"
+            });
+        } catch (error) {
+            console.error("Error refreshing receiver configs:", error);
+        } finally {
+            setIsRefreshingConfig(false);
+        }
+    };
 
     return (
         <div className="w-full">
@@ -592,18 +670,52 @@ export default function ReceiverDisplay({ setCurrentTab }) {
               </div>
             )}
 
-            {/* Header with Show Loadout button */}
+            {/* Header with Show Loadout button and checkboxes */}
             <div className="flex justify-between items-center p-4 border-b border-gray-700">
-                <h1 className="text-2xl font-bold text-white">Receivers</h1>
-                {stagedShow && (
+                <div className="flex items-center gap-6">
+                    <h1 className="text-2xl font-bold text-white">Receivers</h1>
+                    {/* Display Options */}
+                    <div className="flex items-center gap-4 text-sm">
+                        <label className="flex items-center gap-2 text-gray-300 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={showConfig}
+                                onChange={(e) => setShowConfig(e.target.checked)}
+                                className="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500"
+                            />
+                            <span>Show Config</span>
+                        </label>
+                        <label className="flex items-center gap-2 text-gray-300 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={showBars}
+                                onChange={(e) => setShowBars(e.target.checked)}
+                                className="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500"
+                            />
+                            <span>Show Latency/Success Bars</span>
+                        </label>
+                    </div>
+                </div>
+                <div className="flex items-center gap-2">
                     <button
-                        onClick={() => setCurrentTab('loadout')}
-                        className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                        onClick={handleRefreshConfig}
+                        disabled={isRefreshingConfig}
+                        className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Request config data from all receivers"
                     >
-                        <MdAssignment />
-                        View Show Loadout
+                        <MdRefresh className={isRefreshingConfig ? "animate-spin" : ""} />
+                        Refresh Config
                     </button>
-                )}
+                    {stagedShow && (
+                        <button
+                            onClick={() => setCurrentTab('loadout')}
+                            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                        >
+                            <MdAssignment />
+                            View Show Loadout
+                        </button>
+                    )}
+                </div>
             </div>
             
             {/* Used Receivers */}
@@ -612,7 +724,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                     {Object.keys(receivers)
                         .filter(rcv_key => targetRcvMap[rcv_key])
                         .map((rcv_key, i) => (
-                            <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id} receiverLabel={receiverLabels[rcv_key]}/>
+                            <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id} receiverLabel={receiverLabels[rcv_key]} showConfig={showConfig} showBars={showBars}/>
                         ))}
                 </div>
             )}
@@ -634,7 +746,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                             {Object.keys(receivers)
                                 .filter(rcv_key => !targetRcvMap[rcv_key])
                                 .map((rcv_key, i) => (
-                                    <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id} receiverLabel={receiverLabels[rcv_key]}/>
+                                    <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id} receiverLabel={receiverLabels[rcv_key]} showConfig={showConfig} showBars={showBars}/>
                                 ))}
                         </div>
                     )}
@@ -645,7 +757,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
             {(!stagedShow || Object.keys(targetRcvMap).length === 0) && (
                 <div className="flex flex-wrap gap-5 p-4 justify-center">
                     {Object.keys(receivers).map((rcv_key, i) => (
-                        <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id} receiverLabel={receiverLabels[rcv_key]}/>
+                        <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id} receiverLabel={receiverLabels[rcv_key]} showConfig={showConfig} showBars={showBars}/>
                     ))}
                 </div>
             )}

@@ -67,8 +67,11 @@ class LEDHandler:
             "led_brightness": 10,
             "receiver_timeout_ms": 30000,
             "command_response_timeout_ms": 100,
-            "clock_sync_interval_ms": 2000,
-            "debug_mode": 0
+            "clock_sync_interval_ms": 2000,  # Dongle syncs receivers at this interval
+            "dongle_sync_interval_ms": 60000,  # Python daemon syncs dongle at this interval (default 10s)
+            "config_query_interval_ms": 120000,  # Default 1 minute
+            "debug_mode": 0,
+            "debug_commands": 0
         }
         self.parent = parent
         self._load_persisted_states()
@@ -108,11 +111,30 @@ class LEDHandler:
             # Optionally, you could add an error state to the LED itself here
             # self.parent.write_error(f"Failed to persist LED state: {e}")
 
+    def _get_compact_config(self):
+        """Generate compact array format for dongle: [daemon_act, web_act_state, tx_active, show_load_state, show_run_state, error_state, led_brightness, receiver_timeout_ms, command_response_timeout_ms, clock_sync_interval_ms, dongle_sync_interval_ms, config_query_interval_ms, debug_mode, debug_commands]"""
+        return json.dumps([
+            self.led_states.get("daemon_act", 1),
+            self.led_states.get("web_act_state", 1),
+            self.led_states.get("tx_active", 1),
+            self.led_states.get("show_load_state", 0),
+            self.led_states.get("show_run_state", 0),
+            self.led_states.get("error_state", 0),
+            self.led_states.get("led_brightness", 10),
+            self.led_states.get("receiver_timeout_ms", 30000),
+            self.led_states.get("command_response_timeout_ms", 100),
+            self.led_states.get("clock_sync_interval_ms", 2000),
+            self.led_states.get("dongle_sync_interval_ms", 60000),
+            self.led_states.get("config_query_interval_ms", 120000),
+            self.led_states.get("debug_mode", 0),
+            self.led_states.get("debug_commands", 0)
+        ])
+    
     def update(self, key, value):
         if key in self.led_states:
             if self.led_states[key] is not value:
                 self.led_states[key] = value
-                self.parent.send_serial_command(json.dumps(self.led_states))
+                self.parent.send_serial_command(self._get_compact_config())
                 self._persist_led_states()
         else:
             print(f"Warning: Attempted to update non-existent LED state key '{key}'")
@@ -177,6 +199,7 @@ class FireworkDaemon:
         self.waiting_for_client_start = False
         self.fire_check_failures = []
         self.tcp_buffer = ""
+        self.tcp_buffer_time = None  # Timestamp when buffer was last updated
         self.receiver_timeout_ms = 30000
         self.command_response_timeout_ms = 100
         self.clock_sync_interval_ms = 2000
@@ -274,6 +297,14 @@ class FireworkDaemon:
         """Read data from the TCP socket and process it like serial data."""
         while self.running:
             try:
+                # Clear stale buffer if it's been more than 2 seconds
+                if self.tcp_buffer and self.tcp_buffer_time:
+                    if time.time() - self.tcp_buffer_time > 2.0:
+                        if(self.debug_enabled()):
+                            print(f"Clearing stale TCP buffer (timeout): '{self.tcp_buffer[:100]}...'")
+                        self.tcp_buffer = ""
+                        self.tcp_buffer_time = None
+                
                 if hasattr(self, 'tcp_socket') and self.tcp_socket:
                     readable, _, _ = select.select([self.tcp_socket], [], [], 0.5)
                     data = None
@@ -287,6 +318,25 @@ class FireworkDaemon:
                                 if DEBUG:
                                     print(line)
                                 bypass=False
+                                
+                                # Handle fragmented JSON: if line starts with '{' but doesn't end with '}', buffer it
+                                if line[0] == '{' and not line.rstrip().endswith('}'):
+                                    # Incomplete JSON - add to buffer
+                                    self.tcp_buffer = (self.tcp_buffer or "") + line
+                                    self.tcp_buffer_time = time.time()
+                                    if(self.debug_enabled()):
+                                        print(f"Buffering incomplete JSON fragment: '{line[:50]}...'")
+                                    continue
+                                
+                                # If we have a buffer, append this line to it
+                                if self.tcp_buffer:
+                                    line = self.tcp_buffer + line
+                                    self.tcp_buffer = ""  # Clear buffer after reassembly
+                                    self.tcp_buffer_time = None
+                                    if(self.debug_enabled()):
+                                        print(f"Reassembled JSON from buffer: '{line[:100]}...'")
+                                
+                                # Now try to parse JSON
                                 if line[0] == '{':
                                     try:
                                         tcpsrvmsg = json.loads(line)
@@ -313,21 +363,25 @@ class FireworkDaemon:
                                         else:
                                             bypass = False
 
-                                    except Exception as e:
-                                        if(self.debug_enabled()):
-                                            print("Could not process assumedly TCP. Building backup buffer")
-                                        self.tcp_buffer = (self.tcp_buffer or "") + line
-                                elif line[-1] == '}' and self.tcp_buffer:
-                                    line = self.tcp_buffer + line 
-                                    if(self.debug_enabled()):
-                                        print("End fragment detected - reassembling JSON message from buffer")
-                                        print(f"Line: '{line}'")
-                                    self.tcp_buffer = "" 
-                                elif self.tcp_buffer:
-                                    if(self.debug_enabled()):
-                                        print("TCP buffer set but no end fragment. Clearing buffer")
-                                        print(f"Line was '{line}'")
-                                    self.tcp_buffer = "" 
+                                    except json.JSONDecodeError as e:
+                                        # JSON parse failed - might be incomplete, try buffering
+                                        if not line.rstrip().endswith('}'):
+                                            # Doesn't end with '}', likely incomplete - buffer it
+                                            self.tcp_buffer = line
+                                            self.tcp_buffer_time = time.time()
+                                            if(self.debug_enabled()):
+                                                print(f"JSON parse failed, buffering incomplete JSON: '{line[:50]}...'")
+                                            continue
+                                        else:
+                                            # Ends with '}' but still failed - malformed JSON, log and skip
+                                            if(self.debug_enabled()):
+                                                print(f"Bad JSON status (malformed): {e}")
+                                                print(f"Line was: '{line[:200]}...'")
+                                            # Clear buffer if it exists (might be stale)
+                                            self.tcp_buffer = ""
+                                            self.tcp_buffer_time = None
+                                            continue
+                                
                                 if not bypass:
                                     if not self.protocol_handler:
                                         if line[0] == '{' or line[0] == 'O':
@@ -482,6 +536,11 @@ class FireworkDaemon:
                 print(f"Error polling command directory: {e}")
 
             self.update_state_file()
+            
+            # Periodically call protocol handler bounce (which handles config queries)
+            if self.protocol_handler:
+                self.protocol_handler.bounce()
+            
             time.sleep(0.5)  # Poll every 500ms
 
     def write_error(self, err_msg):
@@ -572,14 +631,41 @@ class FireworkDaemon:
                 self.led_handler.update("command_response_timeout_ms", int(command.get('timeout_ms', 100)))
             elif command['type'] == 'set_clock_sync_interval':
                 self.led_handler.update("clock_sync_interval_ms", int(command.get('interval_ms', 2000)))
+            elif command['type'] == 'set_dongle_sync_interval':
+                self.led_handler.update("dongle_sync_interval_ms", int(command.get('interval_ms', 20000)))
+            elif command['type'] == 'set_config_query_interval':
+                self.led_handler.update("config_query_interval_ms", int(command.get('interval_ms', 120000)))
             elif command['type'] == 'set_debug_mode':
                 self.led_handler.update("debug_mode", int(command.get('debug_mode', 0)))
                 self.debug_mode = int(command.get('debug_mode', 0))
+            elif command['type'] == 'set_debug_commands':
+                self.led_handler.update("debug_commands", int(command.get('debug_commands', 0)))
             elif command['type'] == 'set_fire_repeat':
                 repeat_ct = int(command.get('repeat_ct', 6))
                 if(repeat_ct==0):
                     repeat_ct=6
                 self.fire_repetition = repeat_ct
+            elif command['type'] == 'set_receiver_settings':
+                # Set receiver settings for all connected receivers: fire_ms_duration, status_interval, tx_power
+                fire_ms_duration = command.get('fire_ms_duration')
+                status_interval = command.get('status_interval')
+                tx_power = command.get('tx_power')
+                
+                if self.protocol_handler:
+                    # Send settings to all connected receivers
+                    self.protocol_handler.set_all_receiver_settings(
+                        fire_ms_duration=fire_ms_duration,
+                        status_interval=status_interval,
+                        tx_power=tx_power
+                    )
+                else:
+                    print(f"Invalid receiver settings command: protocol_handler not available")
+            elif command['type'] == 'query_all_receiver_configs':
+                # Query config for all connected receivers
+                if self.protocol_handler:
+                    self.protocol_handler.query_all_receiver_configs()
+                else:
+                    print(f"Invalid query_all_receiver_configs command: protocol_handler not available")
             else:
                 print(f"Unknown command type: {command['type']}")
         else:
@@ -810,7 +896,10 @@ class FireworkDaemon:
                 "receiver_timeout_ms": self.led_handler.led_states.get("receiver_timeout_ms", 30000),
                 "command_response_timeout_ms": self.led_handler.led_states.get("command_response_timeout_ms", 100),
                 "clock_sync_interval_ms": self.led_handler.led_states.get("clock_sync_interval_ms", 2000),
+                "dongle_sync_interval_ms": self.led_handler.led_states.get("dongle_sync_interval_ms", 10000),
+                "config_query_interval_ms": self.led_handler.led_states.get("config_query_interval_ms", 60000),
                 "debug_mode": self.led_handler.led_states.get("debug_mode", 0),
+                "debug_commands": self.led_handler.led_states.get("debug_commands", 0),
                 "rf": {
                     "addr": self.serial_addr,
                     "baud": self.serial_baud
@@ -818,8 +907,18 @@ class FireworkDaemon:
             }
         }
         try:
+            # Ensure the directory exists
+            state_dir = os.path.dirname(STATE_FILE_PATH)
+            if state_dir and not os.path.exists(state_dir):
+                os.makedirs(state_dir, exist_ok=True)
+            
+            # Direct write - the read side already handles race conditions with retries
+            # This is simpler and more reliable than atomic writes on some filesystems
             with open(STATE_FILE_PATH, "w") as state_file:
                 json.dump(state, state_file, indent=4)
+                state_file.flush()
+                os.fsync(state_file.fileno())  # Ensure data is written to disk
+                    
         except Exception as e:
             print(f"Error updating state file: {e}")
 

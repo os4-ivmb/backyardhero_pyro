@@ -1682,7 +1682,7 @@ const ShowBuilder = (props) => {
               )}
               
               {activeTab === "racks" && (
-                <RacksTab inventory={inventory} showId={showMetadata.id} />
+                <RacksTab inventory={inventory} showId={showMetadata.id} showItems={items} />
               )}
               
               {activeTab === "test" && (

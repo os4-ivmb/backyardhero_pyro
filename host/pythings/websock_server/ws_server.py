@@ -75,18 +75,56 @@ def get_last_n_lines(file_path, n):
         return {"err": str(e)}
 
 def get_fw_state():
+    """
+    Safely reads and parses the state file with robust error handling.
+    Returns an empty dict if the file doesn't exist or can't be read.
+    """
     fw_state = {}
-    if os.path.exists("/data/state"):
+    
+    if not os.path.exists("/data/state"):
+        return fw_state
+    
+    try:
         with open("/data/state", "r") as state_file:
             state_content = state_file.read().strip()
-            fw_state = json.loads(state_content)
-            fw_state["daemon_active"] = not (
-                datetime.now().timestamp() - (int(fw_state["daemon_lup"]) / 1000) > DAEMON_INAC_SECONDS
-            )
-    else:
-  
-        fw_state = {}
-
+            
+            # Check for empty file (race condition: file exists but is empty)
+            if not state_content:
+                return fw_state
+            
+            # Parse JSON with error handling
+            try:
+                fw_state = json.loads(state_content)
+            except json.JSONDecodeError as e:
+                # Invalid JSON - likely a race condition during write
+                raise ValueError(f"Invalid JSON in state file: {e}")
+            
+            # Safely check for daemon_lup key and calculate daemon_active
+            if "daemon_lup" in fw_state:
+                try:
+                    daemon_lup = fw_state["daemon_lup"]
+                    # Handle both int and string representations
+                    if isinstance(daemon_lup, str):
+                        daemon_lup = int(daemon_lup)
+                    elif not isinstance(daemon_lup, (int, float)):
+                        raise TypeError(f"daemon_lup must be numeric, got {type(daemon_lup)}")
+                    
+                    time_diff = datetime.now().timestamp() - (daemon_lup / 1000)
+                    fw_state["daemon_active"] = not (time_diff > DAEMON_INAC_SECONDS)
+                except (ValueError, TypeError) as e:
+                    # If daemon_lup is invalid, assume daemon is inactive
+                    fw_state["daemon_active"] = False
+            else:
+                # Missing daemon_lup key - assume daemon is inactive
+                fw_state["daemon_active"] = False
+                
+    except (IOError, OSError) as e:
+        # File I/O errors (permission denied, disk errors, etc.)
+        raise IOError(f"Failed to read state file: {e}")
+    except Exception as e:
+        # Catch any other unexpected errors
+        raise Exception(f"Unexpected error reading state file: {e}")
+    
     return fw_state
 
 async def read_file_content():
@@ -129,19 +167,27 @@ async def read_file_content():
     except Exception as e:
         result["fw_firing"] = {"err": str(e)}
 
-    # Check for states
+    # Check for states with retry logic to handle race conditions
     fws_retry_ct = 0
     fws_complete = False
     result["fw_state"] = {}
-    while(fws_retry_ct < 2 and not fws_complete):
+    max_retries = 2
+    
+    while fws_retry_ct <= max_retries and not fws_complete:
         try:
             result["fw_state"] = get_fw_state()
             fws_complete = True
         except Exception as e:
-            print(f"EXC RETRY {fws_retry_ct}")
-            print(str(e))
-            fws_retry_ct = fws_retry_ct + 1
-            time.sleep(0.250)
+            if fws_retry_ct < max_retries:
+                # Log retry attempt with error details
+                print(f"EXC RETRY {fws_retry_ct}: {type(e).__name__} - {str(e)}")
+                fws_retry_ct += 1
+                time.sleep(0.250)  # Wait before retry to allow write to complete
+            else:
+                # Final attempt failed - set error state
+                print(f"EXC RETRY FAILED after {max_retries} attempts: {type(e).__name__} - {str(e)}")
+                result["fw_state"] = {"err": f"Failed to read state after {max_retries} retries: {str(e)}"}
+                fws_complete = True  # Stop retrying but mark as complete with error
 
     # Check for daemon.err
     try:

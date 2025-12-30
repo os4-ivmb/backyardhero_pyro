@@ -9,7 +9,8 @@
 // v1: Initial version - Basic mesh networking and command queuing (date unknown)
 // v2: 2025-01-XX - Added FW_VERSION tracking system with version history comments
 // v3: 2025-01-XX - Migrated from RF24Mesh to pure RF24 with deterministic addressing
-#define FW_VERSION 3
+// v4: Config message handling
+#define FW_VERSION 6
 
 #define RF24_CE_PIN 37
 #define RF24_CSN_PIN 36
@@ -38,7 +39,10 @@ enum MessageType {
   GENERIC_PAUSE   = 8,
   SHOW_START      = 9,
   RECEIVER_STATUS = 10,
-  RESET_DVC       = 12
+  RESET_DVC       = 12,
+  GET_CONFIG      = 13,
+  SEND_CONFIG     = 14,
+  SET_CONFIG      = 15
 };
 
 
@@ -89,6 +93,31 @@ struct ReceiverStatusMessage {
   uint64_t cont64_1;
 } __attribute__((packed));
 
+struct GetConfigMessage {
+  uint8_t type;  // Just GET_CONFIG, no payload - just requests current config
+} __attribute__((packed));
+
+struct SetConfigMessage {
+  uint8_t type;  // SET_CONFIG
+  uint32_t fireMsDuration;
+  uint16_t statusInterval;
+  uint8_t txPower;  // 1=MIN, 2=LOW, 3=HIGH, 4=MAX
+} __attribute__((packed));
+
+struct SendConfigMessage {
+  uint8_t type;
+  uint8_t numBoards;
+  uint8_t boardVersion;
+  uint8_t fwVersion;
+  uint32_t secondsOnline;
+  char ident[10];
+  uint8_t txPower;  // Current TX power level (1=MIN, 2=LOW, 3=HIGH, 4=MAX)
+  uint32_t fireMsDuration;  // Current fire duration setting
+  uint16_t statusInterval;  // Current status interval setting
+  uint32_t unsolicitedStatusCount;  // Diagnostic: count of unsolicited status messages sent
+  uint8_t connTimeoutCount;  // Diagnostic: connection timeout counter
+} __attribute__((packed));
+
 
 
 
@@ -125,6 +154,7 @@ uint32_t receiverInactivityTimeoutMs = 30000UL;
 uint32_t commandResponseTimeoutMs = 150UL;    
 uint32_t clockSyncIntervalMs = 2000UL;  
 uint8_t debugMode = 0;
+uint8_t debugCommands = 0;
 
 
 
@@ -149,6 +179,11 @@ struct QueuedCommand {
   uint16_t showstart_showId;
   uint8_t repeat_count;  // Number of times to repeat this command
   
+  // SetConfig settings payload (for SET_CONFIG message)
+  uint32_t setconfig_fireMsDuration;
+  uint16_t setconfig_statusInterval;
+  uint8_t setconfig_txPower;
+  
 };
 
 #define MAX_COMMANDS_IN_QUEUE 40
@@ -162,6 +197,7 @@ bool awaitingResponseForCommand = false;
 uint8_t  responseTargetNodeID = 0;            
 uint64_t commandDispatchTime = 0;           
 uint64_t initialCommandDispatchTime = 0;
+QueuedCommand pendingCommand = {0};  // Store command awaiting response for timeout logging
 
 // Per-receiver tracking for clock sync (for informational purposes)
 uint64_t lastClockSyncSent[MAX_RECEIVERS];  // Track last clock sync send time per receiver
@@ -344,8 +380,81 @@ void updateLEDs() {
 
 
 
+void printCommandDebug(const QueuedCommand& cmd, const char* status) {
+  if (debugCommands == 0) return;
+  
+  Serial.print(F("{\"type\":\"cmd\",\""));
+  Serial.print(status);
+  Serial.print(F("\":"));
+  
+  if (strcmp(status, "s") == 0) {
+    // Serialize the command
+    Serial.print(F("{\"targetNodeID\":"));
+    Serial.print(cmd.targetNodeID);
+    Serial.print(F(",\"messageType\":"));
+    Serial.print(cmd.messageType);
+    Serial.print(F(",\"repeat_count\":"));
+    Serial.print(cmd.repeat_count);
+    
+    // Add type-specific fields
+    switch(cmd.messageType) {
+      case MANUAL_FIRE:
+        Serial.print(F(",\"fire_position\":"));
+        Serial.print(cmd.fire_position);
+        break;
+      case CLOCK_SYNC:
+        Serial.print(F(",\"sync_timestamp\":"));
+        Serial.print(cmd.sync_timestamp);
+        break;
+      case START_LOAD:
+        Serial.print(F(",\"startload_numTargets\":"));
+        Serial.print(cmd.startload_numTargets);
+        Serial.print(F(",\"startload_showId\":"));
+        Serial.print(cmd.startload_showId);
+        break;
+      case SHOW_LOAD:
+        Serial.print(F(",\"showload_time_1\":"));
+        Serial.print(cmd.showload_time_1);
+        Serial.print(F(",\"showload_position_1\":"));
+        Serial.print(cmd.showload_position_1);
+        Serial.print(F(",\"showload_time_2\":"));
+        Serial.print(cmd.showload_time_2);
+        Serial.print(F(",\"showload_position_2\":"));
+        Serial.print(cmd.showload_position_2);
+        break;
+      case SHOW_START:
+        Serial.print(F(",\"showstart_targetStartTime\":"));
+        Serial.print(cmd.showstart_targetStartTime);
+        Serial.print(F(",\"showstart_numTargetsToFire\":"));
+        Serial.print(cmd.showstart_numTargetsToFire);
+        Serial.print(F(",\"showstart_showId\":"));
+        Serial.print(cmd.showstart_showId);
+        break;
+      case GET_CONFIG:
+        // GET_CONFIG has no payload, just requests config
+        break;
+      case SET_CONFIG:
+        Serial.print(F(",\"setconfig_fireMsDuration\":"));
+        Serial.print(cmd.setconfig_fireMsDuration);
+        Serial.print(F(",\"setconfig_statusInterval\":"));
+        Serial.print(cmd.setconfig_statusInterval);
+        Serial.print(F(",\"setconfig_txPower\":"));
+        Serial.print(cmd.setconfig_txPower);
+        break;
+      default:
+        break;
+    }
+    Serial.print(F("}"));
+  } else {
+    // For status flags (sa, sc, sf, st), just output 1
+    Serial.print(F("1"));
+  }
+  
+  Serial.println(F("}"));
+}
+
 void parseLedJSON(const String& json) {
-  StaticJsonDocument<512> doc;
+  StaticJsonDocument<256> doc;
   DeserializationError error = deserializeJson(doc, json);
   if (error) {
     Serial.print(F("deserializeJson() failed: "));
@@ -353,56 +462,106 @@ void parseLedJSON(const String& json) {
     return;
   }
   
-  if (doc.containsKey("led_brightness")) {
-    ledBrightness = doc["led_brightness"].as<int>();
-    if (ledBrightness < 1) ledBrightness = 1;
-    if (ledBrightness > 100) ledBrightness = 100;
-    pixels.setBrightness(map(ledBrightness, 0, 100, 0, 255));
-  }
-  if (doc.containsKey("daemon_act")) {
-    ledStates[0] = doc["daemon_act"].as<int>() ? 1 : 0;
-  }
-  if (doc.containsKey("web_act_state")) {
-    ledStates[1] = doc["web_act_state"].as<int>();
-  }
-  if (doc.containsKey("tx_active")) {
-    ledStates[2] = doc["tx_active"].as<int>();
-  }
-  if (doc.containsKey("show_load_state")) {
-    ledStates[3] = doc["show_load_state"].as<int>();
-  }
-  if (doc.containsKey("show_run_state")) {
-    int runState = doc["show_run_state"].as<int>();
-    ledStates[4] = runState;
-    if (runState == 1) {        
-      ledEffects[4] = 2;
-    } else if (runState == 2) { 
-      ledEffects[4] = 1;
-    } else if (runState == 8) { 
-      ledEffects[4] = 1;
-    } else if (runState == 7) { 
-      ledEffects[4] = 1;
-    } else {
-      ledEffects[4] = 0;
+  // Support both old object format and new compact array format
+  // Array format: [daemon_act, web_act_state, tx_active, show_load_state, show_run_state, error_state, led_brightness, receiver_timeout_ms, command_response_timeout_ms, clock_sync_interval_ms, dongle_sync_interval_ms, config_query_interval_ms, debug_mode, debug_commands]
+  if (doc.is<JsonArray>()) {
+    JsonArray arr = doc.as<JsonArray>();
+    if (arr.size() >= 14) {
+      // LED states
+      ledStates[0] = arr[0].as<int>() ? 1 : 0;  // daemon_act
+      ledStates[1] = arr[1].as<int>();          // web_act_state
+      ledStates[2] = arr[2].as<int>();          // tx_active
+      ledStates[3] = arr[3].as<int>();          // show_load_state
+      int runState = arr[4].as<int>();          // show_run_state
+      ledStates[4] = runState;
+      if (runState == 1) {        
+        ledEffects[4] = 2;
+      } else if (runState == 2) { 
+        ledEffects[4] = 1;
+      } else if (runState == 8) { 
+        ledEffects[4] = 1;
+      } else if (runState == 7) { 
+        ledEffects[4] = 1;
+      } else {
+        ledEffects[4] = 0;
+      }
+      ledStates[5] = arr[5].as<int>();          // error_state
+      
+      // LED brightness
+      ledBrightness = arr[6].as<int>();          // led_brightness
+      if (ledBrightness < 1) ledBrightness = 1;
+      if (ledBrightness > 100) ledBrightness = 100;
+      pixels.setBrightness(map(ledBrightness, 0, 100, 0, 255));
+      
+      // Timeouts and intervals
+      receiverInactivityTimeoutMs = arr[7].as<uint32_t>();      // receiver_timeout_ms
+      commandResponseTimeoutMs = arr[8].as<uint32_t>();         // command_response_timeout_ms
+      clockSyncIntervalMs = arr[9].as<uint32_t>();             // clock_sync_interval_ms
+      // arr[10] = dongle_sync_interval_ms (not used by dongle)
+      // arr[11] = config_query_interval_ms (not used by dongle)
+      
+      // Debug flags
+      debugMode = arr[12].as<uint8_t>();                       // debug_mode
+      debugCommands = arr[13].as<uint8_t>();                    // debug_commands
     }
-  }
-  if (doc.containsKey("error_state")) {
-    ledStates[5] = doc["error_state"].as<int>();
-  }
+  } else {
+    // Legacy object format support
+    if (doc.containsKey("led_brightness")) {
+      ledBrightness = doc["led_brightness"].as<int>();
+      if (ledBrightness < 1) ledBrightness = 1;
+      if (ledBrightness > 100) ledBrightness = 100;
+      pixels.setBrightness(map(ledBrightness, 0, 100, 0, 255));
+    }
+    if (doc.containsKey("daemon_act")) {
+      ledStates[0] = doc["daemon_act"].as<int>() ? 1 : 0;
+    }
+    if (doc.containsKey("web_act_state")) {
+      ledStates[1] = doc["web_act_state"].as<int>();
+    }
+    if (doc.containsKey("tx_active")) {
+      ledStates[2] = doc["tx_active"].as<int>();
+    }
+    if (doc.containsKey("show_load_state")) {
+      ledStates[3] = doc["show_load_state"].as<int>();
+    }
+    if (doc.containsKey("show_run_state")) {
+      int runState = doc["show_run_state"].as<int>();
+      ledStates[4] = runState;
+      if (runState == 1) {        
+        ledEffects[4] = 2;
+      } else if (runState == 2) { 
+        ledEffects[4] = 1;
+      } else if (runState == 8) { 
+        ledEffects[4] = 1;
+      } else if (runState == 7) { 
+        ledEffects[4] = 1;
+      } else {
+        ledEffects[4] = 0;
+      }
+    }
+    if (doc.containsKey("error_state")) {
+      ledStates[5] = doc["error_state"].as<int>();
+    }
 
-  
-  if (doc.containsKey("receiver_timeout_ms")) {
-    receiverInactivityTimeoutMs = doc["receiver_timeout_ms"].as<uint32_t>();
-  }
-  if (doc.containsKey("response_timeout_ms")) {
-    commandResponseTimeoutMs = doc["response_timeout_ms"].as<uint32_t>();
-  }
-  if (doc.containsKey("clock_sync_interval_ms")) {
-    clockSyncIntervalMs = doc["clock_sync_interval_ms"].as<uint32_t>();
-  }
+    
+    if (doc.containsKey("receiver_timeout_ms")) {
+      receiverInactivityTimeoutMs = doc["receiver_timeout_ms"].as<uint32_t>();
+    }
+    if (doc.containsKey("command_response_timeout_ms")) {
+      commandResponseTimeoutMs = doc["command_response_timeout_ms"].as<uint32_t>();
+    } else if (doc.containsKey("response_timeout_ms")) {
+      commandResponseTimeoutMs = doc["response_timeout_ms"].as<uint32_t>();
+    }
+    if (doc.containsKey("clock_sync_interval_ms")) {
+      clockSyncIntervalMs = doc["clock_sync_interval_ms"].as<uint32_t>();
+    }
 
-  if (doc.containsKey("debug_mode")) {
-    debugMode = doc["debug_mode"].as<uint8_t>();
+    if (doc.containsKey("debug_mode")) {
+      debugMode = doc["debug_mode"].as<uint8_t>();
+    }
+    if (doc.containsKey("debug_commands")) {
+      debugCommands = doc["debug_commands"].as<uint8_t>();
+    }
   }
 }
 
@@ -747,6 +906,69 @@ bool sendActualGenericMessage(uint8_t nodeID, uint8_t commandType) {
   return true;
 }
 
+bool sendActualGetConfigMessage(uint8_t nodeID) {
+  // Verify radio is ready
+  if (!radio.isChipConnected()) {
+    if(debugMode > 0) {
+      Serial.print(F("TX ERROR: Radio not connected for GET_CONFIG to N")); Serial.println(nodeID);
+    }
+    return false;
+  }
+  
+  GetConfigMessage msg;
+  msg.type = GET_CONFIG;
+  
+  radio.stopListening();
+  delayMicroseconds(200);
+  uint64_t targetAddress = getReceiverAddress(nodeID);
+  radio.openWritingPipe(targetAddress);
+  bool result = radio.write(&msg, sizeof(msg));
+  radio.startListening();
+  delayMicroseconds(150);
+  
+  if(!result){
+    if(debugMode > 0) {
+      Serial.print(F("TX ERROR: GET_CONFIG to N")); Serial.print(nodeID);
+      Serial.print(F(" addr=0x")); Serial.println(targetAddress, HEX);
+    }
+    return false;
+  }
+  return true;
+}
+
+bool sendActualSetConfigMessage(uint8_t nodeID, uint32_t fireMsDuration, uint16_t statusInterval, uint8_t txPower) {
+  // Verify radio is ready
+  if (!radio.isChipConnected()) {
+    if(debugMode > 0) {
+      Serial.print(F("TX ERROR: Radio not connected for SET_CONFIG to N")); Serial.println(nodeID);
+    }
+    return false;
+  }
+  
+  SetConfigMessage msg;
+  msg.type = SET_CONFIG;
+  msg.fireMsDuration = fireMsDuration;
+  msg.statusInterval = statusInterval;
+  msg.txPower = txPower;
+  
+  radio.stopListening();
+  delayMicroseconds(200);
+  uint64_t targetAddress = getReceiverAddress(nodeID);
+  radio.openWritingPipe(targetAddress);
+  bool result = radio.write(&msg, sizeof(msg));
+  radio.startListening();
+  delayMicroseconds(150);
+  
+  if(!result){
+    if(debugMode > 0) {
+      Serial.print(F("TX ERROR: SET_CONFIG to N")); Serial.print(nodeID);
+      Serial.print(F(" addr=0x")); Serial.println(targetAddress, HEX);
+    }
+    return false;
+  }
+  return true;
+}
+
 
 bool isValidMessage(const String &message) {
   return message.startsWith(">>") && message.endsWith("<<") && message.indexOf(':') != -1;
@@ -855,7 +1077,8 @@ void processSerialCommand(String inStr) {
 
   ReceiverInfo* rinfo = getReceiverByIdent(ident, true); 
   if(!rinfo) {
-    Serial.println(F("CV RNE")); 
+    Serial.print(F("CV RNE ")); 
+    Serial.println(ident);
     return;
   }
   
@@ -1026,6 +1249,57 @@ void processSerialCommand(String inStr) {
       qc.repeat_count = paramsStr.substring(lastSpace+1).toInt();
       if (qc.repeat_count == 0) qc.repeat_count = 1;
     }
+  } else if(cmdStr == "getconfig") {
+    qc.messageType = GET_CONFIG;
+    // Just request config: "getconfig ident [repeat]"
+    qc.repeat_count = 1;
+    
+    // Check for repeat count
+    int lastSpace = paramsStr.lastIndexOf(' ');
+    if (lastSpace > 0) {
+      String lastToken = paramsStr.substring(lastSpace+1);
+      int lastVal = lastToken.toInt();
+      // If last token is a small number (1-10), treat as repeat count
+      if (lastVal > 0 && lastVal <= 10) {
+        qc.repeat_count = lastVal;
+      }
+    }
+  } else if(cmdStr == "setconfig") {
+    qc.messageType = SET_CONFIG;
+    
+    // Parse settings: "setconfig ident fireMs statusInterval txPower [repeat]"
+    // Format: "setconfig RX121 1000 2000 3" or "setconfig RX121 1000 2000 3 1"
+    
+    // Check if paramsStr contains settings (has 3+ space-separated numbers after ident)
+    int firstSpace = paramsStr.indexOf(' ');
+    String settingsStr = (firstSpace > 0) ? paramsStr.substring(firstSpace+1) : "";
+    
+    // Try to parse settings (3 numbers: fireMs, statusInterval, txPower)
+    int space1 = settingsStr.indexOf(' ');
+    int space2 = (space1 > 0) ? settingsStr.indexOf(' ', space1+1) : -1;
+    int space3 = (space2 > 0) ? settingsStr.indexOf(' ', space2+1) : -1;
+    
+    if (space1 > 0 && space2 > 0) {
+      // Settings present
+      qc.setconfig_fireMsDuration = settingsStr.substring(0, space1).toInt();
+      qc.setconfig_statusInterval = settingsStr.substring(space1+1, space2).toInt();
+      
+      // Check if there's a 4th parameter (repeat count) or if txPower is the last
+      if (space3 > 0) {
+        // Format: "fireMs statusInterval txPower repeat"
+        qc.setconfig_txPower = settingsStr.substring(space2+1, space3).toInt();
+        qc.repeat_count = settingsStr.substring(space3+1).toInt();
+        if (qc.repeat_count == 0) qc.repeat_count = 1;
+      } else {
+        // Format: "fireMs statusInterval txPower"
+        qc.setconfig_txPower = settingsStr.substring(space2+1).toInt();
+        qc.repeat_count = 1;
+      }
+    } else {
+      // Settings required for setconfig
+      Serial.println(F("CV SCNSS")); // SetConfig No Settings
+      return;
+    }
   } else {
     Serial.println(F("C?UK")); 
     return;
@@ -1122,8 +1396,19 @@ void loop() {
 
   
   for (uint8_t i = 0; i < numReceivers; /*no increment*/) {
-    if ((now - receivers[i].lastMessageTime) > receiverInactivityTimeoutMs) {
-      Serial.print(F("INFO: Pruning inactive receiver: ")); Serial.println(receivers[i].ident);
+    uint64_t timeSinceLastMessage = now - receivers[i].lastMessageTime;
+    if (timeSinceLastMessage > receiverInactivityTimeoutMs) {
+      Serial.print(F("INFO: Pruning inactive receiver: ")); 
+      Serial.print(receivers[i].ident);
+      Serial.print(F(" (inactive for ")); 
+      Serial.print(timeSinceLastMessage);
+      Serial.print(F("ms, timeout=")); 
+      Serial.print(receiverInactivityTimeoutMs);
+      Serial.print(F("ms, lastMsgTime=")); 
+      Serial.print(receivers[i].lastMessageTime);
+      Serial.print(F(", now=")); 
+      Serial.print(now);
+      Serial.println(F(")"));
       for (uint8_t j = i; j < numReceivers - 1; ++j) {
         receivers[j] = receivers[j+1];
       }
@@ -1162,6 +1447,13 @@ void loop() {
         r_from_msg->showId = status->showState & 0x3FFF;
         r_from_msg->loadComplete = (status->showState & (1 << 14)) ? true : false;
         r_from_msg->startReady  = (status->showState & (1 << 15)) ? true : false;
+        if(debugMode > 0) {
+          uint64_t timeSinceLast = now - r_from_msg->lastMessageTime;
+          Serial.print(F("RX_STATUS from ")); Serial.print(status->ident);
+          Serial.print(F(" - updating lastMessageTime (was ")); Serial.print(r_from_msg->lastMessageTime);
+          Serial.print(F(", now ")); Serial.print(now);
+          Serial.print(F(", gap ")); Serial.print(timeSinceLast); Serial.println(F("ms)"));
+        }
         r_from_msg->lastMessageTime = now;
         
         r_from_msg->continuity[0] = status->cont64_0;
@@ -1201,6 +1493,45 @@ void loop() {
       } else {
          Serial.print(F("ERR: Status from unknown ident/node ")); Serial.println(status->nodeID);
       }
+    } else if (msgType == SEND_CONFIG) {
+      SendConfigMessage* config = (SendConfigMessage*)buf;
+      
+      // Output config as JSON for Python daemon (array format for compactness)
+      // Format: {"type":"config","i":"RX121","d":[numBoards, boardVersion, fwVersion, secondsOnline, txPower, fireMsDuration, statusInterval]}
+      Serial.print(F("{\"type\":\"config\",\"i\":\""));
+      Serial.print(config->ident);
+      Serial.print(F("\",\"d\":["));
+      Serial.print(config->numBoards);
+      Serial.print(F(","));
+      Serial.print(config->boardVersion);
+      Serial.print(F(","));
+      Serial.print(config->fwVersion);
+      Serial.print(F(","));
+      Serial.print(config->secondsOnline);
+      Serial.print(F(","));
+      Serial.print(config->txPower);
+      Serial.print(F(","));
+      Serial.print(config->fireMsDuration);
+      Serial.print(F(","));
+      Serial.print(config->statusInterval);
+      Serial.print(F(","));
+      Serial.print(config->unsolicitedStatusCount);
+      Serial.print(F(","));
+      Serial.print(config->connTimeoutCount);
+      Serial.println(F("]}"));
+      
+      // Config message can also serve as ACK
+      r_from_msg = getReceiverByIdent(String(config->ident), false);
+      if (r_from_msg && awaitingResponseForCommand && r_from_msg->nodeID == responseTargetNodeID) {
+        // Track successful command
+        pushCommandResult(r_from_msg, true);
+        r_from_msg->consecutiveFailures = 0;
+        awaitingResponseForCommand = false;
+      }
+      
+      if(debugMode > 0) {
+        Serial.print(F("Got config from ")); Serial.println(config->ident);
+      }
     } else if (msgType != 0) {
         Serial.print(F("WARN: Received unhandled message type ")); Serial.println(msgType);
     }
@@ -1212,6 +1543,11 @@ void loop() {
       Serial.print(F("TIMEOUT waiting for response from Node ")); Serial.println(responseTargetNodeID);
       if(debugMode > 0) {
         Serial.print(F("CMD_TIMEOUT_LATENCY: ")); Serial.print(now - initialCommandDispatchTime); Serial.println(F(" ms"));
+      }
+      
+      // Debug: Print timeout
+      if (debugCommands > 0) {
+        printCommandDebug(pendingCommand, "st");
       }
       
       // Track timeout failure - find receiver by nodeID
@@ -1327,6 +1663,17 @@ void loop() {
             case RESET_DVC: 
               thisTxSuccess = sendActualGenericMessage(cmdToSend.targetNodeID, cmdToSend.messageType);
               break;
+            case GET_CONFIG:
+              thisTxSuccess = sendActualGetConfigMessage(cmdToSend.targetNodeID);
+              break;
+            case SET_CONFIG:
+              thisTxSuccess = sendActualSetConfigMessage(
+                cmdToSend.targetNodeID,
+                cmdToSend.setconfig_fireMsDuration,
+                cmdToSend.setconfig_statusInterval,
+                cmdToSend.setconfig_txPower
+              );
+              break;
             default:
               Serial.print(F("ERR: Unknown command type in queue: ")); Serial.println(cmdToSend.messageType);
               break;
@@ -1336,10 +1683,16 @@ void loop() {
           if (thisTxSuccess) {
             txSuccess = true;
             
+            // Debug: Print command when sent
+            if (debugCommands > 0 && repeatIdx == 0) {
+              printCommandDebug(cmdToSend, "s");
+            }
+            
             // Set up to wait for response after this transmission
             awaitingResponseForCommand = true;
             commandDispatchTime = now;
             initialCommandDispatchTime = now;
+            pendingCommand = cmdToSend;  // Store command for timeout logging
             
             // Wait for response with timeout - check radio and process messages
             uint64_t responseWaitStart = now;
@@ -1354,34 +1707,94 @@ void loop() {
                 radio.read(&buf, msgSize);
                 
                 uint8_t msgType = (msgSize > 0) ? buf[0] : 0;
-                if (msgType == RECEIVER_STATUS) {
-                  ReceiverStatusMessage* status = (ReceiverStatusMessage*)buf;
-                  ReceiverInfo* r_from_msg = getReceiverByIdent(String(status->ident), false);
-                  
-                  if (r_from_msg && r_from_msg->nodeID == responseTargetNodeID) {
-                    // Got response from target receiver - this is our ACK
-                    responseReceived = true;
-                    gotAck = true;
-                    awaitingResponseForCommand = false;
+                
+                // GET_CONFIG and SET_CONFIG expect SEND_CONFIG as ACK
+                if (cmdToSend.messageType == GET_CONFIG || cmdToSend.messageType == SET_CONFIG) {
+                  if (msgType == SEND_CONFIG) {
+                    SendConfigMessage* config = (SendConfigMessage*)buf;
+                    ReceiverInfo* r_from_msg = getReceiverByIdent(String(config->ident), false);
                     
-                    // Update receiver info
-                    r_from_msg->nodeID = status->nodeID; 
-                    r_from_msg->batteryLevel = status->batteryLevel;
-                    r_from_msg->showId = status->showState & 0x3FFF;
-                    r_from_msg->loadComplete = (status->showState & (1 << 14)) ? true : false;
-                    r_from_msg->startReady  = (status->showState & (1 << 15)) ? true : false;
-                    r_from_msg->lastMessageTime = now;
-                    r_from_msg->continuity[0] = status->cont64_0;
-                    r_from_msg->continuity[1] = status->cont64_1;
-                    
-                    // Track successful command
-                    pushCommandResult(r_from_msg, true);
-                    r_from_msg->consecutiveFailures = 0;
-                    
-                    if(debugMode > 0) {
-                      Serial.print(F("Got ACK after repeat ")); Serial.print(repeatIdx + 1); Serial.println(F(", stopping repeats"));
+                    if (r_from_msg && r_from_msg->nodeID == responseTargetNodeID) {
+                      // Got config response from target receiver
+                      responseReceived = true;
+                      gotAck = true;
+                      awaitingResponseForCommand = false;
+                      
+                      // Debug: Print config response received
+                      if (debugCommands > 0) {
+                        printCommandDebug(cmdToSend, "sc");
+                      }
+                      
+                      // Output config as JSON for Python daemon (array format for compactness)
+                      // Format: {"type":"config","i":"RX121","d":[numBoards, boardVersion, fwVersion, secondsOnline, txPower, fireMsDuration, statusInterval]}
+                      Serial.print(F("{\"type\":\"config\",\"i\":\""));
+                      Serial.print(config->ident);
+                      Serial.print(F("\",\"d\":["));
+                      Serial.print(config->numBoards);
+                      Serial.print(F(","));
+                      Serial.print(config->boardVersion);
+                      Serial.print(F(","));
+                      Serial.print(config->fwVersion);
+                      Serial.print(F(","));
+                      Serial.print(config->secondsOnline);
+                      Serial.print(F(","));
+                      Serial.print(config->txPower);
+                      Serial.print(F(","));
+                      Serial.print(config->fireMsDuration);
+                      Serial.print(F(","));
+                      Serial.print(config->statusInterval);
+                      Serial.print(F(","));
+                      Serial.print(config->unsolicitedStatusCount);
+                      Serial.print(F(","));
+                      Serial.print(config->connTimeoutCount);
+                      Serial.println(F("]}"));
+                      
+                      // Track successful command
+                      pushCommandResult(r_from_msg, true);
+                      r_from_msg->consecutiveFailures = 0;
+                      
+                      if(debugMode > 0) {
+                        Serial.print(F("Got CONFIG after repeat ")); Serial.print(repeatIdx + 1); Serial.println(F(", stopping repeats"));
+                      }
+                      break;
                     }
-                    break;
+                  }
+                } else {
+                  // Other commands expect RECEIVER_STATUS as ACK
+                  if (msgType == RECEIVER_STATUS) {
+                    ReceiverStatusMessage* status = (ReceiverStatusMessage*)buf;
+                    ReceiverInfo* r_from_msg = getReceiverByIdent(String(status->ident), false);
+                    
+                    if (r_from_msg && r_from_msg->nodeID == responseTargetNodeID) {
+                      // Got response from target receiver - this is our ACK
+                      responseReceived = true;
+                      gotAck = true;
+                      awaitingResponseForCommand = false;
+                      
+                      // Debug: Print ACK received
+                      if (debugCommands > 0) {
+                        printCommandDebug(cmdToSend, "sa");
+                      }
+                      
+                      // Update receiver info
+                      r_from_msg->nodeID = status->nodeID; 
+                      r_from_msg->batteryLevel = status->batteryLevel;
+                      r_from_msg->showId = status->showState & 0x3FFF;
+                      r_from_msg->loadComplete = (status->showState & (1 << 14)) ? true : false;
+                      r_from_msg->startReady  = (status->showState & (1 << 15)) ? true : false;
+                      r_from_msg->lastMessageTime = now;
+                      r_from_msg->continuity[0] = status->cont64_0;
+                      r_from_msg->continuity[1] = status->cont64_1;
+                      
+                      // Track successful command
+                      pushCommandResult(r_from_msg, true);
+                      r_from_msg->consecutiveFailures = 0;
+                      
+                      if(debugMode > 0) {
+                        Serial.print(F("Got ACK after repeat ")); Serial.print(repeatIdx + 1); Serial.println(F(", stopping repeats"));
+                      }
+                      break;
+                    }
                   }
                 }
               }
@@ -1423,6 +1836,11 @@ void loop() {
             Serial.println(F("TX failed, skipping response wait"));
           }
           
+          // Debug: Print transmission failure
+          if (debugCommands > 0) {
+            printCommandDebug(cmdToSend, "sf");
+          }
+          
           // Track transmission failure - find receiver by nodeID
           for (uint8_t i = 0; i < numReceivers; i++) {
             if (receivers[i].nodeID == cmdToSend.targetNodeID) {
@@ -1442,7 +1860,8 @@ void loop() {
   if (now - lastPrintTime >= 1000) { 
     lastPrintTime = now;
     DynamicJsonDocument doc(1024 + (numReceivers * 256)); 
-    doc["timestamp"] = now;
+    doc["type"] = "status";
+    doc["t"] = now;  // Compressed: timestamp -> t
     doc["q"] = cmdQueueCount;
 
     uint32_t totalLatencySum = 0;
@@ -1455,18 +1874,31 @@ void loop() {
     }
     doc["l"] = avgLatency;
 
-    JsonArray receiversArray = doc.createNestedArray("receivers");
+    // Status format: {"type":"status","t":timestamp,"l":avgLatency,"r":[[ident, nodeID, battery, showId, loadComplete, startReady, lastMsgTime, latency, successPercent, [continuity0, continuity1]], ...]}
+    // Array index mapping for receiver data:
+    // 0: ident (string)
+    // 1: nodeID
+    // 2: batteryLevel
+    // 3: showId
+    // 4: loadComplete (0/1)
+    // 5: startReady (0/1)
+    // 6: lastMessageTime
+    // 7: latency
+    // 8: successPercent
+    // 9: continuity array [cont64_0, cont64_1]
+    JsonArray receiversArray = doc.createNestedArray("r");
     for (uint8_t i = 0; i < numReceivers; i++) {
-      JsonObject receiver = receiversArray.createNestedObject();
-      receiver["i"] = receivers[i].ident;
-      receiver["n"] = receivers[i].nodeID;
-      receiver["b"] = receivers[i].batteryLevel;
-      receiver["s"] = receivers[i].showId;
-      receiver["l"] = receivers[i].loadComplete ? 1 : 0; 
-      receiver["r"] = receivers[i].startReady ? 1 : 0;   
-      receiver["t"] = receivers[i].lastMessageTime;    
+      JsonArray receiver = receiversArray.createNestedArray();
       
+      receiver.add(receivers[i].ident);  // 0: ident
+      receiver.add(receivers[i].nodeID);  // 1: nodeID
+      receiver.add(receivers[i].batteryLevel);  // 2: batteryLevel
+      receiver.add(receivers[i].showId);  // 3: showId
+      receiver.add(receivers[i].loadComplete ? 1 : 0);  // 4: loadComplete
+      receiver.add(receivers[i].startReady ? 1 : 0);  // 5: startReady
+      receiver.add(receivers[i].lastMessageTime);  // 6: lastMessageTime
       
+      // Calculate latency
       uint32_t receiverTotalLatencySum = 0;
       int receiverAvgLatency = 0;
       if (receivers[i].latencySampleCount > 0) {
@@ -1475,12 +1907,13 @@ void loop() {
         }
         receiverAvgLatency = round((float)receiverTotalLatencySum / receivers[i].latencySampleCount);
       }
-      receiver["x"] = receiverAvgLatency;
+      receiver.add(receiverAvgLatency);  // 7: latency
       
       // Success percentage (0-100)
-      receiver["sp"] = calculateSuccessPercent(&receivers[i]);
+      receiver.add(calculateSuccessPercent(&receivers[i]));  // 8: successPercent
 
-      JsonArray continuityArray = receiver.createNestedArray("c");
+      // Continuity array
+      JsonArray continuityArray = receiver.createNestedArray();  // 9: continuity
       for (uint8_t j = 0; j < CONTINUITY_INDEX_CT; j++) {
         continuityArray.add(receivers[i].continuity[j]);
       }
@@ -1491,18 +1924,27 @@ void loop() {
   }
 
   
+  // Batch clock sync: sync one receiver at a time instead of all at once
+  // This prevents queue flooding with 10+ receivers
+  // Each receiver gets synced every (clockSyncIntervalMs * numReceivers) milliseconds
   if (now - lastScheduledClockSyncTime >= clockSyncIntervalMs) {
     lastScheduledClockSyncTime = now;
-    if (numReceivers > 0 && debugMode > 0) {
-        Serial.println(F("INFO: Queuing clock sync for all receivers."));
-    }
-    for (uint8_t i = 0; i < numReceivers; i++) {
-      if (receivers[i].nodeID != 0) { 
+    
+    static uint8_t syncIndex = 0;  // Rotate through receivers
+    if (numReceivers > 0) {
+      uint8_t targetIdx = syncIndex % numReceivers;
+      syncIndex++;
+      
+      if (receivers[targetIdx].nodeID != 0) {
+        if(debugMode > 0) {
+          Serial.print(F("INFO: Queuing clock sync for receiver "));
+          Serial.println(receivers[targetIdx].ident);
+        }
         QueuedCommand qc = {0};
-        qc.targetNodeID = receivers[i].nodeID;
+        qc.targetNodeID = receivers[targetIdx].nodeID;
         qc.messageType = CLOCK_SYNC;
         qc.sync_timestamp = now;
-        qc.repeat_count = 1;  // Ensure at least 1 repeat
+        qc.repeat_count = 1;
         enqueueCommand(qc);
       }
     }

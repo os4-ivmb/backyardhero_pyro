@@ -1,0 +1,1332 @@
+
+[2] Neutron Bomb
+  99.36% | -600 ms | vs [13] Saturday Night Special
+  48.84% | 8100 ms | vs [58] Wild Horses
+  38.69% | 10000 ms | vs [21] Peace Out
+  36.44% | 2900 ms | vs [26] Color Storm
+  33.96% | 600 ms | vs [23] City Crasher
+  33.00% | 4600 ms | vs [3] Occupy Mars
+  32.49% | 6200 ms | vs [52] Flourescent
+  32.12% | 6500 ms | vs [22] Colorful Whirlwind
+  31.82% | 6200 ms | vs [46] Azura Burst
+  31.72% | 8100 ms | vs [12] Ion Blaster
+  27.94% | -1300 ms | vs [47] Azurallure
+  27.78% | 6700 ms | vs [48] Howling Nishiki
+  27.78% | 8900 ms | vs [56] Thirsty Thursday
+  27.26% | 7400 ms | vs [20] Hot Hot Hot
+  27.15% | 7600 ms | vs [18] Hit the Road, Jack
+  26.41% | 5100 ms | vs [16] Strobing Willow
+  25.00% | 9600 ms | vs [17] Deep Ocean
+  23.14% | 5400 ms | vs [15] Super Crackle Rainbow
+  22.22% | 6100 ms | vs [1] Turn it Loose
+  22.22% | 6900 ms | vs [14] Star Chaser
+  22.22% | 9400 ms | vs [30] Breakthrough
+  22.08% | -100 ms | vs [32] Evil Priest
+  21.83% | 3600 ms | vs [24] Silver Screen
+  21.77% | 8300 ms | vs [29] Christmas Eve
+  21.63% | 9000 ms | vs [57] Colorful Skies
+  21.10% | 9900 ms | vs [59] Big Color
+  20.68% | 1500 ms | vs [28] Courageous!
+  20.06% | 8300 ms | vs [54] Blue Jacket
+  17.49% | 9400 ms | vs [19] High Falutin
+  16.67% | -3800 ms | vs [31] Naughty or Nice
+  16.67% | 4000 ms | vs [53] MOAB 9S
+  16.67% | -10000 ms | vs [49] No Way!
+  16.03% | -10000 ms | vs [11] Fiesta 99
+  9.09% | -7600 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+
+[13] Saturday Night Special
+  99.36% | 600 ms | vs [2] Neutron Bomb
+  49.92% | 8700 ms | vs [58] Wild Horses
+  37.94% | 3500 ms | vs [26] Color Storm
+  35.29% | 1200 ms | vs [23] City Crasher
+  33.33% | 8600 ms | vs [21] Peace Out
+  33.05% | 5200 ms | vs [3] Occupy Mars
+  32.73% | 8700 ms | vs [12] Ion Blaster
+  32.66% | 6800 ms | vs [52] Flourescent
+  31.88% | 4700 ms | vs [22] Colorful Whirlwind
+  27.78% | 7300 ms | vs [48] Howling Nishiki
+  27.48% | -700 ms | vs [47] Azurallure
+  27.42% | 8000 ms | vs [20] Hot Hot Hot
+  27.21% | 6400 ms | vs [56] Thirsty Thursday
+  27.16% | 5700 ms | vs [16] Strobing Willow
+  27.04% | 8200 ms | vs [18] Hit the Road, Jack
+  26.25% | 6800 ms | vs [46] Azura Burst
+  23.75% | -6800 ms | vs [17] Deep Ocean
+  22.22% | 7500 ms | vs [14] Star Chaser
+  22.22% | 10000 ms | vs [30] Breakthrough
+  22.09% | 500 ms | vs [32] Evil Priest
+  21.85% | 8900 ms | vs [29] Christmas Eve
+  21.75% | -4700 ms | vs [24] Silver Screen
+  21.11% | 6800 ms | vs [1] Turn it Loose
+  20.02% | 8900 ms | vs [54] Blue Jacket
+  19.05% | 2900 ms | vs [15] Super Crackle Rainbow
+  16.67% | -9500 ms | vs [11] Fiesta 99
+  16.67% | -3200 ms | vs [31] Naughty or Nice
+  16.67% | 4600 ms | vs [53] MOAB 9S
+  16.67% | 1000 ms | vs [57] Colorful Skies
+  16.67% | 3200 ms | vs [59] Big Color
+  16.67% | -9400 ms | vs [49] No Way!
+  15.66% | -1600 ms | vs [28] Courageous!
+  14.93% | 10000 ms | vs [19] High Falutin
+  9.09% | -7000 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+
+[30] Breakthrough
+  63.64% | -400 ms | vs [46] Azura Burst
+  45.66% | 300 ms | vs [21] Peace Out
+  44.44% | -3700 ms | vs [3] Occupy Mars
+  44.44% | 400 ms | vs [14] Star Chaser
+  44.44% | 800 ms | vs [29] Christmas Eve
+  44.44% | 1100 ms | vs [54] Blue Jacket
+  44.44% | -700 ms | vs [57] Colorful Skies
+  44.38% | 1400 ms | vs [59] Big Color
+  41.67% | -7100 ms | vs [52] Flourescent
+  40.00% | 4000 ms | vs [16] Strobing Willow
+  40.00% | 1400 ms | vs [28] Courageous!
+  38.36% | -1600 ms | vs [20] Hot Hot Hot
+  35.71% | -2600 ms | vs [12] Ion Blaster
+  33.33% | -3200 ms | vs [1] Turn it Loose
+  33.33% | -7800 ms | vs [24] Silver Screen
+  33.33% | 2100 ms | vs [48] Howling Nishiki
+  33.33% | -4400 ms | vs [53] MOAB 9S
+  31.25% | -400 ms | vs [26] Color Storm
+  30.00% | -6400 ms | vs [56] Thirsty Thursday
+  27.78% | -1100 ms | vs [58] Wild Horses
+  27.27% | 2300 ms | vs [23] City Crasher
+  26.67% | -100 ms | vs [22] Colorful Whirlwind
+  24.27% | 400 ms | vs [17] Deep Ocean
+  23.81% | -4200 ms | vs [15] Super Crackle Rainbow
+  22.73% | -9200 ms | vs [18] Hit the Road, Jack
+  22.22% | -9400 ms | vs [2] Neutron Bomb
+  22.22% | -10000 ms | vs [13] Saturday Night Special
+  18.18% | -8200 ms | vs [31] Naughty or Nice
+  14.29% | -9000 ms | vs [47] Azurallure
+  13.33% | 4000 ms | vs [11] Fiesta 99
+  12.86% | -1700 ms | vs [19] High Falutin
+  8.33% | -8800 ms | vs [32] Evil Priest
+  5.65% | -9900 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+  0.00% | 0 ms | vs [49] No Way!
+
+[46] Azura Burst
+  63.64% | 400 ms | vs [30] Breakthrough
+  46.30% | 300 ms | vs [22] Colorful Whirlwind
+  45.45% | -1800 ms | vs [54] Blue Jacket
+  45.45% | -300 ms | vs [57] Colorful Skies
+  45.45% | 8500 ms | vs [59] Big Color
+  45.27% | 4300 ms | vs [16] Strobing Willow
+  44.35% | -3200 ms | vs [3] Occupy Mars
+  43.44% | 1900 ms | vs [28] Courageous!
+  40.57% | -6500 ms | vs [52] Flourescent
+  38.46% | -1200 ms | vs [20] Hot Hot Hot
+  38.46% | 700 ms | vs [21] Peace Out
+  37.29% | -7200 ms | vs [26] Color Storm
+  36.36% | 600 ms | vs [29] Christmas Eve
+  36.23% | 900 ms | vs [56] Thirsty Thursday
+  36.23% | -2800 ms | vs [14] Star Chaser
+  35.48% | -10000 ms | vs [12] Ion Blaster
+  33.33% | 4700 ms | vs [1] Turn it Loose
+  33.33% | -2500 ms | vs [58] Wild Horses
+  31.82% | -6200 ms | vs [2] Neutron Bomb
+  28.57% | 800 ms | vs [15] Super Crackle Rainbow
+  27.27% | 2700 ms | vs [48] Howling Nishiki
+  27.27% | 400 ms | vs [53] MOAB 9S
+  27.26% | -800 ms | vs [23] City Crasher
+  26.52% | -8700 ms | vs [18] Hit the Road, Jack
+  26.25% | -6800 ms | vs [13] Saturday Night Special
+  20.67% | -4700 ms | vs [17] Deep Ocean
+  19.04% | -4100 ms | vs [47] Azurallure
+  18.18% | -3300 ms | vs [24] Silver Screen
+  18.18% | -4600 ms | vs [31] Naughty or Nice
+  16.67% | -6900 ms | vs [32] Evil Priest
+  15.79% | 0 ms | vs [19] High Falutin
+  12.65% | 4400 ms | vs [11] Fiesta 99
+  7.75% | -7200 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+  0.00% | 0 ms | vs [49] No Way!
+
+[57] Colorful Skies
+  55.56% | 2100 ms | vs [59] Big Color
+  45.45% | 300 ms | vs [46] Azura Burst
+  44.44% | -2900 ms | vs [3] Occupy Mars
+  44.44% | 700 ms | vs [30] Breakthrough
+  39.61% | 1200 ms | vs [16] Strobing Willow
+  38.46% | 1000 ms | vs [21] Peace Out
+  37.50% | 9200 ms | vs [29] Christmas Eve
+  37.50% | -5100 ms | vs [48] Howling Nishiki
+  37.50% | 1900 ms | vs [54] Blue Jacket
+  36.46% | -8500 ms | vs [53] MOAB 9S
+  35.71% | -6600 ms | vs [12] Ion Blaster
+  33.33% | -900 ms | vs [14] Star Chaser
+  33.33% | -6200 ms | vs [52] Flourescent
+  30.77% | -3000 ms | vs [20] Hot Hot Hot
+  30.00% | 7900 ms | vs [28] Courageous!
+  30.00% | -3700 ms | vs [56] Thirsty Thursday
+  27.74% | -2300 ms | vs [58] Wild Horses
+  26.67% | 3900 ms | vs [22] Colorful Whirlwind
+  25.00% | -4500 ms | vs [1] Turn it Loose
+  25.00% | -5700 ms | vs [24] Silver Screen
+  25.00% | -1100 ms | vs [26] Color Storm
+  22.58% | -8700 ms | vs [23] City Crasher
+  21.63% | -9000 ms | vs [2] Neutron Bomb
+  19.05% | -8400 ms | vs [15] Super Crackle Rainbow
+  18.18% | -9500 ms | vs [31] Naughty or Nice
+  17.56% | -2900 ms | vs [18] Hit the Road, Jack
+  16.67% | -1000 ms | vs [13] Saturday Night Special
+  16.67% | -8900 ms | vs [17] Deep Ocean
+  14.29% | 900 ms | vs [47] Azurallure
+  10.53% | 6000 ms | vs [19] High Falutin
+  8.33% | -6700 ms | vs [32] Evil Priest
+  6.67% | 8800 ms | vs [11] Fiesta 99
+  4.51% | -900 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+  0.00% | 0 ms | vs [49] No Way!
+
+[59] Big Color
+  55.56% | -2100 ms | vs [57] Colorful Skies
+  45.45% | -8500 ms | vs [46] Azura Burst
+  44.38% | -1400 ms | vs [30] Breakthrough
+  44.00% | 4400 ms | vs [29] Christmas Eve
+  42.77% | -7200 ms | vs [12] Ion Blaster
+  39.89% | -2400 ms | vs [16] Strobing Willow
+  37.93% | -1100 ms | vs [21] Peace Out
+  33.33% | -3400 ms | vs [3] Occupy Mars
+  33.33% | -100 ms | vs [14] Star Chaser
+  33.33% | -9200 ms | vs [24] Silver Screen
+  33.33% | -5700 ms | vs [48] Howling Nishiki
+  33.33% | -1000 ms | vs [52] Flourescent
+  33.33% | -700 ms | vs [53] MOAB 9S
+  31.54% | -6700 ms | vs [1] Turn it Loose
+  31.28% | -2900 ms | vs [54] Blue Jacket
+  30.77% | -5200 ms | vs [20] Hot Hot Hot
+  30.70% | -8200 ms | vs [58] Wild Horses
+  30.00% | 4400 ms | vs [28] Courageous!
+  30.00% | -3600 ms | vs [56] Thirsty Thursday
+  29.02% | -8300 ms | vs [26] Color Storm
+  25.19% | -3300 ms | vs [22] Colorful Whirlwind
+  22.15% | -9300 ms | vs [23] City Crasher
+  21.10% | -9900 ms | vs [2] Neutron Bomb
+  19.05% | -9100 ms | vs [15] Super Crackle Rainbow
+  18.57% | -9400 ms | vs [47] Azurallure
+  17.51% | -2700 ms | vs [18] Hit the Road, Jack
+  16.67% | -3200 ms | vs [13] Saturday Night Special
+  13.16% | 2400 ms | vs [19] High Falutin
+  12.30% | -8000 ms | vs [17] Deep Ocean
+  9.94% | 2700 ms | vs [11] Fiesta 99
+  9.09% | -6400 ms | vs [31] Naughty or Nice
+  8.33% | -8500 ms | vs [32] Evil Priest
+  5.54% | -6200 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+  0.00% | 0 ms | vs [49] No Way!
+
+[58] Wild Horses
+  49.92% | -8700 ms | vs [13] Saturday Night Special
+  48.84% | -8100 ms | vs [2] Neutron Bomb
+  43.53% | 3600 ms | vs [12] Ion Blaster
+  42.58% | -2900 ms | vs [15] Super Crackle Rainbow
+  38.83% | 5200 ms | vs [22] Colorful Whirlwind
+  38.10% | -2300 ms | vs [26] Color Storm
+  38.06% | -1800 ms | vs [1] Turn it Loose
+  37.88% | 4300 ms | vs [56] Thirsty Thursday
+  37.62% | -3400 ms | vs [3] Occupy Mars
+  36.36% | 1700 ms | vs [23] City Crasher
+  33.33% | -600 ms | vs [20] Hot Hot Hot
+  33.33% | 2500 ms | vs [46] Azura Burst
+  33.12% | -3500 ms | vs [14] Star Chaser
+  32.90% | 1600 ms | vs [52] Flourescent
+  32.82% | 7900 ms | vs [29] Christmas Eve
+  32.60% | 300 ms | vs [21] Peace Out
+  32.15% | 8400 ms | vs [16] Strobing Willow
+  31.71% | 2900 ms | vs [17] Deep Ocean
+  30.96% | -5300 ms | vs [18] Hit the Road, Jack
+  30.70% | 8200 ms | vs [59] Big Color
+  28.57% | 1500 ms | vs [47] Azurallure
+  27.78% | -6700 ms | vs [24] Silver Screen
+  27.78% | 1100 ms | vs [30] Breakthrough
+  27.78% | -6300 ms | vs [53] MOAB 9S
+  27.74% | 2300 ms | vs [57] Colorful Skies
+  27.42% | -5400 ms | vs [28] Courageous!
+  23.15% | -1000 ms | vs [19] High Falutin
+  22.22% | 300 ms | vs [48] Howling Nishiki
+  16.67% | -200 ms | vs [11] Fiesta 99
+  16.67% | 0 ms | vs [32] Evil Priest
+  16.67% | 8200 ms | vs [54] Blue Jacket
+  16.52% | -10000 ms | vs [31] Naughty or Nice
+  11.11% | -9200 ms | vs [49] No Way!
+  10.22% | 4500 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+
+[16] Strobing Willow
+  47.69% | -1200 ms | vs [52] Flourescent
+  45.27% | -4300 ms | vs [46] Azura Burst
+  40.00% | 400 ms | vs [3] Occupy Mars
+  40.00% | -4700 ms | vs [14] Star Chaser
+  40.00% | -4000 ms | vs [30] Breakthrough
+  40.00% | -1700 ms | vs [56] Thirsty Thursday
+  39.89% | 2400 ms | vs [59] Big Color
+  39.61% | -1200 ms | vs [57] Colorful Skies
+  38.04% | -1400 ms | vs [28] Courageous!
+  37.58% | 4200 ms | vs [21] Peace Out
+  32.15% | -8400 ms | vs [58] Wild Horses
+  30.77% | -9100 ms | vs [20] Hot Hot Hot
+  30.00% | -8600 ms | vs [24] Silver Screen
+  30.00% | 900 ms | vs [29] Christmas Eve
+  30.00% | -9700 ms | vs [48] Howling Nishiki
+  30.00% | -8300 ms | vs [53] MOAB 9S
+  30.00% | 2100 ms | vs [54] Blue Jacket
+  28.57% | -500 ms | vs [12] Ion Blaster
+  28.57% | -7000 ms | vs [15] Super Crackle Rainbow
+  27.27% | -7900 ms | vs [31] Naughty or Nice
+  27.16% | -5700 ms | vs [13] Saturday Night Special
+  26.67% | -6700 ms | vs [23] City Crasher
+  26.41% | -5100 ms | vs [2] Neutron Bomb
+  25.96% | -7500 ms | vs [22] Colorful Whirlwind
+  25.00% | 5800 ms | vs [1] Turn it Loose
+  25.00% | 0 ms | vs [26] Color Storm
+  20.67% | -1400 ms | vs [17] Deep Ocean
+  18.18% | -3100 ms | vs [18] Hit the Road, Jack
+  17.18% | -5300 ms | vs [47] Azurallure
+  13.16% | -5500 ms | vs [19] High Falutin
+  9.30% | 3800 ms | vs [11] Fiesta 99
+  8.33% | -9600 ms | vs [32] Evil Priest
+  6.79% | -8100 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+  0.00% | 0 ms | vs [49] No Way!
+
+[52] Flourescent
+  47.69% | 1200 ms | vs [16] Strobing Willow
+  41.67% | 1700 ms | vs [3] Occupy Mars
+  41.67% | 7100 ms | vs [30] Breakthrough
+  41.67% | -1500 ms | vs [56] Thirsty Thursday
+  41.59% | 3600 ms | vs [12] Ion Blaster
+  40.57% | 6500 ms | vs [46] Azura Burst
+  38.46% | -4000 ms | vs [20] Hot Hot Hot
+  37.80% | -3400 ms | vs [21] Peace Out
+  33.33% | -3500 ms | vs [1] Turn it Loose
+  33.33% | -3600 ms | vs [14] Star Chaser
+  33.33% | -100 ms | vs [28] Courageous!
+  33.33% | 2200 ms | vs [54] Blue Jacket
+  33.33% | 6200 ms | vs [57] Colorful Skies
+  33.33% | 1000 ms | vs [59] Big Color
+  32.96% | 2700 ms | vs [53] MOAB 9S
+  32.90% | -1600 ms | vs [58] Wild Horses
+  32.66% | -6800 ms | vs [13] Saturday Night Special
+  32.49% | -6200 ms | vs [2] Neutron Bomb
+  32.39% | -3000 ms | vs [22] Colorful Whirlwind
+  31.18% | 1400 ms | vs [26] Color Storm
+  30.79% | 100 ms | vs [23] City Crasher
+  28.57% | -5900 ms | vs [15] Super Crackle Rainbow
+  25.00% | 0 ms | vs [24] Silver Screen
+  25.00% | 9600 ms | vs [29] Christmas Eve
+  25.00% | -3200 ms | vs [31] Naughty or Nice
+  25.00% | 600 ms | vs [48] Howling Nishiki
+  22.83% | -3100 ms | vs [47] Azurallure
+  22.73% | 1600 ms | vs [18] Hit the Road, Jack
+  20.74% | -9200 ms | vs [17] Deep Ocean
+  18.39% | -2800 ms | vs [19] High Falutin
+  16.67% | -5300 ms | vs [32] Evil Priest
+  16.14% | 300 ms | vs [11] Fiesta 99
+  5.68% | 2800 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+  0.00% | 0 ms | vs [49] No Way!
+
+[28] Courageous!
+  46.92% | -500 ms | vs [56] Thirsty Thursday
+  43.44% | -1900 ms | vs [46] Azura Burst
+  40.00% | 4000 ms | vs [14] Star Chaser
+  40.00% | -1400 ms | vs [30] Breakthrough
+  38.46% | -2800 ms | vs [21] Peace Out
+  38.04% | 1400 ms | vs [16] Strobing Willow
+  33.33% | 100 ms | vs [52] Flourescent
+  30.00% | 3200 ms | vs [3] Occupy Mars
+  30.00% | -3500 ms | vs [29] Christmas Eve
+  30.00% | 1300 ms | vs [48] Howling Nishiki
+  30.00% | -7900 ms | vs [57] Colorful Skies
+  30.00% | -4400 ms | vs [59] Big Color
+  28.57% | -200 ms | vs [12] Ion Blaster
+  28.09% | 4700 ms | vs [54] Blue Jacket
+  27.42% | 5400 ms | vs [58] Wild Horses
+  25.87% | -3800 ms | vs [22] Colorful Whirlwind
+  24.90% | 2900 ms | vs [26] Color Storm
+  23.08% | -900 ms | vs [20] Hot Hot Hot
+  21.49% | -8600 ms | vs [23] City Crasher
+  20.83% | -8800 ms | vs [17] Deep Ocean
+  20.68% | -1500 ms | vs [2] Neutron Bomb
+  20.00% | -7300 ms | vs [24] Silver Screen
+  18.55% | -2800 ms | vs [47] Azurallure
+  18.18% | -8500 ms | vs [18] Hit the Road, Jack
+  18.18% | -6500 ms | vs [31] Naughty or Nice
+  17.63% | -3800 ms | vs [53] MOAB 9S
+  16.67% | -8500 ms | vs [1] Turn it Loose
+  15.66% | 1600 ms | vs [13] Saturday Night Special
+  15.20% | -6700 ms | vs [32] Evil Priest
+  13.65% | -1800 ms | vs [15] Super Crackle Rainbow
+  9.47% | 600 ms | vs [19] High Falutin
+  6.82% | -6800 ms | vs [51] 3 Minute Mayhem
+  6.50% | -3100 ms | vs [11] Fiesta 99
+  0.00% | 0 ms | vs [4] Be All & End All
+  0.00% | 0 ms | vs [49] No Way!
+
+[56] Thirsty Thursday
+  46.92% | 500 ms | vs [28] Courageous!
+  41.67% | 1500 ms | vs [52] Flourescent
+  40.00% | -4400 ms | vs [3] Occupy Mars
+  40.00% | 1700 ms | vs [16] Strobing Willow
+  39.69% | -600 ms | vs [29] Christmas Eve
+  38.46% | -2300 ms | vs [21] Peace Out
+  37.88% | -4300 ms | vs [58] Wild Horses
+  36.23% | -900 ms | vs [46] Azura Burst
+  33.33% | -5900 ms | vs [22] Colorful Whirlwind
+  30.77% | -800 ms | vs [20] Hot Hot Hot
+  30.64% | -4700 ms | vs [26] Color Storm
+  30.00% | 8200 ms | vs [14] Star Chaser
+  30.00% | -5200 ms | vs [24] Silver Screen
+  30.00% | 6400 ms | vs [30] Breakthrough
+  30.00% | 2000 ms | vs [48] Howling Nishiki
+  30.00% | 7300 ms | vs [54] Blue Jacket
+  30.00% | 3700 ms | vs [57] Colorful Skies
+  30.00% | 3600 ms | vs [59] Big Color
+  28.57% | 2600 ms | vs [12] Ion Blaster
+  27.78% | -8900 ms | vs [2] Neutron Bomb
+  27.74% | -4700 ms | vs [53] MOAB 9S
+  27.21% | -6400 ms | vs [13] Saturday Night Special
+  26.73% | -4900 ms | vs [23] City Crasher
+  25.00% | 2100 ms | vs [1] Turn it Loose
+  23.81% | -3600 ms | vs [15] Super Crackle Rainbow
+  20.98% | 1200 ms | vs [18] Hit the Road, Jack
+  19.63% | -5600 ms | vs [17] Deep Ocean
+  19.05% | 8200 ms | vs [47] Azurallure
+  18.18% | 400 ms | vs [31] Naughty or Nice
+  16.67% | -7900 ms | vs [32] Evil Priest
+  12.71% | 1100 ms | vs [19] High Falutin
+  9.51% | 3500 ms | vs [11] Fiesta 99
+  6.74% | -4500 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+  0.00% | 0 ms | vs [49] No Way!
+
+[22] Colorful Whirlwind
+  46.30% | -300 ms | vs [46] Azura Burst
+  40.00% | 2100 ms | vs [21] Peace Out
+  38.83% | -5200 ms | vs [58] Wild Horses
+  33.33% | 1900 ms | vs [1] Turn it Loose
+  33.33% | -200 ms | vs [3] Occupy Mars
+  33.33% | 6400 ms | vs [12] Ion Blaster
+  33.33% | -1500 ms | vs [20] Hot Hot Hot
+  33.33% | 5900 ms | vs [56] Thirsty Thursday
+  33.32% | 5400 ms | vs [29] Christmas Eve
+  32.39% | 3000 ms | vs [52] Flourescent
+  32.12% | -6500 ms | vs [2] Neutron Bomb
+  31.88% | -4700 ms | vs [13] Saturday Night Special
+  31.36% | 5600 ms | vs [23] City Crasher
+  31.25% | 1800 ms | vs [26] Color Storm
+  26.94% | -8100 ms | vs [18] Hit the Road, Jack
+  26.73% | -2500 ms | vs [17] Deep Ocean
+  26.67% | 8000 ms | vs [14] Star Chaser
+  26.67% | 100 ms | vs [30] Breakthrough
+  26.67% | -3600 ms | vs [48] Howling Nishiki
+  26.67% | -3900 ms | vs [57] Colorful Skies
+  25.96% | 7500 ms | vs [16] Strobing Willow
+  25.87% | 3800 ms | vs [28] Courageous!
+  25.19% | 3300 ms | vs [59] Big Color
+  22.75% | -5900 ms | vs [15] Super Crackle Rainbow
+  20.00% | -9600 ms | vs [24] Silver Screen
+  19.59% | 6000 ms | vs [54] Blue Jacket
+  19.13% | -7300 ms | vs [53] MOAB 9S
+  19.05% | -1200 ms | vs [47] Azurallure
+  15.01% | -500 ms | vs [19] High Falutin
+  13.33% | 3300 ms | vs [11] Fiesta 99
+  13.33% | -8400 ms | vs [31] Naughty or Nice
+  13.33% | -5400 ms | vs [32] Evil Priest
+  13.30% | -9700 ms | vs [49] No Way!
+  6.82% | -5000 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+
+[3] Occupy Mars
+  46.03% | -3100 ms | vs [21] Peace Out
+  44.44% | 3700 ms | vs [30] Breakthrough
+  44.44% | 2900 ms | vs [57] Colorful Skies
+  44.35% | 3200 ms | vs [46] Azura Burst
+  41.67% | -1700 ms | vs [52] Flourescent
+  40.00% | -400 ms | vs [16] Strobing Willow
+  40.00% | 4400 ms | vs [56] Thirsty Thursday
+  37.62% | 3400 ms | vs [58] Wild Horses
+  37.03% | -200 ms | vs [26] Color Storm
+  35.26% | 2800 ms | vs [12] Ion Blaster
+  33.33% | 9900 ms | vs [1] Turn it Loose
+  33.33% | -6000 ms | vs [14] Star Chaser
+  33.33% | 200 ms | vs [22] Colorful Whirlwind
+  33.33% | -9300 ms | vs [24] Silver Screen
+  33.33% | 6500 ms | vs [29] Christmas Eve
+  33.33% | 1500 ms | vs [54] Blue Jacket
+  33.33% | 3400 ms | vs [59] Big Color
+  33.05% | -5200 ms | vs [13] Saturday Night Special
+  33.00% | -4600 ms | vs [2] Neutron Bomb
+  30.77% | -8100 ms | vs [20] Hot Hot Hot
+  30.00% | -3200 ms | vs [28] Courageous!
+  27.27% | 1000 ms | vs [23] City Crasher
+  23.81% | -9100 ms | vs [15] Super Crackle Rainbow
+  22.22% | -8800 ms | vs [48] Howling Nishiki
+  22.22% | -8900 ms | vs [53] MOAB 9S
+  18.92% | -1100 ms | vs [47] Azurallure
+  18.18% | -6700 ms | vs [18] Hit the Road, Jack
+  18.18% | -8400 ms | vs [31] Naughty or Nice
+  16.67% | -8100 ms | vs [32] Evil Priest
+  16.30% | 9800 ms | vs [17] Deep Ocean
+  13.16% | -7900 ms | vs [19] High Falutin
+  10.00% | -7600 ms | vs [11] Fiesta 99
+  5.68% | 3200 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+  0.00% | 0 ms | vs [49] No Way!
+
+[21] Peace Out
+  46.03% | 3100 ms | vs [3] Occupy Mars
+  45.66% | -300 ms | vs [30] Breakthrough
+  44.92% | -2600 ms | vs [20] Hot Hot Hot
+  43.08% | -700 ms | vs [26] Color Storm
+  40.78% | 5100 ms | vs [12] Ion Blaster
+  40.00% | -2100 ms | vs [22] Colorful Whirlwind
+  38.69% | -10000 ms | vs [2] Neutron Bomb
+  38.46% | -1900 ms | vs [1] Turn it Loose
+  38.46% | 2800 ms | vs [28] Courageous!
+  38.46% | -700 ms | vs [46] Azura Burst
+  38.46% | 2300 ms | vs [56] Thirsty Thursday
+  38.46% | -1000 ms | vs [57] Colorful Skies
+  37.93% | 1100 ms | vs [59] Big Color
+  37.80% | 3400 ms | vs [52] Flourescent
+  37.58% | -4200 ms | vs [16] Strobing Willow
+  36.08% | 1200 ms | vs [54] Blue Jacket
+  33.33% | -8600 ms | vs [13] Saturday Night Special
+  33.33% | 1600 ms | vs [15] Super Crackle Rainbow
+  32.60% | -300 ms | vs [58] Wild Horses
+  31.44% | 2300 ms | vs [23] City Crasher
+  30.77% | 3700 ms | vs [14] Star Chaser
+  30.77% | -9800 ms | vs [24] Silver Screen
+  30.77% | -9400 ms | vs [48] Howling Nishiki
+  30.77% | -4700 ms | vs [53] MOAB 9S
+  29.40% | 5700 ms | vs [29] Christmas Eve
+  27.23% | -1500 ms | vs [18] Hit the Road, Jack
+  23.89% | -1800 ms | vs [17] Deep Ocean
+  23.23% | -6700 ms | vs [47] Azurallure
+  18.42% | -5200 ms | vs [19] High Falutin
+  15.38% | -7300 ms | vs [31] Naughty or Nice
+  15.38% | -9000 ms | vs [32] Evil Priest
+  13.33% | -500 ms | vs [11] Fiesta 99
+  7.69% | -9000 ms | vs [49] No Way!
+  6.57% | -4200 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+
+[54] Blue Jacket
+  45.45% | 1800 ms | vs [46] Azura Burst
+  44.44% | -1100 ms | vs [30] Breakthrough
+  37.50% | -3100 ms | vs [29] Christmas Eve
+  37.50% | 2900 ms | vs [48] Howling Nishiki
+  37.50% | -1900 ms | vs [57] Colorful Skies
+  36.08% | -1200 ms | vs [21] Peace Out
+  33.33% | -1500 ms | vs [3] Occupy Mars
+  33.33% | -2200 ms | vs [52] Flourescent
+  33.31% | -1000 ms | vs [14] Star Chaser
+  31.28% | 2900 ms | vs [59] Big Color
+  30.00% | -2100 ms | vs [16] Strobing Willow
+  30.00% | -7300 ms | vs [56] Thirsty Thursday
+  28.09% | -4700 ms | vs [28] Courageous!
+  26.67% | -3800 ms | vs [12] Ion Blaster
+  25.68% | -8200 ms | vs [53] MOAB 9S
+  24.18% | -1200 ms | vs [1] Turn it Loose
+  23.08% | -4700 ms | vs [20] Hot Hot Hot
+  20.06% | -8300 ms | vs [2] Neutron Bomb
+  20.02% | -8900 ms | vs [13] Saturday Night Special
+  19.59% | -6000 ms | vs [22] Colorful Whirlwind
+  18.72% | -9100 ms | vs [26] Color Storm
+  18.18% | -6200 ms | vs [31] Naughty or Nice
+  17.66% | 2600 ms | vs [15] Super Crackle Rainbow
+  16.79% | 4300 ms | vs [47] Azurallure
+  16.67% | -8200 ms | vs [58] Wild Horses
+  15.96% | -3500 ms | vs [23] City Crasher
+  15.52% | -8500 ms | vs [17] Deep Ocean
+  13.64% | -2600 ms | vs [18] Hit the Road, Jack
+  12.50% | -3000 ms | vs [24] Silver Screen
+  8.33% | -6400 ms | vs [32] Evil Priest
+  7.43% | -300 ms | vs [19] High Falutin
+  6.61% | 2700 ms | vs [11] Fiesta 99
+  5.68% | 0 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+  0.00% | 0 ms | vs [49] No Way!
+
+[20] Hot Hot Hot
+  44.92% | 2600 ms | vs [21] Peace Out
+  38.46% | 1200 ms | vs [46] Azura Burst
+  38.46% | 4000 ms | vs [52] Flourescent
+  38.36% | 1600 ms | vs [30] Breakthrough
+  37.27% | -2000 ms | vs [26] Color Storm
+  35.71% | 800 ms | vs [12] Ion Blaster
+  33.33% | 1500 ms | vs [22] Colorful Whirlwind
+  33.33% | 600 ms | vs [58] Wild Horses
+  30.77% | -1600 ms | vs [1] Turn it Loose
+  30.77% | 8100 ms | vs [3] Occupy Mars
+  30.77% | 9100 ms | vs [16] Strobing Willow
+  30.77% | 800 ms | vs [56] Thirsty Thursday
+  30.77% | 3000 ms | vs [57] Colorful Skies
+  30.77% | 5200 ms | vs [59] Big Color
+  30.54% | -3900 ms | vs [14] Star Chaser
+  28.70% | -5900 ms | vs [17] Deep Ocean
+  27.42% | -8000 ms | vs [13] Saturday Night Special
+  27.26% | -7400 ms | vs [2] Neutron Bomb
+  27.25% | -4000 ms | vs [23] City Crasher
+  27.11% | 1000 ms | vs [18] Hit the Road, Jack
+  23.08% | 900 ms | vs [28] Courageous!
+  23.08% | -3400 ms | vs [29] Christmas Eve
+  23.08% | -8800 ms | vs [48] Howling Nishiki
+  23.08% | 4700 ms | vs [54] Blue Jacket
+  22.47% | 3100 ms | vs [31] Naughty or Nice
+  21.54% | -8300 ms | vs [53] MOAB 9S
+  19.05% | 2500 ms | vs [15] Super Crackle Rainbow
+  18.96% | 8900 ms | vs [47] Azurallure
+  15.38% | -9400 ms | vs [24] Silver Screen
+  15.38% | -3900 ms | vs [32] Evil Priest
+  12.26% | -5900 ms | vs [19] High Falutin
+  9.89% | 1400 ms | vs [11] Fiesta 99
+  7.93% | 6800 ms | vs [51] 3 Minute Mayhem
+  7.69% | -9500 ms | vs [49] No Way!
+  0.00% | 0 ms | vs [4] Be All & End All
+
+[14] Star Chaser
+  44.44% | -400 ms | vs [30] Breakthrough
+  44.44% | 6300 ms | vs [53] MOAB 9S
+  40.55% | -6000 ms | vs [1] Turn it Loose
+  40.00% | 4700 ms | vs [16] Strobing Willow
+  40.00% | -4000 ms | vs [28] Courageous!
+  36.23% | 2800 ms | vs [46] Azura Burst
+  35.21% | -7100 ms | vs [12] Ion Blaster
+  33.33% | 6000 ms | vs [3] Occupy Mars
+  33.33% | -10000 ms | vs [24] Silver Screen
+  33.33% | 6400 ms | vs [29] Christmas Eve
+  33.33% | -5400 ms | vs [48] Howling Nishiki
+  33.33% | 3600 ms | vs [52] Flourescent
+  33.33% | 900 ms | vs [57] Colorful Skies
+  33.33% | 100 ms | vs [59] Big Color
+  33.31% | 1000 ms | vs [54] Blue Jacket
+  33.12% | 3500 ms | vs [58] Wild Horses
+  31.25% | -800 ms | vs [26] Color Storm
+  30.77% | -3700 ms | vs [21] Peace Out
+  30.54% | 3900 ms | vs [20] Hot Hot Hot
+  30.00% | -8200 ms | vs [56] Thirsty Thursday
+  26.89% | -2200 ms | vs [23] City Crasher
+  26.67% | -8000 ms | vs [22] Colorful Whirlwind
+  22.73% | -7500 ms | vs [18] Hit the Road, Jack
+  22.22% | -6900 ms | vs [2] Neutron Bomb
+  22.22% | -7500 ms | vs [13] Saturday Night Special
+  19.26% | -3500 ms | vs [17] Deep Ocean
+  19.05% | -1500 ms | vs [15] Super Crackle Rainbow
+  18.35% | -3400 ms | vs [47] Azurallure
+  18.18% | -3300 ms | vs [31] Naughty or Nice
+  16.67% | -10000 ms | vs [32] Evil Priest
+  13.33% | -1700 ms | vs [11] Fiesta 99
+  13.16% | -7400 ms | vs [19] High Falutin
+  11.11% | -9600 ms | vs [49] No Way!
+  5.68% | -8100 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+
+[29] Christmas Eve
+  44.44% | -800 ms | vs [30] Breakthrough
+  44.00% | -4400 ms | vs [59] Big Color
+  39.69% | 600 ms | vs [56] Thirsty Thursday
+  37.50% | 1400 ms | vs [48] Howling Nishiki
+  37.50% | 3100 ms | vs [54] Blue Jacket
+  37.50% | -9200 ms | vs [57] Colorful Skies
+  36.62% | -5200 ms | vs [53] MOAB 9S
+  36.36% | -600 ms | vs [46] Azura Burst
+  35.71% | -1600 ms | vs [12] Ion Blaster
+  33.33% | -6500 ms | vs [3] Occupy Mars
+  33.33% | -6400 ms | vs [14] Star Chaser
+  33.32% | -5400 ms | vs [22] Colorful Whirlwind
+  33.25% | -3400 ms | vs [1] Turn it Loose
+  32.82% | -7900 ms | vs [58] Wild Horses
+  30.00% | -900 ms | vs [16] Strobing Willow
+  30.00% | 3500 ms | vs [28] Courageous!
+  29.40% | -5700 ms | vs [21] Peace Out
+  26.69% | -2300 ms | vs [18] Hit the Road, Jack
+  25.00% | -4300 ms | vs [24] Silver Screen
+  25.00% | -9600 ms | vs [52] Flourescent
+  23.69% | -1100 ms | vs [26] Color Storm
+  23.08% | 3400 ms | vs [20] Hot Hot Hot
+  21.85% | -8900 ms | vs [13] Saturday Night Special
+  21.78% | -7800 ms | vs [23] City Crasher
+  21.77% | -8300 ms | vs [2] Neutron Bomb
+  18.87% | -9100 ms | vs [47] Azurallure
+  18.05% | -2000 ms | vs [15] Super Crackle Rainbow
+  16.35% | -2300 ms | vs [17] Deep Ocean
+  12.92% | -2000 ms | vs [11] Fiesta 99
+  12.20% | -1900 ms | vs [19] High Falutin
+  9.09% | -10000 ms | vs [31] Naughty or Nice
+  8.33% | -8100 ms | vs [32] Evil Priest
+  4.55% | -7700 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+  0.00% | 0 ms | vs [49] No Way!
+
+[53] MOAB 9S
+  44.44% | -6300 ms | vs [14] Star Chaser
+  37.50% | 6600 ms | vs [48] Howling Nishiki
+  36.62% | 5200 ms | vs [29] Christmas Eve
+  36.46% | 8500 ms | vs [57] Colorful Skies
+  33.33% | 4400 ms | vs [30] Breakthrough
+  33.33% | 700 ms | vs [59] Big Color
+  32.96% | -2700 ms | vs [52] Flourescent
+  30.77% | 4700 ms | vs [21] Peace Out
+  30.00% | 8300 ms | vs [16] Strobing Willow
+  27.78% | 6300 ms | vs [58] Wild Horses
+  27.74% | 4700 ms | vs [56] Thirsty Thursday
+  27.27% | -400 ms | vs [46] Azura Burst
+  25.68% | 8200 ms | vs [54] Blue Jacket
+  23.96% | -2300 ms | vs [24] Silver Screen
+  23.70% | 400 ms | vs [1] Turn it Loose
+  22.22% | 8900 ms | vs [3] Occupy Mars
+  21.54% | 8300 ms | vs [20] Hot Hot Hot
+  21.43% | 2000 ms | vs [12] Ion Blaster
+  19.13% | 7300 ms | vs [22] Colorful Whirlwind
+  18.75% | 1800 ms | vs [26] Color Storm
+  18.18% | 1500 ms | vs [23] City Crasher
+  17.70% | -7800 ms | vs [31] Naughty or Nice
+  17.63% | 3800 ms | vs [28] Courageous!
+  16.67% | -4000 ms | vs [2] Neutron Bomb
+  16.67% | -4600 ms | vs [13] Saturday Night Special
+  16.67% | 4800 ms | vs [17] Deep Ocean
+  16.67% | 1900 ms | vs [32] Evil Priest
+  14.29% | -9400 ms | vs [49] No Way!
+  13.64% | -1900 ms | vs [18] Hit the Road, Jack
+  13.35% | 8100 ms | vs [15] Super Crackle Rainbow
+  9.52% | 8100 ms | vs [47] Azurallure
+  6.01% | 7100 ms | vs [11] Fiesta 99
+  5.26% | 5500 ms | vs [19] High Falutin
+  3.41% | 4700 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+
+[12] Ion Blaster
+  43.53% | -3600 ms | vs [58] Wild Horses
+  42.77% | 7200 ms | vs [59] Big Color
+  41.59% | -3600 ms | vs [52] Flourescent
+  40.78% | -5100 ms | vs [21] Peace Out
+  36.75% | -3700 ms | vs [26] Color Storm
+  35.71% | -800 ms | vs [20] Hot Hot Hot
+  35.71% | 1600 ms | vs [29] Christmas Eve
+  35.71% | 2600 ms | vs [30] Breakthrough
+  35.71% | 6600 ms | vs [57] Colorful Skies
+  35.48% | 10000 ms | vs [46] Azura Burst
+  35.26% | -2800 ms | vs [3] Occupy Mars
+  35.21% | 7100 ms | vs [14] Star Chaser
+  34.64% | 1800 ms | vs [1] Turn it Loose
+  33.33% | -6400 ms | vs [22] Colorful Whirlwind
+  32.73% | -8700 ms | vs [13] Saturday Night Special
+  31.82% | -9400 ms | vs [23] City Crasher
+  31.72% | -8100 ms | vs [2] Neutron Bomb
+  28.57% | 500 ms | vs [16] Strobing Willow
+  28.57% | 200 ms | vs [28] Courageous!
+  28.57% | -2600 ms | vs [56] Thirsty Thursday
+  28.06% | -6100 ms | vs [24] Silver Screen
+  26.91% | -9400 ms | vs [15] Super Crackle Rainbow
+  26.67% | 3800 ms | vs [54] Blue Jacket
+  23.87% | -6800 ms | vs [17] Deep Ocean
+  23.81% | -9400 ms | vs [47] Azurallure
+  22.67% | -4600 ms | vs [18] Hit the Road, Jack
+  21.43% | 1600 ms | vs [48] Howling Nishiki
+  21.43% | -2000 ms | vs [53] MOAB 9S
+  18.02% | -400 ms | vs [19] High Falutin
+  14.29% | -6200 ms | vs [31] Naughty or Nice
+  14.29% | -7100 ms | vs [32] Evil Priest
+  13.33% | 5500 ms | vs [11] Fiesta 99
+  5.67% | -2400 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+  0.00% | 0 ms | vs [49] No Way!
+
+[26] Color Storm
+  43.08% | 700 ms | vs [21] Peace Out
+  38.10% | 2300 ms | vs [58] Wild Horses
+  37.94% | -3500 ms | vs [13] Saturday Night Special
+  37.34% | -7200 ms | vs [15] Super Crackle Rainbow
+  37.29% | 7200 ms | vs [46] Azura Burst
+  37.27% | 2000 ms | vs [20] Hot Hot Hot
+  37.03% | 200 ms | vs [3] Occupy Mars
+  36.75% | 3700 ms | vs [12] Ion Blaster
+  36.44% | -2900 ms | vs [2] Neutron Bomb
+  35.31% | -1100 ms | vs [23] City Crasher
+  31.25% | 800 ms | vs [14] Star Chaser
+  31.25% | -1800 ms | vs [22] Colorful Whirlwind
+  31.25% | 400 ms | vs [30] Breakthrough
+  31.18% | -1400 ms | vs [52] Flourescent
+  30.84% | -8600 ms | vs [18] Hit the Road, Jack
+  30.64% | 4700 ms | vs [56] Thirsty Thursday
+  29.02% | 8300 ms | vs [59] Big Color
+  27.55% | -9800 ms | vs [47] Azurallure
+  26.83% | -3100 ms | vs [17] Deep Ocean
+  25.00% | -1500 ms | vs [1] Turn it Loose
+  25.00% | 0 ms | vs [16] Strobing Willow
+  25.00% | 1100 ms | vs [57] Colorful Skies
+  24.90% | -2900 ms | vs [28] Courageous!
+  24.36% | -8000 ms | vs [32] Evil Priest
+  23.69% | 1100 ms | vs [29] Christmas Eve
+  18.75% | -3600 ms | vs [24] Silver Screen
+  18.75% | -800 ms | vs [31] Naughty or Nice
+  18.75% | -9700 ms | vs [48] Howling Nishiki
+  18.75% | -1800 ms | vs [53] MOAB 9S
+  18.72% | 9100 ms | vs [54] Blue Jacket
+  17.89% | -8700 ms | vs [19] High Falutin
+  13.33% | -2500 ms | vs [11] Fiesta 99
+  12.50% | -8600 ms | vs [49] No Way!
+  9.08% | -3700 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+
+[15] Super Crackle Rainbow
+  42.58% | 2900 ms | vs [58] Wild Horses
+  37.34% | 7200 ms | vs [26] Color Storm
+  36.13% | -3300 ms | vs [17] Deep Ocean
+  33.33% | -1600 ms | vs [21] Peace Out
+  31.15% | -5000 ms | vs [18] Hit the Road, Jack
+  28.57% | 7000 ms | vs [16] Strobing Willow
+  28.57% | -800 ms | vs [46] Azura Burst
+  28.57% | 5900 ms | vs [52] Flourescent
+  28.38% | 4500 ms | vs [47] Azurallure
+  27.27% | 1600 ms | vs [23] City Crasher
+  26.91% | 9400 ms | vs [12] Ion Blaster
+  23.81% | 9100 ms | vs [3] Occupy Mars
+  23.81% | 4200 ms | vs [30] Breakthrough
+  23.81% | 3600 ms | vs [56] Thirsty Thursday
+  23.14% | -5400 ms | vs [2] Neutron Bomb
+  22.75% | 5900 ms | vs [22] Colorful Whirlwind
+  19.05% | -2900 ms | vs [13] Saturday Night Special
+  19.05% | 1500 ms | vs [14] Star Chaser
+  19.05% | -2500 ms | vs [20] Hot Hot Hot
+  19.05% | -8300 ms | vs [48] Howling Nishiki
+  19.05% | 8400 ms | vs [57] Colorful Skies
+  19.05% | 9100 ms | vs [59] Big Color
+  19.05% | -8200 ms | vs [49] No Way!
+  18.62% | -9100 ms | vs [31] Naughty or Nice
+  18.05% | 2000 ms | vs [29] Christmas Eve
+  18.01% | 1300 ms | vs [1] Turn it Loose
+  17.66% | -2600 ms | vs [54] Blue Jacket
+  16.83% | -3800 ms | vs [24] Silver Screen
+  14.55% | 1200 ms | vs [19] High Falutin
+  14.29% | 9800 ms | vs [32] Evil Priest
+  13.65% | 1800 ms | vs [28] Courageous!
+  13.35% | -8100 ms | vs [53] MOAB 9S
+  13.08% | -8800 ms | vs [11] Fiesta 99
+  9.09% | 3300 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+
+[1] Turn it Loose
+  41.67% | -4300 ms | vs [48] Howling Nishiki
+  40.55% | 6000 ms | vs [14] Star Chaser
+  38.46% | 1900 ms | vs [21] Peace Out
+  38.06% | 1800 ms | vs [58] Wild Horses
+  34.64% | -1800 ms | vs [12] Ion Blaster
+  33.33% | -9900 ms | vs [3] Occupy Mars
+  33.33% | -1900 ms | vs [22] Colorful Whirlwind
+  33.33% | 3200 ms | vs [30] Breakthrough
+  33.33% | -4700 ms | vs [46] Azura Burst
+  33.33% | 3500 ms | vs [52] Flourescent
+  33.25% | 3400 ms | vs [29] Christmas Eve
+  31.54% | 6700 ms | vs [59] Big Color
+  30.77% | 1600 ms | vs [20] Hot Hot Hot
+  25.00% | -5800 ms | vs [16] Strobing Willow
+  25.00% | 1500 ms | vs [26] Color Storm
+  25.00% | -2100 ms | vs [56] Thirsty Thursday
+  25.00% | 4500 ms | vs [57] Colorful Skies
+  24.18% | 1200 ms | vs [54] Blue Jacket
+  23.70% | -400 ms | vs [53] MOAB 9S
+  22.73% | -8400 ms | vs [18] Hit the Road, Jack
+  22.49% | 3700 ms | vs [23] City Crasher
+  22.22% | -6100 ms | vs [2] Neutron Bomb
+  21.11% | -6800 ms | vs [13] Saturday Night Special
+  20.00% | -1800 ms | vs [17] Deep Ocean
+  19.05% | -900 ms | vs [47] Azurallure
+  18.01% | -1300 ms | vs [15] Super Crackle Rainbow
+  16.67% | 10000 ms | vs [24] Silver Screen
+  16.67% | 8500 ms | vs [28] Courageous!
+  16.67% | -10000 ms | vs [31] Naughty or Nice
+  16.67% | -8100 ms | vs [32] Evil Priest
+  9.59% | 200 ms | vs [19] High Falutin
+  8.33% | -9800 ms | vs [49] No Way!
+  6.82% | -4500 ms | vs [51] 3 Minute Mayhem
+  6.62% | 2900 ms | vs [11] Fiesta 99
+  0.00% | 0 ms | vs [4] Be All & End All
+
+[48] Howling Nishiki
+  41.67% | 4300 ms | vs [1] Turn it Loose
+  37.50% | 1400 ms | vs [24] Silver Screen
+  37.50% | -1400 ms | vs [29] Christmas Eve
+  37.50% | -6600 ms | vs [53] MOAB 9S
+  37.50% | -2900 ms | vs [54] Blue Jacket
+  37.50% | 5100 ms | vs [57] Colorful Skies
+  33.33% | 5400 ms | vs [14] Star Chaser
+  33.33% | -2100 ms | vs [30] Breakthrough
+  33.33% | 5700 ms | vs [59] Big Color
+  30.77% | 9400 ms | vs [21] Peace Out
+  30.00% | 9700 ms | vs [16] Strobing Willow
+  30.00% | -1300 ms | vs [28] Courageous!
+  30.00% | -2000 ms | vs [56] Thirsty Thursday
+  27.78% | -6700 ms | vs [2] Neutron Bomb
+  27.78% | -7300 ms | vs [13] Saturday Night Special
+  27.27% | -2700 ms | vs [46] Azura Burst
+  26.67% | 3600 ms | vs [22] Colorful Whirlwind
+  25.00% | -9800 ms | vs [32] Evil Priest
+  25.00% | -600 ms | vs [52] Flourescent
+  25.00% | -9400 ms | vs [49] No Way!
+  23.08% | 8800 ms | vs [20] Hot Hot Hot
+  22.67% | 5900 ms | vs [18] Hit the Road, Jack
+  22.22% | 8800 ms | vs [3] Occupy Mars
+  22.22% | -300 ms | vs [58] Wild Horses
+  21.43% | -1600 ms | vs [12] Ion Blaster
+  20.83% | -100 ms | vs [17] Deep Ocean
+  19.05% | 8300 ms | vs [15] Super Crackle Rainbow
+  18.75% | 9700 ms | vs [26] Color Storm
+  18.18% | 7000 ms | vs [23] City Crasher
+  15.79% | -700 ms | vs [19] High Falutin
+  14.29% | 9800 ms | vs [47] Azurallure
+  10.00% | -200 ms | vs [11] Fiesta 99
+  9.09% | 9000 ms | vs [31] Naughty or Nice
+  5.68% | -700 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+
+[18] Hit the Road, Jack
+  40.59% | 3800 ms | vs [23] City Crasher
+  37.48% | -7100 ms | vs [17] Deep Ocean
+  31.15% | 5000 ms | vs [15] Super Crackle Rainbow
+  30.96% | 5300 ms | vs [58] Wild Horses
+  30.84% | 8600 ms | vs [26] Color Storm
+  27.27% | -3400 ms | vs [47] Azurallure
+  27.23% | 1500 ms | vs [21] Peace Out
+  27.15% | -7600 ms | vs [2] Neutron Bomb
+  27.11% | -1000 ms | vs [20] Hot Hot Hot
+  27.04% | -8200 ms | vs [13] Saturday Night Special
+  26.94% | 8100 ms | vs [22] Colorful Whirlwind
+  26.69% | 2300 ms | vs [29] Christmas Eve
+  26.52% | 8700 ms | vs [46] Azura Burst
+  22.73% | 8400 ms | vs [1] Turn it Loose
+  22.73% | 7500 ms | vs [14] Star Chaser
+  22.73% | 9200 ms | vs [30] Breakthrough
+  22.73% | -1600 ms | vs [52] Flourescent
+  22.67% | -5900 ms | vs [48] Howling Nishiki
+  22.67% | 4600 ms | vs [12] Ion Blaster
+  20.98% | -1200 ms | vs [56] Thirsty Thursday
+  20.68% | 5200 ms | vs [19] High Falutin
+  19.33% | -3800 ms | vs [11] Fiesta 99
+  18.18% | 6700 ms | vs [3] Occupy Mars
+  18.18% | 3100 ms | vs [16] Strobing Willow
+  18.18% | 8500 ms | vs [28] Courageous!
+  17.96% | 4000 ms | vs [32] Evil Priest
+  17.56% | 2900 ms | vs [57] Colorful Skies
+  17.51% | 2700 ms | vs [59] Big Color
+  13.64% | -9500 ms | vs [24] Silver Screen
+  13.64% | 4200 ms | vs [31] Naughty or Nice
+  13.64% | 1900 ms | vs [53] MOAB 9S
+  13.64% | 2600 ms | vs [54] Blue Jacket
+  13.64% | -5300 ms | vs [49] No Way!
+  11.23% | -4600 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+
+[23] City Crasher
+  40.59% | -3800 ms | vs [18] Hit the Road, Jack
+  36.72% | -1900 ms | vs [17] Deep Ocean
+  36.36% | -1700 ms | vs [58] Wild Horses
+  35.31% | 1100 ms | vs [26] Color Storm
+  35.29% | -1200 ms | vs [13] Saturday Night Special
+  33.96% | -600 ms | vs [2] Neutron Bomb
+  31.82% | 9400 ms | vs [12] Ion Blaster
+  31.44% | -2300 ms | vs [21] Peace Out
+  31.36% | -5600 ms | vs [22] Colorful Whirlwind
+  30.80% | -4100 ms | vs [47] Azurallure
+  30.79% | -100 ms | vs [52] Flourescent
+  27.27% | -1000 ms | vs [3] Occupy Mars
+  27.27% | -1600 ms | vs [15] Super Crackle Rainbow
+  27.27% | -2300 ms | vs [30] Breakthrough
+  27.26% | 800 ms | vs [46] Azura Burst
+  27.25% | 4000 ms | vs [20] Hot Hot Hot
+  26.89% | 2200 ms | vs [14] Star Chaser
+  26.73% | 4900 ms | vs [56] Thirsty Thursday
+  26.67% | 6700 ms | vs [16] Strobing Willow
+  22.58% | 8700 ms | vs [57] Colorful Skies
+  22.49% | -3700 ms | vs [1] Turn it Loose
+  22.15% | 9300 ms | vs [59] Big Color
+  21.78% | 7800 ms | vs [29] Christmas Eve
+  21.49% | 8600 ms | vs [28] Courageous!
+  18.18% | -10000 ms | vs [24] Silver Screen
+  18.18% | -7000 ms | vs [48] Howling Nishiki
+  18.18% | -1500 ms | vs [53] MOAB 9S
+  18.11% | -8800 ms | vs [19] High Falutin
+  16.49% | -2300 ms | vs [11] Fiesta 99
+  15.96% | 3500 ms | vs [54] Blue Jacket
+  13.64% | 2000 ms | vs [31] Naughty or Nice
+  11.27% | 400 ms | vs [51] 3 Minute Mayhem
+  9.09% | -9500 ms | vs [32] Evil Priest
+  4.55% | -9200 ms | vs [49] No Way!
+  0.00% | 0 ms | vs [4] Be All & End All
+
+[24] Silver Screen
+  37.50% | -1400 ms | vs [48] Howling Nishiki
+  33.33% | 9300 ms | vs [3] Occupy Mars
+  33.33% | 10000 ms | vs [14] Star Chaser
+  33.33% | 7800 ms | vs [30] Breakthrough
+  33.33% | 9200 ms | vs [59] Big Color
+  30.77% | 9800 ms | vs [21] Peace Out
+  30.00% | 8600 ms | vs [16] Strobing Willow
+  30.00% | 5200 ms | vs [56] Thirsty Thursday
+  28.06% | 6100 ms | vs [12] Ion Blaster
+  27.78% | 6700 ms | vs [58] Wild Horses
+  25.00% | 4300 ms | vs [29] Christmas Eve
+  25.00% | 0 ms | vs [52] Flourescent
+  25.00% | 5700 ms | vs [57] Colorful Skies
+  25.00% | -6300 ms | vs [49] No Way!
+  23.96% | 2300 ms | vs [53] MOAB 9S
+  21.83% | -3600 ms | vs [2] Neutron Bomb
+  21.75% | 4700 ms | vs [13] Saturday Night Special
+  20.00% | 9600 ms | vs [22] Colorful Whirlwind
+  20.00% | 7300 ms | vs [28] Courageous!
+  18.75% | 3600 ms | vs [26] Color Storm
+  18.18% | 10000 ms | vs [23] City Crasher
+  18.18% | 2700 ms | vs [31] Naughty or Nice
+  18.18% | 3300 ms | vs [46] Azura Burst
+  16.83% | 3800 ms | vs [15] Super Crackle Rainbow
+  16.67% | -10000 ms | vs [1] Turn it Loose
+  16.67% | 9700 ms | vs [17] Deep Ocean
+  16.67% | -5200 ms | vs [32] Evil Priest
+  15.38% | 9400 ms | vs [20] Hot Hot Hot
+  14.29% | -3100 ms | vs [47] Azurallure
+  13.64% | 9500 ms | vs [18] Hit the Road, Jack
+  12.50% | 3000 ms | vs [54] Blue Jacket
+  7.30% | 2700 ms | vs [19] High Falutin
+  6.58% | -6900 ms | vs [11] Fiesta 99
+  4.51% | 7100 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+
+[17] Deep Ocean
+  37.48% | 7100 ms | vs [18] Hit the Road, Jack
+  36.72% | 1900 ms | vs [23] City Crasher
+  36.13% | 3300 ms | vs [15] Super Crackle Rainbow
+  31.71% | -2900 ms | vs [58] Wild Horses
+  28.70% | 5900 ms | vs [20] Hot Hot Hot
+  28.50% | -7300 ms | vs [47] Azurallure
+  26.83% | 3100 ms | vs [26] Color Storm
+  26.73% | 2500 ms | vs [22] Colorful Whirlwind
+  25.54% | -2100 ms | vs [19] High Falutin
+  25.00% | -9600 ms | vs [2] Neutron Bomb
+  24.27% | -400 ms | vs [30] Breakthrough
+  23.89% | 1800 ms | vs [21] Peace Out
+  23.87% | 6800 ms | vs [12] Ion Blaster
+  23.75% | 6800 ms | vs [13] Saturday Night Special
+  23.07% | -9500 ms | vs [11] Fiesta 99
+  20.83% | 8800 ms | vs [28] Courageous!
+  20.83% | 100 ms | vs [48] Howling Nishiki
+  20.74% | 9200 ms | vs [52] Flourescent
+  20.67% | 1400 ms | vs [16] Strobing Willow
+  20.67% | 4700 ms | vs [46] Azura Burst
+  20.00% | 1800 ms | vs [1] Turn it Loose
+  19.63% | 5600 ms | vs [56] Thirsty Thursday
+  19.26% | 3500 ms | vs [14] Star Chaser
+  16.67% | -9700 ms | vs [24] Silver Screen
+  16.67% | -2900 ms | vs [32] Evil Priest
+  16.67% | -4800 ms | vs [53] MOAB 9S
+  16.67% | 8900 ms | vs [57] Colorful Skies
+  16.35% | 2300 ms | vs [29] Christmas Eve
+  16.30% | -9800 ms | vs [3] Occupy Mars
+  16.08% | 6700 ms | vs [49] No Way!
+  15.52% | 8500 ms | vs [54] Blue Jacket
+  12.50% | 2200 ms | vs [31] Naughty or Nice
+  12.30% | 8000 ms | vs [59] Big Color
+  9.94% | -4500 ms | vs [51] 3 Minute Mayhem
+  4.17% | -4700 ms | vs [4] Be All & End All
+
+[31] Naughty or Nice
+  32.34% | -1400 ms | vs [32] Evil Priest
+  27.27% | 7900 ms | vs [16] Strobing Willow
+  25.00% | 3200 ms | vs [52] Flourescent
+  22.47% | -3100 ms | vs [20] Hot Hot Hot
+  19.05% | -9500 ms | vs [47] Azurallure
+  18.75% | 800 ms | vs [26] Color Storm
+  18.62% | 9100 ms | vs [15] Super Crackle Rainbow
+  18.18% | 8400 ms | vs [3] Occupy Mars
+  18.18% | 2600 ms | vs [4] Be All & End All
+  18.18% | 3300 ms | vs [14] Star Chaser
+  18.18% | -2700 ms | vs [24] Silver Screen
+  18.18% | 6500 ms | vs [28] Courageous!
+  18.18% | 8200 ms | vs [30] Breakthrough
+  18.18% | 4600 ms | vs [46] Azura Burst
+  18.18% | 6200 ms | vs [54] Blue Jacket
+  18.18% | -400 ms | vs [56] Thirsty Thursday
+  18.18% | 9500 ms | vs [57] Colorful Skies
+  17.70% | 7800 ms | vs [53] MOAB 9S
+  16.67% | 10000 ms | vs [1] Turn it Loose
+  16.67% | 3800 ms | vs [2] Neutron Bomb
+  16.67% | 3200 ms | vs [13] Saturday Night Special
+  16.52% | 10000 ms | vs [58] Wild Horses
+  15.38% | 7300 ms | vs [21] Peace Out
+  14.29% | 6200 ms | vs [12] Ion Blaster
+  13.64% | -4200 ms | vs [18] Hit the Road, Jack
+  13.64% | -2000 ms | vs [23] City Crasher
+  13.33% | 8400 ms | vs [22] Colorful Whirlwind
+  12.50% | -2200 ms | vs [17] Deep Ocean
+  10.32% | 2300 ms | vs [19] High Falutin
+  10.00% | 8100 ms | vs [11] Fiesta 99
+  9.09% | 10000 ms | vs [29] Christmas Eve
+  9.09% | -9000 ms | vs [48] Howling Nishiki
+  9.09% | 6400 ms | vs [59] Big Color
+  9.09% | -8200 ms | vs [49] No Way!
+  6.81% | -6700 ms | vs [51] 3 Minute Mayhem
+
+[32] Evil Priest
+  32.34% | 1400 ms | vs [31] Naughty or Nice
+  25.00% | 9800 ms | vs [48] Howling Nishiki
+  24.36% | 8000 ms | vs [26] Color Storm
+  22.09% | -500 ms | vs [13] Saturday Night Special
+  22.08% | 100 ms | vs [2] Neutron Bomb
+  17.96% | -4000 ms | vs [18] Hit the Road, Jack
+  16.67% | 8100 ms | vs [1] Turn it Loose
+  16.67% | 8100 ms | vs [3] Occupy Mars
+  16.67% | 7500 ms | vs [4] Be All & End All
+  16.67% | 10000 ms | vs [14] Star Chaser
+  16.67% | 2900 ms | vs [17] Deep Ocean
+  16.67% | 5200 ms | vs [24] Silver Screen
+  16.67% | 6900 ms | vs [46] Azura Burst
+  16.67% | 5300 ms | vs [52] Flourescent
+  16.67% | -1900 ms | vs [53] MOAB 9S
+  16.67% | 7900 ms | vs [56] Thirsty Thursday
+  16.67% | 0 ms | vs [58] Wild Horses
+  16.67% | -9500 ms | vs [49] No Way!
+  15.38% | 3900 ms | vs [20] Hot Hot Hot
+  15.38% | 9000 ms | vs [21] Peace Out
+  15.20% | 6700 ms | vs [28] Courageous!
+  14.29% | 7100 ms | vs [12] Ion Blaster
+  14.29% | -9800 ms | vs [15] Super Crackle Rainbow
+  14.29% | -9400 ms | vs [47] Azurallure
+  13.33% | 5400 ms | vs [22] Colorful Whirlwind
+  12.37% | 2900 ms | vs [11] Fiesta 99
+  9.09% | 9500 ms | vs [23] City Crasher
+  8.33% | 9600 ms | vs [16] Strobing Willow
+  8.33% | 8100 ms | vs [29] Christmas Eve
+  8.33% | 8800 ms | vs [30] Breakthrough
+  8.33% | 6400 ms | vs [54] Blue Jacket
+  8.33% | 6700 ms | vs [57] Colorful Skies
+  8.33% | 8500 ms | vs [59] Big Color
+  7.89% | 9700 ms | vs [19] High Falutin
+  5.68% | -8700 ms | vs [51] 3 Minute Mayhem
+
+[47] Azurallure
+  30.80% | 4100 ms | vs [23] City Crasher
+  28.57% | -1500 ms | vs [58] Wild Horses
+  28.50% | 7300 ms | vs [17] Deep Ocean
+  28.38% | -4500 ms | vs [15] Super Crackle Rainbow
+  27.94% | 1300 ms | vs [2] Neutron Bomb
+  27.55% | 9800 ms | vs [26] Color Storm
+  27.48% | 700 ms | vs [13] Saturday Night Special
+  27.27% | 3400 ms | vs [18] Hit the Road, Jack
+  23.81% | 9400 ms | vs [12] Ion Blaster
+  23.23% | 6700 ms | vs [21] Peace Out
+  22.83% | 3100 ms | vs [52] Flourescent
+  22.18% | -6900 ms | vs [19] High Falutin
+  19.05% | 900 ms | vs [1] Turn it Loose
+  19.05% | 1200 ms | vs [22] Colorful Whirlwind
+  19.05% | 9500 ms | vs [31] Naughty or Nice
+  19.05% | -8200 ms | vs [56] Thirsty Thursday
+  19.04% | 4100 ms | vs [46] Azura Burst
+  18.96% | -8900 ms | vs [20] Hot Hot Hot
+  18.92% | 1100 ms | vs [3] Occupy Mars
+  18.87% | 9100 ms | vs [29] Christmas Eve
+  18.57% | 9400 ms | vs [59] Big Color
+  18.55% | 2800 ms | vs [28] Courageous!
+  18.35% | 3400 ms | vs [14] Star Chaser
+  17.18% | 5300 ms | vs [16] Strobing Willow
+  16.79% | -4300 ms | vs [54] Blue Jacket
+  16.62% | 1300 ms | vs [11] Fiesta 99
+  14.29% | 3100 ms | vs [24] Silver Screen
+  14.29% | 9000 ms | vs [30] Breakthrough
+  14.29% | 9400 ms | vs [32] Evil Priest
+  14.29% | -9800 ms | vs [48] Howling Nishiki
+  14.29% | -900 ms | vs [57] Colorful Skies
+  14.29% | -7000 ms | vs [49] No Way!
+  9.52% | -8100 ms | vs [53] MOAB 9S
+  9.05% | 2300 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [4] Be All & End All
+
+[19] High Falutin
+  25.54% | 2100 ms | vs [17] Deep Ocean
+  23.15% | 1000 ms | vs [58] Wild Horses
+  22.18% | 6900 ms | vs [47] Azurallure
+  20.68% | -5200 ms | vs [18] Hit the Road, Jack
+  18.42% | -8600 ms | vs [11] Fiesta 99
+  18.42% | 5200 ms | vs [21] Peace Out
+  18.39% | 2800 ms | vs [52] Flourescent
+  18.11% | 8800 ms | vs [23] City Crasher
+  18.02% | 400 ms | vs [12] Ion Blaster
+  17.89% | 8700 ms | vs [26] Color Storm
+  17.49% | -9400 ms | vs [2] Neutron Bomb
+  15.79% | 0 ms | vs [46] Azura Burst
+  15.79% | 700 ms | vs [48] Howling Nishiki
+  15.01% | 500 ms | vs [22] Colorful Whirlwind
+  14.93% | -10000 ms | vs [13] Saturday Night Special
+  14.77% | 5500 ms | vs [51] 3 Minute Mayhem
+  14.55% | -1200 ms | vs [15] Super Crackle Rainbow
+  13.16% | 7900 ms | vs [3] Occupy Mars
+  13.16% | 7400 ms | vs [14] Star Chaser
+  13.16% | 5500 ms | vs [16] Strobing Willow
+  13.16% | -2400 ms | vs [59] Big Color
+  12.86% | 1700 ms | vs [30] Breakthrough
+  12.71% | -1100 ms | vs [56] Thirsty Thursday
+  12.26% | 5900 ms | vs [20] Hot Hot Hot
+  12.20% | 1900 ms | vs [29] Christmas Eve
+  10.53% | -6000 ms | vs [57] Colorful Skies
+  10.53% | -7400 ms | vs [49] No Way!
+  10.32% | -2300 ms | vs [31] Naughty or Nice
+  9.59% | -200 ms | vs [1] Turn it Loose
+  9.47% | -600 ms | vs [28] Courageous!
+  7.89% | -9700 ms | vs [32] Evil Priest
+  7.43% | 300 ms | vs [54] Blue Jacket
+  7.30% | -2700 ms | vs [24] Silver Screen
+  5.26% | -5500 ms | vs [53] MOAB 9S
+  2.63% | -5700 ms | vs [4] Be All & End All
+
+[49] No Way!
+  25.00% | 6300 ms | vs [24] Silver Screen
+  25.00% | 9400 ms | vs [48] Howling Nishiki
+  19.05% | 8200 ms | vs [15] Super Crackle Rainbow
+  16.67% | 10000 ms | vs [2] Neutron Bomb
+  16.67% | 9400 ms | vs [13] Saturday Night Special
+  16.67% | 9500 ms | vs [32] Evil Priest
+  16.08% | -6700 ms | vs [17] Deep Ocean
+  14.29% | 7000 ms | vs [47] Azurallure
+  14.29% | 9400 ms | vs [53] MOAB 9S
+  13.64% | 5300 ms | vs [18] Hit the Road, Jack
+  13.33% | -2500 ms | vs [11] Fiesta 99
+  13.30% | 9700 ms | vs [22] Colorful Whirlwind
+  12.50% | 8600 ms | vs [26] Color Storm
+  11.11% | 9600 ms | vs [14] Star Chaser
+  11.11% | 9200 ms | vs [58] Wild Horses
+  10.53% | 7400 ms | vs [19] High Falutin
+  9.09% | 8200 ms | vs [31] Naughty or Nice
+  8.33% | 9800 ms | vs [1] Turn it Loose
+  7.69% | 9500 ms | vs [20] Hot Hot Hot
+  7.69% | 9000 ms | vs [21] Peace Out
+  4.55% | 9200 ms | vs [23] City Crasher
+  4.55% | -3300 ms | vs [51] 3 Minute Mayhem
+  0.00% | 0 ms | vs [3] Occupy Mars
+  0.00% | 0 ms | vs [4] Be All & End All
+  0.00% | 0 ms | vs [12] Ion Blaster
+  0.00% | 0 ms | vs [16] Strobing Willow
+  0.00% | 0 ms | vs [28] Courageous!
+  0.00% | 0 ms | vs [29] Christmas Eve
+  0.00% | 0 ms | vs [30] Breakthrough
+  0.00% | 0 ms | vs [46] Azura Burst
+  0.00% | 0 ms | vs [52] Flourescent
+  0.00% | 0 ms | vs [54] Blue Jacket
+  0.00% | 0 ms | vs [56] Thirsty Thursday
+  0.00% | 0 ms | vs [57] Colorful Skies
+  0.00% | 0 ms | vs [59] Big Color
+
+[11] Fiesta 99
+  23.07% | 9500 ms | vs [17] Deep Ocean
+  19.33% | 3800 ms | vs [18] Hit the Road, Jack
+  18.42% | 8600 ms | vs [19] High Falutin
+  16.67% | 9500 ms | vs [13] Saturday Night Special
+  16.67% | 200 ms | vs [58] Wild Horses
+  16.62% | -1300 ms | vs [47] Azurallure
+  16.49% | 2300 ms | vs [23] City Crasher
+  16.14% | -300 ms | vs [52] Flourescent
+  16.03% | 10000 ms | vs [2] Neutron Bomb
+  13.33% | -5500 ms | vs [12] Ion Blaster
+  13.33% | 1700 ms | vs [14] Star Chaser
+  13.33% | 500 ms | vs [21] Peace Out
+  13.33% | -3300 ms | vs [22] Colorful Whirlwind
+  13.33% | 2500 ms | vs [26] Color Storm
+  13.33% | -4000 ms | vs [30] Breakthrough
+  13.33% | 2500 ms | vs [49] No Way!
+  13.08% | 8800 ms | vs [15] Super Crackle Rainbow
+  12.92% | 2000 ms | vs [29] Christmas Eve
+  12.65% | -4400 ms | vs [46] Azura Burst
+  12.45% | -800 ms | vs [51] 3 Minute Mayhem
+  12.37% | -2900 ms | vs [32] Evil Priest
+  10.00% | 7600 ms | vs [3] Occupy Mars
+  10.00% | -8100 ms | vs [31] Naughty or Nice
+  10.00% | 200 ms | vs [48] Howling Nishiki
+  9.94% | -2700 ms | vs [59] Big Color
+  9.89% | -1400 ms | vs [20] Hot Hot Hot
+  9.51% | -3500 ms | vs [56] Thirsty Thursday
+  9.30% | -3800 ms | vs [16] Strobing Willow
+  6.67% | -3800 ms | vs [4] Be All & End All
+  6.67% | -8800 ms | vs [57] Colorful Skies
+  6.62% | -2900 ms | vs [1] Turn it Loose
+  6.61% | -2700 ms | vs [54] Blue Jacket
+  6.58% | 6900 ms | vs [24] Silver Screen
+  6.50% | 3100 ms | vs [28] Courageous!
+  6.01% | -7100 ms | vs [53] MOAB 9S
+
+[4] Be All & End All
+  18.18% | -2600 ms | vs [31] Naughty or Nice
+  16.67% | -7500 ms | vs [32] Evil Priest
+  6.67% | 3800 ms | vs [11] Fiesta 99
+  4.17% | 4700 ms | vs [17] Deep Ocean
+  3.41% | -5300 ms | vs [51] 3 Minute Mayhem
+  2.63% | 5700 ms | vs [19] High Falutin
+  0.00% | 0 ms | vs [1] Turn it Loose
+  0.00% | 0 ms | vs [2] Neutron Bomb
+  0.00% | 0 ms | vs [3] Occupy Mars
+  0.00% | 0 ms | vs [12] Ion Blaster
+  0.00% | 0 ms | vs [13] Saturday Night Special
+  0.00% | 0 ms | vs [14] Star Chaser
+  0.00% | 0 ms | vs [15] Super Crackle Rainbow
+  0.00% | 0 ms | vs [16] Strobing Willow
+  0.00% | 0 ms | vs [18] Hit the Road, Jack
+  0.00% | 0 ms | vs [20] Hot Hot Hot
+  0.00% | 0 ms | vs [21] Peace Out
+  0.00% | 0 ms | vs [22] Colorful Whirlwind
+  0.00% | 0 ms | vs [23] City Crasher
+  0.00% | 0 ms | vs [24] Silver Screen
+  0.00% | 0 ms | vs [26] Color Storm
+  0.00% | 0 ms | vs [28] Courageous!
+  0.00% | 0 ms | vs [29] Christmas Eve
+  0.00% | 0 ms | vs [30] Breakthrough
+  0.00% | 0 ms | vs [46] Azura Burst
+  0.00% | 0 ms | vs [47] Azurallure
+  0.00% | 0 ms | vs [48] Howling Nishiki
+  0.00% | 0 ms | vs [52] Flourescent
+  0.00% | 0 ms | vs [53] MOAB 9S
+  0.00% | 0 ms | vs [54] Blue Jacket
+  0.00% | 0 ms | vs [56] Thirsty Thursday
+  0.00% | 0 ms | vs [57] Colorful Skies
+  0.00% | 0 ms | vs [58] Wild Horses
+  0.00% | 0 ms | vs [59] Big Color
+  0.00% | 0 ms | vs [49] No Way!
+
+[51] 3 Minute Mayhem
+  14.77% | -5500 ms | vs [19] High Falutin
+  12.45% | 800 ms | vs [11] Fiesta 99
+  11.27% | -400 ms | vs [23] City Crasher
+  11.23% | 4600 ms | vs [18] Hit the Road, Jack
+  10.22% | -4500 ms | vs [58] Wild Horses
+  9.94% | 4500 ms | vs [17] Deep Ocean
+  9.09% | 7600 ms | vs [2] Neutron Bomb
+  9.09% | 7000 ms | vs [13] Saturday Night Special
+  9.09% | -3300 ms | vs [15] Super Crackle Rainbow
+  9.08% | 3700 ms | vs [26] Color Storm
+  9.05% | -2300 ms | vs [47] Azurallure
+  7.93% | -6800 ms | vs [20] Hot Hot Hot
+  7.75% | 7200 ms | vs [46] Azura Burst
+  6.82% | 4500 ms | vs [1] Turn it Loose
+  6.82% | 5000 ms | vs [22] Colorful Whirlwind
+  6.82% | 6800 ms | vs [28] Courageous!
+  6.81% | 6700 ms | vs [31] Naughty or Nice
+  6.79% | 8100 ms | vs [16] Strobing Willow
+  6.74% | 4500 ms | vs [56] Thirsty Thursday
+  6.57% | 4200 ms | vs [21] Peace Out
+  5.68% | -3200 ms | vs [3] Occupy Mars
+  5.68% | 8100 ms | vs [14] Star Chaser
+  5.68% | 8700 ms | vs [32] Evil Priest
+  5.68% | 700 ms | vs [48] Howling Nishiki
+  5.68% | -2800 ms | vs [52] Flourescent
+  5.68% | 0 ms | vs [54] Blue Jacket
+  5.67% | 2400 ms | vs [12] Ion Blaster
+  5.65% | 9900 ms | vs [30] Breakthrough
+  5.54% | 6200 ms | vs [59] Big Color
+  4.55% | 7700 ms | vs [29] Christmas Eve
+  4.55% | 3300 ms | vs [49] No Way!
+  4.51% | 900 ms | vs [57] Colorful Skies
+  4.51% | -7100 ms | vs [24] Silver Screen
+  3.41% | 5300 ms | vs [4] Be All & End All
+  3.41% | -4700 ms | vs [53] MOAB 9S

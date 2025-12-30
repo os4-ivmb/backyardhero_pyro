@@ -15,8 +15,17 @@ const DaemonSettings = () => {
   const [currentClockSyncInterval, setCurrentClockSyncInterval] = useState(
     stateData?.fw_state?.settings?.clock_sync_interval_ms || 200 // Default from user's diff
   );
+  const [currentDongleSyncInterval, setCurrentDongleSyncInterval] = useState(
+    stateData?.fw_state?.settings?.dongle_sync_interval_ms || 20000
+  );
+  const [currentConfigQueryInterval, setCurrentConfigQueryInterval] = useState(
+    stateData?.fw_state?.settings?.config_query_interval_ms || 120000
+  );
   const [currentDebugMode, setCurrentDebugMode] = useState(
     stateData?.fw_state?.settings?.debug_mode || 0
+  );
+  const [currentDebugCommands, setCurrentDebugCommands] = useState(
+    stateData?.fw_state?.settings?.debug_commands || 0
   );
 
   useEffect(() => {
@@ -51,10 +60,25 @@ const DaemonSettings = () => {
         payload = { interval_ms: parseInt(value) };
         settingKey = "clock_sync_interval_ms";
         break;
+      case "dongle_sync_interval":
+        commandType = "set_dongle_sync_interval";
+        payload = { interval_ms: parseInt(value) };
+        settingKey = "dongle_sync_interval_ms";
+        break;
+      case "config_query_interval":
+        commandType = "set_config_query_interval";
+        payload = { interval_ms: parseInt(value) };
+        settingKey = "config_query_interval_ms";
+        break;
       case "debug_mode":
         commandType = "set_debug_mode";
         payload = { debug_mode: parseInt(value) };
         settingKey = "debug_mode";
+        break;
+      case "debug_commands":
+        commandType = "set_debug_commands";
+        payload = { debug_commands: parseInt(value) };
+        settingKey = "debug_commands";
         break;
       default:
         console.error("Invalid setting type.");
@@ -129,7 +153,7 @@ const DaemonSettings = () => {
 
       <div className="flex flex-col gap-1">
         <label className="block text-gray-200 text-sm font-bold" htmlFor="clock_sync_interval">
-          Clock Sync Interval (ms)
+          Clock Sync Interval (ms) - Dongle to Receivers
         </label>
         <input
           id="clock_sync_interval"
@@ -138,8 +162,55 @@ const DaemonSettings = () => {
           onChange={(e) => setCurrentClockSyncInterval(e.target.value)}
           className="shadow appearance-none border rounded w-full py-2 px-3 text-white leading-tight focus:outline-none focus:shadow-outline bg-gray-700 border-gray-600 placeholder-gray-400"
         />
+        <p className="text-gray-400 text-xs italic mt-1">
+          How often the dongle syncs clocks with receivers
+        </p>
         <button 
           onClick={() => handleSubmit("clock_sync_interval", currentClockSyncInterval)}
+          className="bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline mt-1 self-start"
+        >
+          Update
+        </button>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <label className="block text-gray-200 text-sm font-bold" htmlFor="dongle_sync_interval">
+          Dongle Sync Interval (ms) - Daemon to Dongle
+        </label>
+        <input
+          id="dongle_sync_interval"
+          type="number"
+          value={currentDongleSyncInterval}
+          onChange={(e) => setCurrentDongleSyncInterval(e.target.value)}
+          className="shadow appearance-none border rounded w-full py-2 px-3 text-white leading-tight focus:outline-none focus:shadow-outline bg-gray-700 border-gray-600 placeholder-gray-400"
+        />
+        <p className="text-gray-400 text-xs italic mt-1">
+          How often the Python daemon syncs the dongle's clock
+        </p>
+        <button 
+          onClick={() => handleSubmit("dongle_sync_interval", currentDongleSyncInterval)}
+          className="bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline mt-1 self-start"
+        >
+          Update
+        </button>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <label className="block text-gray-200 text-sm font-bold" htmlFor="config_query_interval">
+          Config Query Interval (ms)
+        </label>
+        <input
+          id="config_query_interval"
+          type="number"
+          value={currentConfigQueryInterval}
+          onChange={(e) => setCurrentConfigQueryInterval(e.target.value)}
+          className="shadow appearance-none border rounded w-full py-2 px-3 text-white leading-tight focus:outline-none focus:shadow-outline bg-gray-700 border-gray-600 placeholder-gray-400"
+        />
+        <p className="text-gray-400 text-xs italic mt-1">
+          How often to query receiver configs (FW version, board count, etc.)
+        </p>
+        <button 
+          onClick={() => handleSubmit("config_query_interval", currentConfigQueryInterval)}
           className="bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline mt-1 self-start"
         >
           Update
@@ -161,6 +232,27 @@ const DaemonSettings = () => {
         />
         <button 
           onClick={() => handleSubmit("debug_mode", currentDebugMode)}
+          className="bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline mt-1 self-start"
+        >
+          Update
+        </button>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <label className="block text-gray-200 text-sm font-bold" htmlFor="debug_commands">
+          Command Debug (0 or 1)
+        </label>
+        <input
+          id="debug_commands"
+          type="number"
+          value={currentDebugCommands}
+          onChange={(e) => setCurrentDebugCommands(e.target.value)}
+          min={0}
+          max={1}
+          className="shadow appearance-none border rounded w-full py-2 px-3 text-white leading-tight focus:outline-none focus:shadow-outline bg-gray-700 border-gray-600 placeholder-gray-400"
+        />
+        <button 
+          onClick={() => handleSubmit("debug_commands", currentDebugCommands)}
           className="bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline mt-1 self-start"
         >
           Update
