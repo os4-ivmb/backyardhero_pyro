@@ -10,7 +10,7 @@
 // v2: 2025-01-XX - Added FW_VERSION tracking system with version history comments
 // v3: 2025-01-XX - Migrated from RF24Mesh to pure RF24 with deterministic addressing
 // v4: Config message handling
-#define FW_VERSION 6
+#define FW_VERSION 7
 
 #define RF24_CE_PIN 37
 #define RF24_CSN_PIN 36
@@ -186,7 +186,7 @@ struct QueuedCommand {
   
 };
 
-#define MAX_COMMANDS_IN_QUEUE 40
+#define MAX_COMMANDS_IN_QUEUE 200
 QueuedCommand commandBuffer[MAX_COMMANDS_IN_QUEUE];
 int cmdQueueHead = 0;
 int cmdQueueTail = 0;
@@ -706,6 +706,242 @@ uint8_t calculateSuccessPercent(ReceiverInfo* rinfo) {
 
 
 
+// Process ACK payload received after sending a command
+// Returns true if ACK payload was processed successfully
+// Note: RF24 ACK payloads are available immediately after write() returns true
+// For config commands, the receiver sends config separately (can't change ACK payload in time)
+bool processAckPayload(uint8_t nodeID, MessageType commandType, uint64_t commandTime) {
+  // Small delay to ensure ACK payload is ready (RF24 needs a moment)
+  delayMicroseconds(500);
+  
+  // For RF24, after a successful write(), the ACK payload should be available
+  // Try reading it directly - getPayloadSize() will return 0 if no payload
+  uint8_t buf[32];
+  uint8_t msgSize = radio.getPayloadSize();
+  
+  if(debugMode > 0) {
+    Serial.print(F("ACK check: getPayloadSize()=")); Serial.print(msgSize);
+    Serial.print(F(" available()=")); Serial.print(radio.available());
+    Serial.print(F(" for N")); Serial.print(nodeID);
+    Serial.print(F(" cmd=")); Serial.println(commandType);
+  }
+  
+  if (msgSize == 0) {
+    // No ACK payload received - this could mean transmission failed or no payload was set
+    if(debugMode > 0) {
+      Serial.print(F("ACK payload: No payload (size=0) from N")); Serial.println(nodeID);
+    }
+    return false;
+  }
+  
+  if (msgSize > sizeof(buf)) msgSize = sizeof(buf);
+  radio.read(&buf, msgSize);
+  
+  if(debugMode > 0) {
+    Serial.print(F("ACK payload: Read ")); Serial.print(msgSize);
+    Serial.print(F(" bytes, first byte (msgType)=")); Serial.println(buf[0]);
+  }
+  
+  uint8_t msgType = (msgSize > 0) ? buf[0] : 0;
+  
+  // GET_CONFIG and SET_CONFIG: receiver may send config in ACK payload or separately
+  // First time: ACK payload contains status, config comes separately
+  // Subsequent times: ACK payload may contain config (after receiver calls updateAckPayloadWithConfig)
+  if (commandType == GET_CONFIG || commandType == SET_CONFIG) {
+    if (msgType == RECEIVER_STATUS) {
+      // ACK payload contains status (first time or receiver hasn't updated ACK payload yet)
+      ReceiverStatusMessage* status = (ReceiverStatusMessage*)buf;
+      ReceiverInfo* r_from_msg = getReceiverByIdent(String(status->ident), false);
+      
+      if (r_from_msg) {
+        if (r_from_msg->nodeID == nodeID) {
+          // Update receiver info from status ACK payload
+          r_from_msg->nodeID = status->nodeID; 
+          r_from_msg->batteryLevel = status->batteryLevel;
+          r_from_msg->showId = status->showState & 0x3FFF;
+          r_from_msg->loadComplete = (status->showState & (1 << 14)) ? true : false;
+          r_from_msg->startReady  = (status->showState & (1 << 15)) ? true : false;
+          r_from_msg->lastMessageTime = commandTime;
+          r_from_msg->continuity[0] = status->cont64_0;
+          r_from_msg->continuity[1] = status->cont64_1;
+          
+          // Track successful command (config will come separately)
+          pushCommandResult(r_from_msg, true);
+          r_from_msg->consecutiveFailures = 0;
+          
+          // Update latency tracking
+          uint32_t currentLatency = commandTime - initialCommandDispatchTime;
+          latencies[latencyNextIndex] = currentLatency;
+          latencyNextIndex = (latencyNextIndex + 1) % MAX_LATENCY_SAMPLES;
+          if (latencySampleCount < MAX_LATENCY_SAMPLES) {
+            latencySampleCount++;
+          }
+          r_from_msg->latencies[r_from_msg->latencyNextIndex] = currentLatency;
+          r_from_msg->latencyNextIndex = (r_from_msg->latencyNextIndex + 1) % MAX_LATENCY_SAMPLES;
+          if (r_from_msg->latencySampleCount < MAX_LATENCY_SAMPLES) {
+            r_from_msg->latencySampleCount++;
+          }
+          
+          if(debugMode > 0) {
+            Serial.print(F("ACK payload: STATUS from N")); Serial.print(nodeID);
+            Serial.print(F(" (config will come separately) latency=")); Serial.print(currentLatency); Serial.println(F("ms"));
+          }
+          return true;
+        } else {
+          if(debugMode > 0) {
+            Serial.print(F("ACK payload: STATUS nodeID mismatch for ")); Serial.print(status->ident);
+            Serial.print(F(" - expected N")); Serial.print(nodeID);
+            Serial.print(F(" but receiver has N")); Serial.println(r_from_msg->nodeID);
+          }
+        }
+      } else {
+        if(debugMode > 0) {
+          Serial.print(F("ACK payload: STATUS receiver not found for ident: ")); Serial.print(status->ident);
+          Serial.print(F(" from N")); Serial.println(nodeID);
+        }
+      }
+    } else if (msgType == SEND_CONFIG) {
+      // ACK payload contains config (receiver has updated ACK payload after previous config command)
+      SendConfigMessage* config = (SendConfigMessage*)buf;
+      ReceiverInfo* r_from_msg = getReceiverByIdent(String(config->ident), false);
+      
+      if (r_from_msg) {
+        if (r_from_msg->nodeID == nodeID) {
+          // Update receiver info from config ACK payload
+          r_from_msg->lastMessageTime = commandTime;
+          
+          // Output config as JSON for Python daemon (same format as when received separately)
+          Serial.print(F("{\"type\":\"config\",\"i\":\""));
+          Serial.print(config->ident);
+          Serial.print(F("\",\"d\":["));
+          Serial.print(config->numBoards);
+          Serial.print(F(","));
+          Serial.print(config->boardVersion);
+          Serial.print(F(","));
+          Serial.print(config->fwVersion);
+          Serial.print(F(","));
+          Serial.print(config->secondsOnline);
+          Serial.print(F(","));
+          Serial.print(config->txPower);
+          Serial.print(F(","));
+          Serial.print(config->fireMsDuration);
+          Serial.print(F(","));
+          Serial.print(config->statusInterval);
+          Serial.print(F(","));
+          Serial.print(config->unsolicitedStatusCount);
+          Serial.print(F(","));
+          Serial.print(config->connTimeoutCount);
+          Serial.println(F("]}"));
+          
+          // Track successful command (config received in ACK payload)
+          pushCommandResult(r_from_msg, true);
+          r_from_msg->consecutiveFailures = 0;
+          
+          // Update latency tracking
+          uint32_t currentLatency = commandTime - initialCommandDispatchTime;
+          latencies[latencyNextIndex] = currentLatency;
+          latencyNextIndex = (latencyNextIndex + 1) % MAX_LATENCY_SAMPLES;
+          if (latencySampleCount < MAX_LATENCY_SAMPLES) {
+            latencySampleCount++;
+          }
+          r_from_msg->latencies[r_from_msg->latencyNextIndex] = currentLatency;
+          r_from_msg->latencyNextIndex = (r_from_msg->latencyNextIndex + 1) % MAX_LATENCY_SAMPLES;
+          if (r_from_msg->latencySampleCount < MAX_LATENCY_SAMPLES) {
+            r_from_msg->latencySampleCount++;
+          }
+          
+          if(debugMode > 0) {
+            Serial.print(F("ACK payload: CONFIG from N")); Serial.print(nodeID);
+            Serial.print(F(" latency=")); Serial.print(currentLatency); Serial.println(F("ms"));
+          }
+          return true;
+        } else {
+          if(debugMode > 0) {
+            Serial.print(F("ACK payload: CONFIG nodeID mismatch for ")); Serial.print(config->ident);
+            Serial.print(F(" - expected N")); Serial.print(nodeID);
+            Serial.print(F(" but receiver has N")); Serial.println(r_from_msg->nodeID);
+          }
+        }
+      } else {
+        if(debugMode > 0) {
+          Serial.print(F("ACK payload: CONFIG receiver not found for ident: ")); Serial.print(config->ident);
+          Serial.print(F(" from N")); Serial.println(nodeID);
+        }
+      }
+    } else {
+      if(debugMode > 0) {
+        Serial.print(F("ACK payload: unexpected msgType ")); Serial.print(msgType);
+        Serial.print(F(" for ")); Serial.print((commandType == GET_CONFIG) ? F("GET_CONFIG") : F("SET_CONFIG"));
+        Serial.print(F(" from N")); Serial.print(nodeID);
+        Serial.print(F(" (expected RECEIVER_STATUS or SEND_CONFIG)")); Serial.println();
+      }
+    }
+  } else {
+    // Other commands expect RECEIVER_STATUS as ACK payload
+    if (msgType == RECEIVER_STATUS) {
+      ReceiverStatusMessage* status = (ReceiverStatusMessage*)buf;
+      ReceiverInfo* r_from_msg = getReceiverByIdent(String(status->ident), false);
+      
+      if (r_from_msg) {
+        if (r_from_msg->nodeID == nodeID) {
+          // Update receiver info
+          r_from_msg->nodeID = status->nodeID; 
+          r_from_msg->batteryLevel = status->batteryLevel;
+          r_from_msg->showId = status->showState & 0x3FFF;
+          r_from_msg->loadComplete = (status->showState & (1 << 14)) ? true : false;
+          r_from_msg->startReady  = (status->showState & (1 << 15)) ? true : false;
+          r_from_msg->lastMessageTime = commandTime;
+          r_from_msg->continuity[0] = status->cont64_0;
+          r_from_msg->continuity[1] = status->cont64_1;
+          
+          // Track successful command
+          pushCommandResult(r_from_msg, true);
+          r_from_msg->consecutiveFailures = 0;
+          
+          // Update latency tracking
+          uint32_t currentLatency = commandTime - initialCommandDispatchTime;
+          latencies[latencyNextIndex] = currentLatency;
+          latencyNextIndex = (latencyNextIndex + 1) % MAX_LATENCY_SAMPLES;
+          if (latencySampleCount < MAX_LATENCY_SAMPLES) {
+            latencySampleCount++;
+          }
+          r_from_msg->latencies[r_from_msg->latencyNextIndex] = currentLatency;
+          r_from_msg->latencyNextIndex = (r_from_msg->latencyNextIndex + 1) % MAX_LATENCY_SAMPLES;
+          if (r_from_msg->latencySampleCount < MAX_LATENCY_SAMPLES) {
+            r_from_msg->latencySampleCount++;
+          }
+          
+          if(debugMode > 0) {
+            Serial.print(F("ACK payload: STATUS from N")); Serial.print(nodeID);
+            Serial.print(F(" latency=")); Serial.print(currentLatency); Serial.println(F("ms"));
+          }
+          return true;
+        } else {
+          if(debugMode > 0) {
+            Serial.print(F("ACK payload: STATUS nodeID mismatch for ")); Serial.print(status->ident);
+            Serial.print(F(" - expected N")); Serial.print(nodeID);
+            Serial.print(F(" but receiver has N")); Serial.println(r_from_msg->nodeID);
+          }
+        }
+      } else {
+        if(debugMode > 0) {
+          Serial.print(F("ACK payload: STATUS receiver not found for ident: ")); Serial.print(status->ident);
+          Serial.print(F(" from N")); Serial.println(nodeID);
+        }
+      }
+    } else {
+      if(debugMode > 0) {
+        Serial.print(F("ACK payload: unexpected msgType ")); Serial.print(msgType);
+        Serial.print(F(" for command ")); Serial.print(commandType);
+        Serial.print(F(" from N")); Serial.print(nodeID);
+        Serial.print(F(" (expected RECEIVER_STATUS)")); Serial.println();
+      }
+    }
+  }
+  
+  return false;
+}
+
 bool sendActualManualFireMessage(uint8_t nodeID, uint8_t position) {
   // Verify radio is ready
   if (!radio.isChipConnected()) {
@@ -723,7 +959,16 @@ bool sendActualManualFireMessage(uint8_t nodeID, uint8_t position) {
   delayMicroseconds(200); // Increased delay for more reliable TX mode switch
   uint64_t targetAddress = getReceiverAddress(nodeID);
   radio.openWritingPipe(targetAddress);
+  uint64_t commandTime = millis() + tsOffset;
+  initialCommandDispatchTime = commandTime;
   bool result = radio.write(&msg, sizeof(msg));
+  
+  // Process ACK payload before switching back to listening mode
+  bool ackProcessed = false;
+  if (result) {
+    ackProcessed = processAckPayload(nodeID, MANUAL_FIRE, commandTime);
+  }
+  
   radio.startListening();
   delayMicroseconds(150); // Delay to ensure listening mode is fully active
   
@@ -734,6 +979,12 @@ bool sendActualManualFireMessage(uint8_t nodeID, uint8_t position) {
     }
     return false;
   }
+  
+  // If ACK payload wasn't processed, track as potential failure
+  if (!ackProcessed && debugMode > 0) {
+    Serial.print(F("WARN: No ACK payload from N")); Serial.println(nodeID);
+  }
+  
   return true;
 }
 
@@ -755,14 +1006,18 @@ bool sendActualClockSyncMessage(uint8_t nodeID, uint64_t timestamp) {
   delayMicroseconds(200); // Increased delay for more reliable TX mode switch
   uint64_t targetAddress = getReceiverAddress(nodeID);
   radio.openWritingPipe(targetAddress);
+  initialCommandDispatchTime = now;
   bool result = radio.write(&msg, sizeof(msg));
+  
+  // Process ACK payload before switching back to listening mode
+  bool ackProcessed = false;
+  if (result) {
+    ackProcessed = processAckPayload(nodeID, CLOCK_SYNC, now);
+  }
   
   // Ensure we're back in listening mode to receive responses and send ACKs
   radio.startListening();
   delayMicroseconds(150); // Increased delay to ensure listening mode is fully active
-  
-  // Note: Radio should be in listening mode after startListening()
-  // (RF24 library doesn't have isListening() method in this version)
   
   if(!result){
     if(debugMode > 0) {
@@ -771,6 +1026,11 @@ bool sendActualClockSyncMessage(uint8_t nodeID, uint64_t timestamp) {
     }
     return false;
   }
+  
+  if (!ackProcessed && debugMode > 0) {
+    Serial.print(F("WARN: No ACK payload from N")); Serial.println(nodeID);
+  }
+  
   return true;
 }
 
@@ -792,7 +1052,15 @@ bool sendActualStartLoadMessage(uint8_t nodeID, uint8_t numTargets, uint16_t sho
   delayMicroseconds(200); // Increased delay for more reliable TX mode switch
   uint64_t targetAddress = getReceiverAddress(nodeID);
   radio.openWritingPipe(targetAddress);
+  uint64_t commandTime = millis() + tsOffset;
+  initialCommandDispatchTime = commandTime;
   bool result = radio.write(&msg, sizeof(msg));
+  
+  bool ackProcessed = false;
+  if (result) {
+    ackProcessed = processAckPayload(nodeID, START_LOAD, commandTime);
+  }
+  
   radio.startListening();
   delayMicroseconds(150); // Delay to ensure listening mode is fully active
   
@@ -803,6 +1071,11 @@ bool sendActualStartLoadMessage(uint8_t nodeID, uint8_t numTargets, uint16_t sho
     }
     return false;
   }
+  
+  if (!ackProcessed && debugMode > 0) {
+    Serial.print(F("WARN: No ACK payload from N")); Serial.println(nodeID);
+  }
+  
   return true;
 }
 
@@ -827,7 +1100,15 @@ bool sendActualShowLoadMessage(uint8_t nodeID, uint32_t t1, uint8_t p1,
   delayMicroseconds(200); // Increased delay for more reliable TX mode switch
   uint64_t targetAddress = getReceiverAddress(nodeID);
   radio.openWritingPipe(targetAddress);
+  uint64_t commandTime = millis() + tsOffset;
+  initialCommandDispatchTime = commandTime;
   bool result = radio.write(&msg, sizeof(msg));
+  
+  bool ackProcessed = false;
+  if (result) {
+    ackProcessed = processAckPayload(nodeID, SHOW_LOAD, commandTime);
+  }
+  
   radio.startListening();
   delayMicroseconds(150); // Delay to ensure listening mode is fully active
   
@@ -838,6 +1119,11 @@ bool sendActualShowLoadMessage(uint8_t nodeID, uint32_t t1, uint8_t p1,
     }
     return false;
   }
+  
+  if (!ackProcessed && debugMode > 0) {
+    Serial.print(F("WARN: No ACK payload from N")); Serial.println(nodeID);
+  }
+  
   return true;
 }
 
@@ -860,7 +1146,15 @@ bool sendActualShowStartMessage(uint8_t nodeID, uint64_t startTime, uint8_t numT
   delayMicroseconds(200); // Increased delay for more reliable TX mode switch
   uint64_t targetAddress = getReceiverAddress(nodeID);
   radio.openWritingPipe(targetAddress);
+  uint64_t commandTime = millis() + tsOffset;
+  initialCommandDispatchTime = commandTime;
   bool result = radio.write(&msg, sizeof(msg));
+  
+  bool ackProcessed = false;
+  if (result) {
+    ackProcessed = processAckPayload(nodeID, SHOW_START, commandTime);
+  }
+  
   radio.startListening();
   delayMicroseconds(150); // Delay to ensure listening mode is fully active
   
@@ -871,6 +1165,11 @@ bool sendActualShowStartMessage(uint8_t nodeID, uint64_t startTime, uint8_t numT
     }
     return false;
   }
+  
+  if (!ackProcessed && debugMode > 0) {
+    Serial.print(F("WARN: No ACK payload from N")); Serial.println(nodeID);
+  }
+  
   return true;
 }
 
@@ -891,7 +1190,15 @@ bool sendActualGenericMessage(uint8_t nodeID, uint8_t commandType) {
   delayMicroseconds(200); // Increased delay for more reliable TX mode switch
   uint64_t targetAddress = getReceiverAddress(nodeID);
   radio.openWritingPipe(targetAddress);
+  uint64_t commandTime = millis() + tsOffset;
+  initialCommandDispatchTime = commandTime;
   bool result = radio.write(&msg, sizeof(msg));
+  
+  bool ackProcessed = false;
+  if (result) {
+    ackProcessed = processAckPayload(nodeID, (MessageType)commandType, commandTime);
+  }
+  
   radio.startListening();
   delayMicroseconds(150); // Delay to ensure listening mode is fully active
   
@@ -903,6 +1210,11 @@ bool sendActualGenericMessage(uint8_t nodeID, uint8_t commandType) {
     }
     return false;
   }
+  
+  if (!ackProcessed && debugMode > 0) {
+    Serial.print(F("WARN: No ACK payload from N")); Serial.println(nodeID);
+  }
+  
   return true;
 }
 
@@ -922,7 +1234,15 @@ bool sendActualGetConfigMessage(uint8_t nodeID) {
   delayMicroseconds(200);
   uint64_t targetAddress = getReceiverAddress(nodeID);
   radio.openWritingPipe(targetAddress);
+  uint64_t commandTime = millis() + tsOffset;
+  initialCommandDispatchTime = commandTime;
   bool result = radio.write(&msg, sizeof(msg));
+  
+  bool ackProcessed = false;
+  if (result) {
+    ackProcessed = processAckPayload(nodeID, GET_CONFIG, commandTime);
+  }
+  
   radio.startListening();
   delayMicroseconds(150);
   
@@ -933,6 +1253,11 @@ bool sendActualGetConfigMessage(uint8_t nodeID) {
     }
     return false;
   }
+  
+  if (!ackProcessed && debugMode > 0) {
+    Serial.print(F("WARN: No ACK payload from N")); Serial.println(nodeID);
+  }
+  
   return true;
 }
 
@@ -955,7 +1280,15 @@ bool sendActualSetConfigMessage(uint8_t nodeID, uint32_t fireMsDuration, uint16_
   delayMicroseconds(200);
   uint64_t targetAddress = getReceiverAddress(nodeID);
   radio.openWritingPipe(targetAddress);
+  uint64_t commandTime = millis() + tsOffset;
+  initialCommandDispatchTime = commandTime;
   bool result = radio.write(&msg, sizeof(msg));
+  
+  bool ackProcessed = false;
+  if (result) {
+    ackProcessed = processAckPayload(nodeID, SET_CONFIG, commandTime);
+  }
+  
   radio.startListening();
   delayMicroseconds(150);
   
@@ -966,6 +1299,11 @@ bool sendActualSetConfigMessage(uint8_t nodeID, uint32_t fireMsDuration, uint16_
     }
     return false;
   }
+  
+  if (!ackProcessed && debugMode > 0) {
+    Serial.print(F("WARN: No ACK payload from N")); Serial.println(nodeID);
+  }
+  
   return true;
 }
 
@@ -1022,7 +1360,7 @@ void processSerialCommand(String inStr) {
   if(inStr.length() == 0) return;
 
   
-  if (inStr.startsWith("{")) {
+  if (inStr.startsWith("{") || inStr.startsWith("[")) {
     
     parseLedJSON(inStr);
     return;
@@ -1269,30 +1607,27 @@ void processSerialCommand(String inStr) {
     
     // Parse settings: "setconfig ident fireMs statusInterval txPower [repeat]"
     // Format: "setconfig RX121 1000 2000 3" or "setconfig RX121 1000 2000 3 1"
-    
-    // Check if paramsStr contains settings (has 3+ space-separated numbers after ident)
-    int firstSpace = paramsStr.indexOf(' ');
-    String settingsStr = (firstSpace > 0) ? paramsStr.substring(firstSpace+1) : "";
+    // Note: paramsStr already has ident removed, so it's "fireMs statusInterval txPower [repeat]"
     
     // Try to parse settings (3 numbers: fireMs, statusInterval, txPower)
-    int space1 = settingsStr.indexOf(' ');
-    int space2 = (space1 > 0) ? settingsStr.indexOf(' ', space1+1) : -1;
-    int space3 = (space2 > 0) ? settingsStr.indexOf(' ', space2+1) : -1;
+    int space1 = paramsStr.indexOf(' ');
+    int space2 = (space1 > 0) ? paramsStr.indexOf(' ', space1+1) : -1;
+    int space3 = (space2 > 0) ? paramsStr.indexOf(' ', space2+1) : -1;
     
     if (space1 > 0 && space2 > 0) {
       // Settings present
-      qc.setconfig_fireMsDuration = settingsStr.substring(0, space1).toInt();
-      qc.setconfig_statusInterval = settingsStr.substring(space1+1, space2).toInt();
+      qc.setconfig_fireMsDuration = paramsStr.substring(0, space1).toInt();
+      qc.setconfig_statusInterval = paramsStr.substring(space1+1, space2).toInt();
       
       // Check if there's a 4th parameter (repeat count) or if txPower is the last
       if (space3 > 0) {
         // Format: "fireMs statusInterval txPower repeat"
-        qc.setconfig_txPower = settingsStr.substring(space2+1, space3).toInt();
-        qc.repeat_count = settingsStr.substring(space3+1).toInt();
+        qc.setconfig_txPower = paramsStr.substring(space2+1, space3).toInt();
+        qc.repeat_count = paramsStr.substring(space3+1).toInt();
         if (qc.repeat_count == 0) qc.repeat_count = 1;
       } else {
         // Format: "fireMs statusInterval txPower"
-        qc.setconfig_txPower = settingsStr.substring(space2+1).toInt();
+        qc.setconfig_txPower = paramsStr.substring(space2+1).toInt();
         qc.repeat_count = 1;
       }
     } else {
@@ -1358,10 +1693,12 @@ void setup() {
   radio.setCRCLength(RF24_CRC_16);
   
   // Enable auto-ACK for commands we send to receivers (they ACK our commands)
-  // Receivers send status messages as their ACK (status message = ACK), so we don't need
-  // to wait for hardware ACK on status messages - the status message itself is the acknowledgment
   radio.setAutoAck(true);
   radio.setAutoAck(0, true); // Explicitly enable on pipe 0 for receiving status messages
+  
+  // Enable dynamic payloads and ACK payloads to receive ACK payloads from receivers
+  radio.enableDynamicPayloads();
+  radio.enableAckPayload();
   
   // Configure master (dongle) as receiver on pipe 0
   radio.openReadingPipe(0, (uint64_t)MASTER_READ_ADDRESS);
@@ -1396,27 +1733,31 @@ void loop() {
 
   
   for (uint8_t i = 0; i < numReceivers; /*no increment*/) {
-    uint64_t timeSinceLastMessage = now - receivers[i].lastMessageTime;
-    if (timeSinceLastMessage > receiverInactivityTimeoutMs) {
-      Serial.print(F("INFO: Pruning inactive receiver: ")); 
-      Serial.print(receivers[i].ident);
-      Serial.print(F(" (inactive for ")); 
-      Serial.print(timeSinceLastMessage);
-      Serial.print(F("ms, timeout=")); 
-      Serial.print(receiverInactivityTimeoutMs);
-      Serial.print(F("ms, lastMsgTime=")); 
-      Serial.print(receivers[i].lastMessageTime);
-      Serial.print(F(", now=")); 
-      Serial.print(now);
-      Serial.println(F(")"));
-      for (uint8_t j = i; j < numReceivers - 1; ++j) {
-        receivers[j] = receivers[j+1];
+    // Handle clock backward jumps (e.g., from msync): if now < lastMessageTime, 
+    // the clock went backward, so don't prune (would cause unsigned underflow)
+    if (now >= receivers[i].lastMessageTime) {
+      uint64_t timeSinceLastMessage = now - receivers[i].lastMessageTime;
+      if (timeSinceLastMessage > receiverInactivityTimeoutMs) {
+        Serial.print(F("INFO: Pruning inactive receiver: ")); 
+        Serial.print(receivers[i].ident);
+        Serial.print(F(" (inactive for ")); 
+        Serial.print(timeSinceLastMessage);
+        Serial.print(F("ms, timeout=")); 
+        Serial.print(receiverInactivityTimeoutMs);
+        Serial.print(F("ms, lastMsgTime=")); 
+        Serial.print(receivers[i].lastMessageTime);
+        Serial.print(F(", now=")); 
+        Serial.print(now);
+        Serial.println(F(")"));
+        for (uint8_t j = i; j < numReceivers - 1; ++j) {
+          receivers[j] = receivers[j+1];
+        }
+        numReceivers--;
+        continue; // Don't increment i since we removed an element
       }
-      numReceivers--;
-      
-    } else {
-      i++; 
     }
+    // Clock didn't go backward, or receiver is still active
+    i++; 
   }
 
 
@@ -1426,18 +1767,44 @@ void loop() {
     uint8_t msgSize = radio.getPayloadSize();
     if (msgSize > sizeof(buf)) msgSize = sizeof(buf);
     
-    // Read the message (ACK is sent automatically by RF24 hardware)
+    // Read the message (hardware ACK is sent automatically by RF24 when auto-ACK is enabled)
+    // This ACKs both unsolicited status messages and config messages from receivers
     radio.read(&buf, msgSize);
 
     uint8_t msgType = (msgSize > 0) ? buf[0] : 0;
+
+    // Validate message type is in valid range (1-15)
+    // Message type 0 means no message, values > 15 are invalid/corrupted
+    if (msgType > 15) {
+      // Invalid message type - likely corrupted data or radio noise
+      // Log with context but don't process
+      if(debugMode > 0) {
+        Serial.print(F("WARN: Invalid message type ")); 
+        Serial.print(msgType);
+        Serial.print(F(" (size=")); 
+        Serial.print(msgSize);
+        Serial.print(F(", first bytes: "));
+        uint8_t bytesToPrint = (msgSize < 8) ? msgSize : 8;
+        for(uint8_t i = 0; i < bytesToPrint; i++) {
+          Serial.print(F("0x"));
+          if(buf[i] < 0x10) Serial.print(F("0"));
+          Serial.print(buf[i], HEX);
+          Serial.print(F(" "));
+        }
+        Serial.println(F(")"));
+      }
+      continue; // Skip processing this message
+    }
 
     ReceiverInfo* r_from_msg = nullptr;
 
     if (msgType == RECEIVER_STATUS) {
       ReceiverStatusMessage* status = (ReceiverStatusMessage*)buf;
       
-      // Status message serves as ACK - receiver sends status after receiving commands
-      // This is more reliable than hardware ACK since it confirms the receiver processed the command
+      // Status message received - could be:
+      // 1. Unsolicited status (receiver sending periodic status or reconnecting)
+      // 2. Separate status message after config command (config sent separately)
+      // Note: ACK payloads from command responses are handled in processAckPayload()
       
       r_from_msg = getReceiverByIdent(String(status->ident), true); 
 
@@ -1459,36 +1826,10 @@ void loop() {
         r_from_msg->continuity[0] = status->cont64_0;
         r_from_msg->continuity[1] = status->cont64_1;
 
-        // Status message received = ACK that receiver got and processed the command
-        if (awaitingResponseForCommand && r_from_msg->nodeID == responseTargetNodeID) {
-          uint32_t currentLatency = now - initialCommandDispatchTime;
-          
-          
-          latencies[latencyNextIndex] = currentLatency;
-          latencyNextIndex = (latencyNextIndex + 1) % MAX_LATENCY_SAMPLES;
-          if (latencySampleCount < MAX_LATENCY_SAMPLES) {
-            latencySampleCount++;
-          }
-
-          
-          r_from_msg->latencies[r_from_msg->latencyNextIndex] = currentLatency;
-          r_from_msg->latencyNextIndex = (r_from_msg->latencyNextIndex + 1) % MAX_LATENCY_SAMPLES;
-          if (r_from_msg->latencySampleCount < MAX_LATENCY_SAMPLES) {
-            r_from_msg->latencySampleCount++;
-          }
-
-          if(debugMode > 0) {
-              Serial.print(F("RX_STATUS from N")); Serial.println(responseTargetNodeID);
-              Serial.print(F("CMD_TO_STATUS_LATENCY: ")); Serial.print(currentLatency); Serial.println(F(" ms"));
-          }
-          commandDispatchTime = now; 
-          awaitingResponseForCommand = false;
-          
-          // Track successful command
-          pushCommandResult(r_from_msg, true);
-          
-          // Reset consecutive failure counter on success
-          r_from_msg->consecutiveFailures = 0;
+        // Hardware ACK was automatically sent when we called radio.read() above
+        // This confirms to the receiver that we received the status message
+        if(debugMode > 0) {
+          Serial.print(F("ACKed unsolicited STATUS from ")); Serial.println(status->ident);
         }
       } else {
          Serial.print(F("ERR: Status from unknown ident/node ")); Serial.println(status->nodeID);
@@ -1520,90 +1861,34 @@ void loop() {
       Serial.print(config->connTimeoutCount);
       Serial.println(F("]}"));
       
-      // Config message can also serve as ACK
+      // Config message received - sent separately after GET_CONFIG/SET_CONFIG commands
+      // (ACK payload can't be changed in time for config commands)
+      // Hardware ACK was automatically sent when we called radio.read() above
       r_from_msg = getReceiverByIdent(String(config->ident), false);
-      if (r_from_msg && awaitingResponseForCommand && r_from_msg->nodeID == responseTargetNodeID) {
-        // Track successful command
-        pushCommandResult(r_from_msg, true);
-        r_from_msg->consecutiveFailures = 0;
-        awaitingResponseForCommand = false;
+      if (r_from_msg) {
+        r_from_msg->lastMessageTime = now;
       }
       
       if(debugMode > 0) {
-        Serial.print(F("Got config from ")); Serial.println(config->ident);
+        Serial.print(F("ACKed CONFIG from ")); Serial.println(config->ident);
       }
     } else if (msgType != 0) {
-        Serial.print(F("WARN: Received unhandled message type ")); Serial.println(msgType);
-    }
-  }
-
-  
-  if (awaitingResponseForCommand) {
-    if (now - commandDispatchTime > commandResponseTimeoutMs) {
-      Serial.print(F("TIMEOUT waiting for response from Node ")); Serial.println(responseTargetNodeID);
-      if(debugMode > 0) {
-        Serial.print(F("CMD_TIMEOUT_LATENCY: ")); Serial.print(now - initialCommandDispatchTime); Serial.println(F(" ms"));
-      }
-      
-      // Debug: Print timeout
-      if (debugCommands > 0) {
-        printCommandDebug(pendingCommand, "st");
-      }
-      
-      // Track timeout failure - find receiver by nodeID
-      for (uint8_t i = 0; i < numReceivers; i++) {
-        if (receivers[i].nodeID == responseTargetNodeID) {
-          pushCommandResult(&receivers[i], false);
-          
-          // Increment consecutive failure counter
-          receivers[i].consecutiveFailures++;
-          
-          // If we have many consecutive failures, try radio recovery
-          const uint8_t RADIO_RECOVERY_THRESHOLD = 10;
-          if (receivers[i].consecutiveFailures >= RADIO_RECOVERY_THRESHOLD) {
-            if(debugMode > 0) {
-              Serial.print(F("WARN: Many consecutive failures for N")); Serial.print(responseTargetNodeID);
-              Serial.println(F(", attempting radio recovery..."));
-            }
-            
-            // Power cycle radio to recover from potential stuck state
-            radio.powerDown();
-            delay(10);
-            radio.powerUp();
-            delay(10);
-            
-            // Reconfigure radio
-            radio.setDataRate(RF24_250KBPS);
-            radio.setPALevel(RF24_PA_MAX);
-            radio.setChannel(85);
-            radio.setRetries(15, 15);
-            radio.setCRCLength(RF24_CRC_16);
-            radio.setAutoAck(true);
-            radio.setAutoAck(0, true);
-            radio.openReadingPipe(0, (uint64_t)MASTER_READ_ADDRESS);
-            radio.startListening();
-            
-            // Reset failure counter after recovery attempt
-            receivers[i].consecutiveFailures = 0;
-            
-            if(debugMode > 0) {
-              Serial.println(F("Radio recovery complete."));
-            }
-          }
-          break;
+        // Valid message type but not handled - this shouldn't happen with current protocol
+        if(debugMode > 0) {
+          Serial.print(F("WARN: Received unhandled message type ")); 
+          Serial.print(msgType);
+          Serial.print(F(" (size=")); 
+          Serial.print(msgSize);
+          Serial.println(F(")"));
         }
-      }
-      
-      awaitingResponseForCommand = false; 
-      
     }
   }
 
-  // Process queue: simple blocking approach - wait for response before sending next command
-  if (!isQueueEmpty() && !awaitingResponseForCommand) {
+  // Process queue: ACK payloads are handled immediately in send functions
+  // No need to wait for separate response messages
+  if (!isQueueEmpty()) {
     QueuedCommand cmdToSend;
     if (dequeueCommand(cmdToSend)) {
-      responseTargetNodeID = cmdToSend.targetNodeID;
       
       if (cmdToSend.targetNodeID == 0 && cmdToSend.messageType != CLOCK_SYNC) {
         Serial.print(F("WARN: Cmd for Node 0 (master) skipped or invalid target: "));
@@ -1625,12 +1910,12 @@ void loop() {
           }
         }
         
-        // Send command with repeat support - stop early if first transmission is ACKed
+        // Send command with repeat support
+        // ACK payloads are processed immediately in send functions
         bool txSuccess = false;
-        bool gotAck = false;
-        const uint8_t REPEAT_DELAY_MS = 10;  // Small delay between repeats to avoid overwhelming receiver
+        const uint8_t REPEAT_DELAY_MS = 10;  // Small delay between repeats
         
-        for (uint8_t repeatIdx = 0; repeatIdx < cmdToSend.repeat_count && !gotAck; repeatIdx++) {
+        for (uint8_t repeatIdx = 0; repeatIdx < cmdToSend.repeat_count; repeatIdx++) {
           if (repeatIdx > 0) {
             delay(REPEAT_DELAY_MS);  // Small delay between repeats
           }
@@ -1688,129 +1973,61 @@ void loop() {
               printCommandDebug(cmdToSend, "s");
             }
             
-            // Set up to wait for response after this transmission
-            awaitingResponseForCommand = true;
-            commandDispatchTime = now;
-            initialCommandDispatchTime = now;
-            pendingCommand = cmdToSend;  // Store command for timeout logging
-            
-            // Wait for response with timeout - check radio and process messages
-            uint64_t responseWaitStart = now;
-            bool responseReceived = false;
-            
-            while ((now = millis() + tsOffset) - responseWaitStart < commandResponseTimeoutMs && !responseReceived) {
-              // Process incoming radio messages to check for ACK
-              while (radio.available()) {
-                uint8_t buf[32]; 
-                uint8_t msgSize = radio.getPayloadSize();
-                if (msgSize > sizeof(buf)) msgSize = sizeof(buf);
-                radio.read(&buf, msgSize);
-                
-                uint8_t msgType = (msgSize > 0) ? buf[0] : 0;
-                
-                // GET_CONFIG and SET_CONFIG expect SEND_CONFIG as ACK
-                if (cmdToSend.messageType == GET_CONFIG || cmdToSend.messageType == SET_CONFIG) {
-                  if (msgType == SEND_CONFIG) {
-                    SendConfigMessage* config = (SendConfigMessage*)buf;
-                    ReceiverInfo* r_from_msg = getReceiverByIdent(String(config->ident), false);
-                    
-                    if (r_from_msg && r_from_msg->nodeID == responseTargetNodeID) {
-                      // Got config response from target receiver
-                      responseReceived = true;
-                      gotAck = true;
-                      awaitingResponseForCommand = false;
-                      
-                      // Debug: Print config response received
-                      if (debugCommands > 0) {
-                        printCommandDebug(cmdToSend, "sc");
-                      }
-                      
-                      // Output config as JSON for Python daemon (array format for compactness)
-                      // Format: {"type":"config","i":"RX121","d":[numBoards, boardVersion, fwVersion, secondsOnline, txPower, fireMsDuration, statusInterval]}
-                      Serial.print(F("{\"type\":\"config\",\"i\":\""));
-                      Serial.print(config->ident);
-                      Serial.print(F("\",\"d\":["));
-                      Serial.print(config->numBoards);
-                      Serial.print(F(","));
-                      Serial.print(config->boardVersion);
-                      Serial.print(F(","));
-                      Serial.print(config->fwVersion);
-                      Serial.print(F(","));
-                      Serial.print(config->secondsOnline);
-                      Serial.print(F(","));
-                      Serial.print(config->txPower);
-                      Serial.print(F(","));
-                      Serial.print(config->fireMsDuration);
-                      Serial.print(F(","));
-                      Serial.print(config->statusInterval);
-                      Serial.print(F(","));
-                      Serial.print(config->unsolicitedStatusCount);
-                      Serial.print(F(","));
-                      Serial.print(config->connTimeoutCount);
-                      Serial.println(F("]}"));
-                      
-                      // Track successful command
-                      pushCommandResult(r_from_msg, true);
-                      r_from_msg->consecutiveFailures = 0;
-                      
-                      if(debugMode > 0) {
-                        Serial.print(F("Got CONFIG after repeat ")); Serial.print(repeatIdx + 1); Serial.println(F(", stopping repeats"));
-                      }
-                      break;
-                    }
-                  }
-                } else {
-                  // Other commands expect RECEIVER_STATUS as ACK
-                  if (msgType == RECEIVER_STATUS) {
-                    ReceiverStatusMessage* status = (ReceiverStatusMessage*)buf;
-                    ReceiverInfo* r_from_msg = getReceiverByIdent(String(status->ident), false);
-                    
-                    if (r_from_msg && r_from_msg->nodeID == responseTargetNodeID) {
-                      // Got response from target receiver - this is our ACK
-                      responseReceived = true;
-                      gotAck = true;
-                      awaitingResponseForCommand = false;
-                      
-                      // Debug: Print ACK received
-                      if (debugCommands > 0) {
-                        printCommandDebug(cmdToSend, "sa");
-                      }
-                      
-                      // Update receiver info
-                      r_from_msg->nodeID = status->nodeID; 
-                      r_from_msg->batteryLevel = status->batteryLevel;
-                      r_from_msg->showId = status->showState & 0x3FFF;
-                      r_from_msg->loadComplete = (status->showState & (1 << 14)) ? true : false;
-                      r_from_msg->startReady  = (status->showState & (1 << 15)) ? true : false;
-                      r_from_msg->lastMessageTime = now;
-                      r_from_msg->continuity[0] = status->cont64_0;
-                      r_from_msg->continuity[1] = status->cont64_1;
-                      
-                      // Track successful command
-                      pushCommandResult(r_from_msg, true);
-                      r_from_msg->consecutiveFailures = 0;
-                      
-                      if(debugMode > 0) {
-                        Serial.print(F("Got ACK after repeat ")); Serial.print(repeatIdx + 1); Serial.println(F(", stopping repeats"));
-                      }
-                      break;
-                    }
-                  }
-                }
-              }
-              
-              if (!responseReceived) {
-                delay(10);  // Small delay before checking again
-                now = millis() + tsOffset;
-              }
+            // ACK payload is processed immediately in send functions via processAckPayload()
+            // If ACK payload wasn't available, track as failure
+            // Note: RF24 ACK payloads should be available immediately after write() returns
+            if (repeatIdx == 0) {
+              // Small delay to allow ACK payload to be processed
+              delay(5);
+            }
+          } else {
+            // Transmission failed - track failure
+            if(debugMode > 0) {
+              Serial.println(F("TX failed"));
             }
             
-            // If we didn't get a response yet, continue to next repeat (if any)
-            if (!responseReceived) {
-              // Timeout - will try next repeat if available
-              awaitingResponseForCommand = false;  // Reset so we can send next repeat
-              if(debugMode > 0 && repeatIdx < cmdToSend.repeat_count - 1) {
-                Serial.print(F("No ACK after repeat ")); Serial.print(repeatIdx + 1); Serial.println(F(", trying next repeat"));
+            if (debugCommands > 0) {
+              printCommandDebug(cmdToSend, "sf");
+            }
+            
+            // Track transmission failure - find receiver by nodeID
+            for (uint8_t i = 0; i < numReceivers; i++) {
+              if (receivers[i].nodeID == cmdToSend.targetNodeID) {
+                pushCommandResult(&receivers[i], false);
+                receivers[i].consecutiveFailures++;
+                
+                // Radio recovery logic for consecutive failures
+                const uint8_t RADIO_RECOVERY_THRESHOLD = 10;
+                if (receivers[i].consecutiveFailures >= RADIO_RECOVERY_THRESHOLD) {
+                  if(debugMode > 0) {
+                    Serial.print(F("WARN: Many consecutive failures for N")); Serial.print(cmdToSend.targetNodeID);
+                    Serial.println(F(", attempting radio recovery..."));
+                  }
+                  
+                  radio.powerDown();
+                  delay(10);
+                  radio.powerUp();
+                  delay(10);
+                  
+                  radio.setDataRate(RF24_250KBPS);
+                  radio.setPALevel(RF24_PA_MAX);
+                  radio.setChannel(85);
+                  radio.setRetries(15, 15);
+                  radio.setCRCLength(RF24_CRC_16);
+                  radio.setAutoAck(true);
+                  radio.setAutoAck(0, true);
+                  radio.enableDynamicPayloads();
+                  radio.enableAckPayload();
+                  radio.openReadingPipe(0, (uint64_t)MASTER_READ_ADDRESS);
+                  radio.startListening();
+                  
+                  receivers[i].consecutiveFailures = 0;
+                  
+                  if(debugMode > 0) {
+                    Serial.println(F("Radio recovery complete."));
+                  }
+                }
+                break;
               }
             }
           }
@@ -1819,38 +2036,6 @@ void loop() {
         // Update last transmission time for this receiver
         if (targetIdx < MAX_RECEIVERS) {
           lastTransmissionTime[targetIdx] = now;
-        }
-        
-        // If we got ACK, we're done. Otherwise, set up final response wait or mark as failed
-        if (gotAck) {
-          // Already got ACK, nothing more to do
-          // awaitingResponseForCommand is already false
-        } else if (txSuccess) {
-          // Transmission succeeded but no ACK yet - wait for response in main loop
-          awaitingResponseForCommand = true;
-          commandDispatchTime = now;
-          initialCommandDispatchTime = now;
-        } else {
-          // Transmission failed, don't wait for response - process next command immediately
-          if(debugMode > 0) {
-            Serial.println(F("TX failed, skipping response wait"));
-          }
-          
-          // Debug: Print transmission failure
-          if (debugCommands > 0) {
-            printCommandDebug(cmdToSend, "sf");
-          }
-          
-          // Track transmission failure - find receiver by nodeID
-          for (uint8_t i = 0; i < numReceivers; i++) {
-            if (receivers[i].nodeID == cmdToSend.targetNodeID) {
-              pushCommandResult(&receivers[i], false);
-              
-              // Increment consecutive failure counter
-              receivers[i].consecutiveFailures++;
-              break;
-            }
-          }
         }
       }
     }
@@ -1924,28 +2109,28 @@ void loop() {
   }
 
   
-  // Batch clock sync: sync one receiver at a time instead of all at once
-  // This prevents queue flooding with 10+ receivers
-  // Each receiver gets synced every (clockSyncIntervalMs * numReceivers) milliseconds
+  // Batch clock sync: queue clock syncs for all receivers at once
+  // All receivers get synced every clockSyncIntervalMs milliseconds
   if (now - lastScheduledClockSyncTime >= clockSyncIntervalMs) {
     lastScheduledClockSyncTime = now;
     
-    static uint8_t syncIndex = 0;  // Rotate through receivers
+    // Queue clock sync for all active receivers
     if (numReceivers > 0) {
-      uint8_t targetIdx = syncIndex % numReceivers;
-      syncIndex++;
+      if(debugMode > 0) {
+        Serial.print(F("INFO: Queuing clock syncs for "));
+        Serial.print(numReceivers);
+        Serial.println(F(" receivers"));
+      }
       
-      if (receivers[targetIdx].nodeID != 0) {
-        if(debugMode > 0) {
-          Serial.print(F("INFO: Queuing clock sync for receiver "));
-          Serial.println(receivers[targetIdx].ident);
+      for (uint8_t i = 0; i < numReceivers; i++) {
+        if (receivers[i].nodeID != 0) {
+          QueuedCommand qc = {0};
+          qc.targetNodeID = receivers[i].nodeID;
+          qc.messageType = CLOCK_SYNC;
+          qc.sync_timestamp = now;
+          qc.repeat_count = 1;
+          enqueueCommand(qc);
         }
-        QueuedCommand qc = {0};
-        qc.targetNodeID = receivers[targetIdx].nodeID;
-        qc.messageType = CLOCK_SYNC;
-        qc.sync_timestamp = now;
-        qc.repeat_count = 1;
-        enqueueCommand(qc);
       }
     }
   }

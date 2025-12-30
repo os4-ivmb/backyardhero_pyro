@@ -912,15 +912,59 @@ class FireworkDaemon:
             if state_dir and not os.path.exists(state_dir):
                 os.makedirs(state_dir, exist_ok=True)
             
-            # Direct write - the read side already handles race conditions with retries
-            # This is simpler and more reliable than atomic writes on some filesystems
-            with open(STATE_FILE_PATH, "w") as state_file:
-                json.dump(state, state_file, indent=4)
-                state_file.flush()
-                os.fsync(state_file.fileno())  # Ensure data is written to disk
+            # Serialize JSON to string first - this minimizes write time
+            json_content = json.dumps(state, indent=4)
+            
+            # Try atomic write first (write to temp, then move)
+            # This prevents readers from seeing partially written files
+            temp_path = STATE_FILE_PATH + ".tmp"
+            atomic_succeeded = False
+            
+            try:
+                # Write serialized JSON to temp file in one go
+                with open(temp_path, "w") as temp_file:
+                    temp_file.write(json_content)
+                    temp_file.flush()
+                    # Try fsync, but don't fail if unsupported
+                    try:
+                        os.fsync(temp_file.fileno())
+                    except (OSError, AttributeError):
+                        pass
+                
+                # Try to atomically replace the file
+                # Use os.rename which works on same filesystem
+                if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                    try:
+                        os.rename(temp_path, STATE_FILE_PATH)
+                        atomic_succeeded = True
+                    except OSError:
+                        # Rename failed - might be cross-filesystem issue
+                        # Fall through to direct write
+                        try:
+                            os.remove(temp_path)
+                        except:
+                            pass
+            except Exception:
+                # Atomic write failed - clean up and fall back
+                try:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                except:
+                    pass
+            
+            # Fallback to direct write if atomic write didn't work
+            if not atomic_succeeded:
+                with open(STATE_FILE_PATH, "w") as state_file:
+                    state_file.write(json_content)
+                    state_file.flush()
+                    try:
+                        os.fsync(state_file.fileno())
+                    except (OSError, AttributeError):
+                        pass
                     
         except Exception as e:
-            print(f"Error updating state file: {e}")
+            print(f"Error updating state file: {type(e).__name__}: {e}")
+            # Don't re-raise - let the caller continue even if state file update fails
 
     def stop(self):
         """Stop the daemon."""

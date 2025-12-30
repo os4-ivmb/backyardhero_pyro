@@ -415,7 +415,6 @@ class BYHProtocolHandler:
 
     def process_serial_in(self, msg):
         if(self.parent.debug_mode):
-            print("BYH handler got message to look at")
             print(msg)
         if(msg[0] == '{'):
             try:
@@ -553,8 +552,8 @@ class BYHProtocolHandler:
             if should_send_startload:
                 expectedItemsCt = len(fire_targets)
                 self.parent.send_serial_command(f"startload {target_key} {expectedItemsCt} {showId}")
-                # Wait longer for startload to be processed (blocking queue needs time)
-                time.sleep(0.3)
+                # Minimal delay to allow command to be queued (dongle queue handles pacing)
+                time.sleep(0.01)
             # Process the list in chunks of 3
             for i in range(0, len(fire_targets), 2):
                 # Get a chunk of up to 3 items
@@ -572,10 +571,9 @@ class BYHProtocolHandler:
                 
                 # Call the method with the six parameters.
                 self.send_load_segment_to_dev(target_key, round(st1*1000), t1-1 , round(st2*1000), t2-1 )
-                # Wait longer between showload commands to allow queue to process
-                # With blocking approach, each command waits for response (~150-250ms)
-                # So we need to space out commands to prevent queue overflow
-                time.sleep(0.25)
+                # Minimal delay to allow command to be queued (dongle queue handles pacing)
+                # The dongle has a queue (MAX_COMMANDS_IN_QUEUE = 200) that processes commands efficiently
+                time.sleep(0.01)
 
     #Figure out which ones we need to preload (native) and which we fire via. daemon (433 Bilusocn).. or if we have zones+targets that we cant fire. Annotates firing array.
     def load_targets_to_devices(self, firing_array, showId):
@@ -643,7 +641,7 @@ class BYHProtocolHandler:
                 self.parent.send_serial_command(cmd)
                 # Add delay between commands to prevent queue overflow with blocking approach
                 # Each command waits for response (~150-250ms), so space them out
-                time.sleep(0.15)
+                time.sleep(0.02)
             else:
                 print(f"Not sendinf to {rcv} as not connected.")
         

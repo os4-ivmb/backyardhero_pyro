@@ -11,9 +11,9 @@
 // v9: 2025-12-30 - Added config message handling
 // v11: 2025-12-30 - Config stuff 
 #define BOARD_VERISON 7
-#define FW_VERSION 11
-#define NODE_ID 118
-const char RECEIVER_IDENT[] = "RX118";
+#define FW_VERSION 13
+#define NODE_ID 120
+const char RECEIVER_IDENT[] = "RX120";
 
 const bool RECEIVER_USES_V1_CUES = false;
  
@@ -376,7 +376,8 @@ void handleGeneric(GenericMessage* msg){
  
 
 
-void sendStatus(){
+// Prepare status message (for ACK payload or transmission)
+void prepareStatusMessage(ReceiverStatusMessage* msg){
   int bval = analogRead(BATT_VOLTAGE_PIN)/2;
   if(bval > 3700){
     bval=253;
@@ -386,38 +387,75 @@ void sendStatus(){
     bval = ((bval - 2320) / 15.38)*2.5;
   }
 
-  ReceiverStatusMessage msg;
-  msg.type = RECEIVER_STATUS;
-  msg.batteryLevel = bval;
+  msg->type = RECEIVER_STATUS;
+  msg->batteryLevel = bval;
   
   uint16_t s = currentShowId & 0x3FFF;
   if(loadComplete) s |= (1 << 14);
   if(startReady)  s |= (1 << 15);
-  msg.showState = s;
-  strncpy(msg.ident, RECEIVER_IDENT, sizeof(msg.ident));
-  msg.ident[sizeof(msg.ident)-1] = '\0';
-  msg.nodeID = NODE_ID;
+  msg->showState = s;
+  strncpy(msg->ident, RECEIVER_IDENT, sizeof(msg->ident));
+  msg->ident[sizeof(msg->ident)-1] = '\0';
+  msg->nodeID = NODE_ID;
 
   
   uint8_t shiftInput[NUM_BOARDS];
   readInputShiftRegister(shiftInput, NUM_BOARDS);
-  msg.cont64_0 = 0;
-  msg.cont64_1 = 0;
+  msg->cont64_0 = 0;
+  msg->cont64_1 = 0;
 
   
   
   for (uint8_t i = 0; i < 8; i++) {
     if (i < NUM_BOARDS) {
-      msg.cont64_0 |= ((uint64_t)shiftInput[i]) << (i * 8);
+      msg->cont64_0 |= ((uint64_t)shiftInput[i]) << (i * 8);
     }
   }
   
   for (uint8_t i = 0; i < 8; i++) {
     uint8_t boardIdx = i + 8;
     if (boardIdx < NUM_BOARDS) {
-      msg.cont64_1 |= ((uint64_t)shiftInput[boardIdx]) << (i * 8);
+      msg->cont64_1 |= ((uint64_t)shiftInput[boardIdx]) << (i * 8);
     }
   }
+}
+
+// Prepare config message (for ACK payload or transmission)
+void prepareConfigMessage(SendConfigMessage* msg){
+  msg->type = SEND_CONFIG;
+  msg->numBoards = NUM_BOARDS;
+  msg->boardVersion = BOARD_VERISON;
+  msg->fwVersion = FW_VERSION;
+  msg->secondsOnline = (uint32_t)(millis() / 1000);
+  strncpy(msg->ident, RECEIVER_IDENT, sizeof(msg->ident));
+  msg->ident[sizeof(msg->ident)-1] = '\0';
+  msg->txPower = txPowerLevel;
+  msg->fireMsDuration = FIRE_MS_DURATION;
+  msg->statusInterval = STATUS_INTERVAL;
+  msg->unsolicitedStatusCount = unsolicitedStatusCount;
+  msg->connTimeoutCount = connTimeoutCount;
+}
+
+// Update ACK payload with current status (default for most commands)
+// Note: For GET_CONFIG and SET_CONFIG, we can't predict when they'll arrive,
+// so we'll use status as default and send config separately if needed
+void updateAckPayload() {
+  ReceiverStatusMessage statusMsg;
+  prepareStatusMessage(&statusMsg);
+  radio.writeAckPayload(0, &statusMsg, sizeof(statusMsg));
+}
+
+// Update ACK payload with config message (for next command)
+// This is called after receiving GET_CONFIG or SET_CONFIG to prepare for next time
+void updateAckPayloadWithConfig() {
+  SendConfigMessage configMsg;
+  prepareConfigMessage(&configMsg);
+  radio.writeAckPayload(0, &configMsg, sizeof(configMsg));
+}
+
+void sendStatus(){
+  ReceiverStatusMessage msg;
+  prepareStatusMessage(&msg);
 
   // Ensure radio is ready before transmitting
   if (!radio.isChipConnected()) {
@@ -429,36 +467,27 @@ void sendStatus(){
   delayMicroseconds(200); // Increased delay for more reliable TX mode switch
   radio.openWritingPipe((uint64_t)MASTER_WRITE_ADDRESS);
   
-  // Use writeFast() - status message itself serves as the ACK
-  // The dongle treats receipt of status as acknowledgment that receiver got the command
-  // No need to wait for hardware ACK since status message is the acknowledgment
-  radio.writeFast(&msg, sizeof(msg));
-  radio.txStandBy(); // Wait for transmission to complete
+  // Use write() for unsolicited status - waits for ACK from dongle
+  // This ensures the dongle properly ACKs the unsolicited status message
+  bool result = radio.write(&msg, sizeof(msg));
   
   // Increased delay before switching back to RX mode for better reliability
   delayMicroseconds(150);
   radio.startListening();
   
-  // Reset failed TX counter - transmission succeeded (status message is the ACK)
-  if (failed_tx_ct > 0) {
+  // Reset failed TX counter if transmission succeeded (got ACK from dongle)
+  if (result && failed_tx_ct > 0) {
     failed_tx_ct = 0;
+  } else if (!result) {
+    Serial.println("Send status failed");
+    // Transmission failed or no ACK received
+    incrementFailedTXCtAndMaybeChangeTXP();
   }
 }
 
 void sendConfig(){
   SendConfigMessage msg;
-  msg.type = SEND_CONFIG;
-  msg.numBoards = NUM_BOARDS;
-  msg.boardVersion = BOARD_VERISON;
-  msg.fwVersion = FW_VERSION;
-  msg.secondsOnline = (uint32_t)(millis() / 1000);
-  strncpy(msg.ident, RECEIVER_IDENT, sizeof(msg.ident));
-  msg.ident[sizeof(msg.ident)-1] = '\0';
-  msg.txPower = txPowerLevel;
-  msg.fireMsDuration = FIRE_MS_DURATION;
-  msg.statusInterval = STATUS_INTERVAL;
-  msg.unsolicitedStatusCount = unsolicitedStatusCount;
-  msg.connTimeoutCount = connTimeoutCount;
+  prepareConfigMessage(&msg);
 
   // Ensure radio is ready before transmitting
   if (!radio.isChipConnected()) {
@@ -469,10 +498,16 @@ void sendConfig(){
   radio.stopListening();
   delayMicroseconds(200);
   radio.openWritingPipe((uint64_t)MASTER_WRITE_ADDRESS);
-  radio.writeFast(&msg, sizeof(msg));
-  radio.txStandBy();
+  
+  // Use write() to ensure dongle ACKs the config message
+  // This is sent separately after GET_CONFIG/SET_CONFIG commands
+  bool result = radio.write(&msg, sizeof(msg));
+  
   delayMicroseconds(150);
   radio.startListening();
+  
+  // Note: We don't track failures for config messages as they're sent in response to commands
+  // The command ACK payload already confirmed the command was received
 }
 
 void sendToShiftRegister(uint64_t pos1, uint64_t pos2){
@@ -484,6 +519,8 @@ uint64_t lastContinuity = 0;
 bool lastSyncLightState = 0;
 uint64_t lastSyncLightTime = 0;
 bool fireChanged = false;
+uint64_t lastAckPayloadUpdate = 0;
+const uint32_t ACK_PAYLOAD_UPDATE_INTERVAL = 600;  // Update ACK payload every 600ms
 
 void runPlayLoop(){
   
@@ -1087,15 +1124,24 @@ void setup(){
   radio.setCRCLength(RF24_CRC_16);
   
   // Enable auto-ACK for receiving commands from dongle (we want ACK on commands)
-  // Status messages use writeFast() without ACK - the status message itself is the ACK
   radio.setAutoAck(true);
   radio.setAutoAck(0, true); // Explicitly enable on pipe 0 for receiving commands
+  
+  // Enable dynamic payloads and ACK payloads for status/config in ACK
+  radio.enableDynamicPayloads();
+  radio.enableAckPayload();
   
   pinMode(15, OUTPUT);
  
   // Configure receiver to read from master using address based on NODE_ID
   uint64_t receiverReadAddress = (uint64_t)RECEIVER_BASE_ADDRESS + NODE_ID;
   radio.openReadingPipe(0, receiverReadAddress);
+  
+  // Prepare initial ACK payload with status (will be updated every 600ms)
+  ReceiverStatusMessage initialStatus;
+  prepareStatusMessage(&initialStatus);
+  radio.writeAckPayload(0, &initialStatus, sizeof(initialStatus));
+  
   radio.startListening();
   
   Serial.print("Receiver configured with address: 0x");
@@ -1150,8 +1196,11 @@ void loop(){
       case GET_CONFIG:
         {
           Serial.println("GetConfig received");
-          // Just send current config, no settings to apply
+          // ACK payload was already sent with status, but we need to send config
+          // Send config message separately (ACK payload can't be changed after command received)
           sendConfig();
+          // Prepare config as ACK payload for next command (in case another config command comes)
+          updateAckPayloadWithConfig();
         }
         break;
       case SET_CONFIG:
@@ -1197,8 +1246,11 @@ void loop(){
             }
           }
           
-          // Send config back after applying settings
+          // ACK payload was already sent with status, but we need to send updated config
+          // Send config message separately (ACK payload can't be changed after command received)
           sendConfig();
+          // Prepare config as ACK payload for next command (in case another config command comes)
+          updateAckPayloadWithConfig();
         }
         break;
       default:
@@ -1207,9 +1259,11 @@ void loop(){
         break;
     }
 
-    // Small delay to ensure dongle is back in listening mode
-    delay(2);
-    sendStatus();
+    // ACK payload was automatically sent with the ACK, no need for separate sendStatus()
+    // Update ACK payload for next command (default to status)
+    if (mType != GET_CONFIG && mType != SET_CONFIG) {
+      updateAckPayload();
+    }
 
     if(mType == SHOW_START){
       testLEDStrip_smoothWave();
@@ -1290,6 +1344,12 @@ void loop(){
     lastInputModeRunTime = millis();
   }
  
+  // Update ACK payload every 600ms to keep status fresh
+  if (millis() - lastAckPayloadUpdate >= ACK_PAYLOAD_UPDATE_INTERVAL) {
+    // Default to status message (will be used for most commands)
+    updateAckPayload();
+    lastAckPayloadUpdate = millis();
+  }
   
   if(millis() - lastStatus > STATUS_INTERVAL && !gotCommand){
     if(timedOut){
