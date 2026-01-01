@@ -309,6 +309,8 @@ function ShowLoadout({ setCurrentTab }) {
         tempContainer.style.padding = '20px';
         tempContainer.style.fontFamily = 'Arial, sans-serif';
         tempContainer.style.color = '#000000';
+        tempContainer.style.overflow = 'visible'; // Ensure content is not clipped
+        tempContainer.style.minHeight = 'auto'; // Allow natural height
         
         // Clone the section
         const sectionClone = sectionElement.cloneNode(true);
@@ -328,27 +330,67 @@ function ShowLoadout({ setCurrentTab }) {
           if (element.classList.contains('bg-blue-600')) {
             element.style.backgroundColor = '#007bff';
           }
+          // Convert blue backgrounds with opacity
+          if (element.classList.contains('bg-blue-900')) {
+            element.style.backgroundColor = '#e7f3ff';
+          }
           
-          // Convert text colors
-          if (element.classList.contains('text-gray-100')) {
+          // Convert text colors - ensure all text is dark/black for readability
+          if (element.classList.contains('text-gray-100') || 
+              element.classList.contains('text-gray-200') ||
+              element.classList.contains('text-gray-300')) {
             element.style.color = '#000000';
           }
-          if (element.classList.contains('text-gray-200')) {
-            element.style.color = '#495057';
+          if (element.classList.contains('text-gray-400') ||
+              element.classList.contains('text-gray-500') ||
+              element.classList.contains('text-gray-600')) {
+            element.style.color = '#333333';
           }
-          if (element.classList.contains('text-gray-400')) {
-            element.style.color = '#6c757d';
+          // Convert blue text colors to dark blue or black
+          if (element.classList.contains('text-blue-200') ||
+              element.classList.contains('text-blue-300') ||
+              element.classList.contains('text-blue-400')) {
+            element.style.color = '#000000';
           }
-          if (element.classList.contains('text-gray-500')) {
-            element.style.color = '#6c757d';
+          if (element.classList.contains('text-blue-100')) {
+            element.style.color = '#000000';
           }
+          // Convert yellow text to dark colors
+          if (element.classList.contains('text-yellow-300') ||
+              element.classList.contains('text-yellow-400')) {
+            element.style.color = '#856404';
+          }
+          // Keep white text only if it's on a dark background that we're converting
           if (element.classList.contains('text-white')) {
-            element.style.color = '#ffffff';
+            // Check if parent has dark background - if so, make text black
+            const hasDarkBg = element.closest('.bg-gray-900, .bg-gray-800, .bg-gray-700, .bg-blue-900');
+            if (hasDarkBg) {
+              element.style.color = '#000000';
+            }
+          }
+          
+          // Check inline style color if present
+          if (element.style.color) {
+            const color = element.style.color;
+            const rgbMatch = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+            if (rgbMatch) {
+              const r = parseInt(rgbMatch[1]);
+              const g = parseInt(rgbMatch[2]);
+              const b = parseInt(rgbMatch[3]);
+              // If it's a light color (average > 200), make it black
+              if ((r + g + b) / 3 > 200) {
+                element.style.color = '#000000';
+              }
+            }
           }
           
           // Convert border colors
-          if (element.classList.contains('border-gray-600')) {
+          if (element.classList.contains('border-gray-600') ||
+              element.classList.contains('border-gray-700')) {
             element.style.borderColor = '#dee2e6';
+          }
+          if (element.classList.contains('border-blue-500')) {
+            element.style.borderColor = '#007bff';
           }
           
           // Recursively process child elements
@@ -360,38 +402,117 @@ function ShowLoadout({ setCurrentTab }) {
         return tempContainer;
       };
 
-      // Function to add a section to PDF
+      // Function to ensure all text is dark/black for readability
+      const ensureDarkText = (container) => {
+        const allElements = container.querySelectorAll('*');
+        allElements.forEach((element) => {
+          const computedStyle = window.getComputedStyle(element);
+          const color = computedStyle.color;
+          
+          if (color) {
+            const rgbMatch = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+            if (rgbMatch) {
+              const r = parseInt(rgbMatch[1]);
+              const g = parseInt(rgbMatch[2]);
+              const b = parseInt(rgbMatch[3]);
+              const avg = (r + g + b) / 3;
+              
+              // If it's a light color (average > 180), make it black or dark gray
+              if (avg > 180) {
+                // For very light colors (avg > 220), use black
+                // For moderately light colors, use dark gray
+                element.style.color = avg > 220 ? '#000000' : '#333333';
+              }
+            }
+          }
+        });
+      };
+
+      // Function to wait for all images to load
+      const waitForImages = (container) => {
+        return new Promise((resolve) => {
+          const images = container.querySelectorAll('img');
+          if (images.length === 0) {
+            resolve();
+            return;
+          }
+          
+          let loadedCount = 0;
+          const totalImages = images.length;
+          
+          const checkComplete = () => {
+            loadedCount++;
+            if (loadedCount === totalImages) {
+              // Small delay to ensure rendering is complete
+              setTimeout(resolve, 100);
+            }
+          };
+          
+          images.forEach((img) => {
+            if (img.complete) {
+              checkComplete();
+            } else {
+              img.onload = checkComplete;
+              img.onerror = checkComplete; // Continue even if image fails to load
+            }
+          });
+        });
+      };
+
+      // Function to add a section to PDF, scaling to fit on one page
       const addSectionToPDF = async (sectionElement, startNewPage = false) => {
-        if (startNewPage) {
-          pdf.addPage();
-          currentY = 10;
-        }
+        // Always start a new page for each section
+        pdf.addPage();
+        currentY = 10;
 
         const tempContainer = createSectionContainer(sectionElement);
         document.body.appendChild(tempContainer);
 
+        // Wait for images to load before capturing
+        await waitForImages(tempContainer);
+        
+        // Ensure all text is dark/black for readability
+        ensureDarkText(tempContainer);
+        
+        // Force a reflow to ensure all content is rendered
+        tempContainer.offsetHeight;
+
         const canvas = await html2canvas(tempContainer, {
-          scale: 2,
+          scale: 1.2, // Reduced from 2 to reduce file size while maintaining quality
           useCORS: true,
           allowTaint: true,
           backgroundColor: '#ffffff',
           width: 800,
-          height: tempContainer.scrollHeight
+          logging: false,
+          // Don't limit height - let html2canvas capture the full content
         });
 
         document.body.removeChild(tempContainer);
 
-        const imgData = canvas.toDataURL('image/png');
-        const imgHeight = (canvas.height * pageWidth) / canvas.width;
+        // Use JPEG compression instead of PNG to significantly reduce file size
+        const imgData = canvas.toDataURL('image/jpeg', 0.85); // 85% quality JPEG
         
-        // Check if content fits on current page
-        if (currentY + imgHeight > pageHeight) {
-          pdf.addPage();
-          currentY = 10;
-        }
-
-        pdf.addImage(imgData, 'PNG', 10, currentY, pageWidth, imgHeight);
-        currentY += imgHeight + 10;
+        // Calculate natural dimensions
+        const naturalWidth = canvas.width;
+        const naturalHeight = canvas.height;
+        const naturalAspectRatio = naturalWidth / naturalHeight;
+        
+        // Calculate available space on page (with margins)
+        const availableWidth = pageWidth;
+        const availableHeight = pageHeight - currentY;
+        
+        // Calculate scale to fit within available space
+        const widthScale = availableWidth / naturalWidth;
+        const heightScale = availableHeight / naturalHeight;
+        const scale = Math.min(widthScale, heightScale); // Use the smaller scale to fit both dimensions
+        
+        // Calculate final dimensions
+        const finalWidth = naturalWidth * scale;
+        const finalHeight = naturalHeight * scale;
+        
+        // Add image scaled to fit on the page
+        pdf.addImage(imgData, 'JPEG', 10, currentY, finalWidth, finalHeight);
+        currentY += finalHeight + 10;
       };
 
       // Get all sections
@@ -567,19 +688,24 @@ function ShowLoadout({ setCurrentTab }) {
           );
         })}
 
-        {/* Racks Section */}
-        <div className="mt-8 page-break-inside-avoid page-break-before-always">
-          <div className="border-b-2 border-gray-600 pb-2 mb-4">
-            <h2 className="text-2xl font-bold text-gray-100">Rack Loadouts</h2>
-            <p className="text-gray-400">Racks and their shell assignments with receiver and cue mappings</p>
+        {/* Racks Section Header */}
+        {racks.length > 0 && (
+          <div className="mt-8 page-break-inside-avoid page-break-before-always">
+            <div className="border-b-2 border-gray-600 pb-2 mb-4">
+              <h2 className="text-2xl font-bold text-gray-100">Rack Loadouts</h2>
+              <p className="text-gray-400">Racks and their shell assignments with receiver and cue mappings</p>
+            </div>
           </div>
+        )}
           
-          {racks.length === 0 ? (
+        {racks.length === 0 ? (
+          <div className="mt-8 page-break-inside-avoid page-break-before-always">
             <div className="text-gray-500 italic text-center py-4">
               No racks found for this show.
             </div>
-          ) : (
-            racks.map((rack) => {
+          </div>
+        ) : (
+          racks.flatMap((rack) => {
                 const cells = rack.cells || {};
                 const fuses = rack.fuses || {};
                 const rackCellMap = cellToItemMap[rack.id] || {};
@@ -668,8 +794,9 @@ function ShowLoadout({ setCurrentTab }) {
                 const gridWidth = rack.x_rows * (cellWidth + gap) - gap;
                 const gridHeight = rack.y_rows * (cellHeight + gap) - gap;
 
-                return (
-                  <div key={rack.id} className="mb-8 page-break-inside-avoid">
+                return [
+                  // Rack Grid Section - Each rack gets its own page
+                  <div key={`rack-${rack.id}`} className="mb-8 page-break-inside-avoid page-break-before-always">
                     {/* Rack Header */}
                     <div className="border-b border-gray-600 pb-2 mb-4">
                       <h3 className="text-xl font-bold text-gray-100">{rack.name}</h3>
@@ -681,182 +808,186 @@ function ShowLoadout({ setCurrentTab }) {
 
                     {/* Rack Grid */}
                     <div className="mb-4 relative inline-block">
-                      <div 
-                        className="grid gap-1 relative"
+                    <div 
+                      className="grid gap-1 relative"
+                      style={{ 
+                        gridTemplateColumns: `repeat(${rack.x_rows}, 130px)`,
+                        width: `${gridWidth}px`,
+                      }}
+                    >
+                      {/* SVG overlay for fuse lines - above cells */}
+                      <svg
+                        className="absolute inset-0 pointer-events-none"
                         style={{ 
-                          gridTemplateColumns: `repeat(${rack.x_rows}, 130px)`,
-                          width: `${gridWidth}px`,
+                          width: `${gridWidth}px`, 
+                          height: `${gridHeight}px`,
+                          zIndex: 2
                         }}
                       >
-                        {/* SVG overlay for fuse lines - above cells */}
-                        <svg
-                          className="absolute inset-0 pointer-events-none"
-                          style={{ 
-                            width: `${gridWidth}px`, 
-                            height: `${gridHeight}px`,
-                            zIndex: 2
-                          }}
-                        >
-                          {renderFuseLines()}
-                        </svg>
-                        {Array.from({ length: rack.y_rows }).map((_, y) =>
-                          Array.from({ length: rack.x_rows }).map((_, x) => {
-                            const cellKey = `${x}_${y}`;
-                            const cellData = cells[cellKey];
-                            const cellMapping = rackCellMap[cellKey];
-                            // Debug: log if cellMapping exists
-                            if (cellMapping) {
-                              console.log(`Cell ${cellKey} has mapping:`, cellMapping);
-                            }
-                            const shellData = cellData?.shellId ? getShellData(cellData.shellId) : null;
-                            const shellDescription = shellData && cellData?.shellNumber 
-                              ? getShellDescription(shellData, cellData.shellNumber) 
-                              : null;
-                            const fuseData = cellData?.fuseId ? fuses[cellData.fuseId] : null;
-                            const fuseItem = fuseData ? getFuseData(fuseData.type) : null;
+                        {renderFuseLines()}
+                      </svg>
+                      {Array.from({ length: rack.y_rows }).map((_, y) =>
+                        Array.from({ length: rack.x_rows }).map((_, x) => {
+                          const cellKey = `${x}_${y}`;
+                          const cellData = cells[cellKey];
+                          const cellMapping = rackCellMap[cellKey];
+                          // Debug: log if cellMapping exists
+                          if (cellMapping) {
+                            console.log(`Cell ${cellKey} has mapping:`, cellMapping);
+                          }
+                          const shellData = cellData?.shellId ? getShellData(cellData.shellId) : null;
+                          const shellDescription = shellData && cellData?.shellNumber 
+                            ? getShellDescription(shellData, cellData.shellNumber) 
+                            : null;
+                          const fuseData = cellData?.fuseId ? fuses[cellData.fuseId] : null;
+                          const fuseItem = fuseData ? getFuseData(fuseData.type) : null;
 
-                            return (
-                              <div
-                                key={cellKey}
-                                className={`
-                                  border-2 rounded p-2 relative
-                                  ${cellMapping 
-                                    ? 'border-blue-500 bg-blue-900/20' 
-                                    : cellData?.shellId 
-                                      ? 'border-gray-500 bg-gray-800' 
-                                      : 'border-gray-700 bg-gray-900'
-                                  }
-                                `}
-                                style={{
-                                  width: '130px',
-                                  height: '140px',
-                                  zIndex: 1
-                                }}
-                              >
-                                {/* Receiver and Cue Assignment - Top Right - above fuse lines */}
-                                {cellMapping && (
-                                  <div className="absolute top-1 right-1 text-[10px] text-blue-200 text-right leading-tight" style={{ zIndex: 4 }}>
-                                    <div className="font-semibold whitespace-nowrap">
-                                      {cellMapping.receiverName}
-                                    </div>
-                                    <div className="text-blue-300 whitespace-nowrap">
-                                      {cellMapping.zone}:{cellMapping.target}
-                                    </div>
+                          return (
+                            <div
+                              key={cellKey}
+                              className={`
+                                border-2 rounded p-2 relative
+                                ${cellMapping 
+                                  ? 'border-blue-500 bg-blue-900/20' 
+                                  : cellData?.shellId 
+                                    ? 'border-gray-500 bg-gray-800' 
+                                    : 'border-gray-700 bg-gray-900'
+                                }
+                              `}
+                              style={{
+                                width: '130px',
+                                height: '140px',
+                                zIndex: 1
+                              }}
+                            >
+                              {/* Receiver and Cue Assignment - Top Right - above fuse lines */}
+                              {cellMapping && (
+                                <div className="absolute top-1 right-1 text-[10px] text-blue-200 text-right leading-tight" style={{ zIndex: 4 }}>
+                                  <div className="font-semibold whitespace-nowrap">
+                                    {cellMapping.receiverName}
                                   </div>
-                                )}
-
-                                {/* Cell Position */}
-                                <div className="text-xs text-gray-400 mb-1 text-center">
-                                  ({x}, {y})
+                                  <div className="text-blue-300 whitespace-nowrap">
+                                    {cellMapping.zone}:{cellMapping.target}
+                                  </div>
                                 </div>
+                              )}
 
-                                {/* Shell Info */}
-                                {shellData ? (
-                                  <>
-                                    {shellData.image && (
-                                      <div className="mb-1 flex justify-center">
-                                        <img
-                                          src={shellData.image}
-                                          alt={shellData.name}
-                                          className="w-8 h-8 object-cover rounded border border-gray-600"
-                                        />
-                                      </div>
-                                    )}
-                                    <div className="text-xs text-gray-200 text-center font-semibold mb-1">
-                                      {shellData.name}
-                                    </div>
-                                    {cellData.shellNumber && (
-                                      <div className="text-xs text-gray-400 text-center mb-1">
-                                        #{cellData.shellNumber}
-                                      </div>
-                                    )}
-                                    {shellDescription && (
-                                      <div className="text-xs text-gray-300 text-center mt-1 italic px-1">
-                                        {shellDescription}
-                                      </div>
-                                    )}
-                                  </>
-                                ) : (
-                                  <div className="text-xs text-gray-600 text-center italic">
-                                    Empty
-                                  </div>
-                                )}
+                              {/* Cell Position */}
+                              <div className="text-xs text-gray-400 mb-1 text-center">
+                                ({x}, {y})
                               </div>
-                            );
-                          })
-                        )}
+
+                              {/* Shell Info */}
+                              {shellData ? (
+                                <>
+                                  {shellData.image && (
+                                    <div className="mb-1 flex justify-center">
+                                      <img
+                                        src={shellData.image}
+                                        alt={shellData.name}
+                                        className="w-8 h-8 object-cover rounded border border-gray-600"
+                                      />
+                                    </div>
+                                  )}
+                                  <div className="text-xs text-gray-200 text-center font-semibold mb-1">
+                                    {shellData.name}
+                                  </div>
+                                  {cellData.shellNumber && (
+                                    <div className="text-xs text-gray-400 text-center mb-1">
+                                      #{cellData.shellNumber}
+                                    </div>
+                                  )}
+                                  {shellDescription && (
+                                    <div className="text-xs text-gray-300 text-center mt-1 italic px-1">
+                                      {shellDescription}
+                                    </div>
+                                  )}
+                                </>
+                              ) : (
+                                <div className="text-xs text-gray-600 text-center italic">
+                                  Empty
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                  </div>,
+                  
+                  // Fuses Summary Section - Each fuses section gets its own page
+                  Object.keys(fuses).length > 0 && (
+                    <div key={`fuses-${rack.id}`} className="mb-8 page-break-inside-avoid page-break-before-always">
+                      <div className="border-b border-gray-600 pb-2 mb-4">
+                        <h3 className="text-xl font-bold text-gray-100">Fuses in {rack.name}</h3>
+                      </div>
+                      <div className="mt-4 p-4 bg-gray-800 rounded-lg">
+                        <h4 className="text-lg font-semibold text-gray-100 mb-3">Fuse Details</h4>
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {Object.entries(fuses).map(([fuseId, fuse]) => {
+                          const fuseItem = getFuseData(fuse.type);
+                          if (!fuseItem) return null;
+                          
+                          // Calculate total fuse length
+                          let totalFuseLength = fuse.leadIn || 0;
+                          if (fuse.cells && fuse.cells.length > 1) {
+                            // Calculate distance between consecutive cells
+                            for (let i = 0; i < fuse.cells.length - 1; i++) {
+                              const [x1, y1] = fuse.cells[i].split('_').map(Number);
+                              const [x2, y2] = fuse.cells[i + 1].split('_').map(Number);
+                              
+                              // Calculate distance using rack spacing
+                              const xDiff = Math.abs(x2 - x1);
+                              const yDiff = Math.abs(y2 - y1);
+                              const distance = (xDiff * rack.x_spacing) + (yDiff * rack.y_spacing);
+                              totalFuseLength += distance;
+                            }
+                          }
+                          
+                          // Add 1 inch safety margin
+                          const totalFuseLengthWithMargin = totalFuseLength + 1;
+                          
+                          return (
+                            <div
+                              key={fuseId}
+                              className="border border-yellow-600 rounded p-3 bg-gray-700"
+                            >
+                              <div className="flex items-center gap-2 mb-2">
+                                <div 
+                                  className="w-4 h-4 rounded-full border border-gray-500"
+                                  style={{ backgroundColor: fuseItem.color || '#FFD700' }}
+                                />
+                                <div className="text-sm font-semibold text-gray-100">
+                                  {fuseItem.name}
+                                </div>
+                              </div>
+                              <div className="text-xs text-gray-400 mb-1">
+                                Burn Rate: {fuseItem.burn_rate} s/ft
+                              </div>
+                              <div className="text-xs text-yellow-300 mb-1 font-semibold">
+                                Total Length: {totalFuseLengthWithMargin.toFixed(2)}" (includes 1" safety margin)
+                              </div>
+                              {fuse.leadIn > 0 && (
+                                <div className="text-xs text-gray-400 mb-1">
+                                  Lead-In: {fuse.leadIn}"
+                                </div>
+                              )}
+                              {fuse.cells && fuse.cells.length > 0 && (
+                                <div className="text-xs text-yellow-400 mt-2">
+                                  Connected Cells ({fuse.cells.length}): {fuse.cells.join(', ')}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
                       </div>
                     </div>
-
-                    {/* Fuses Summary */}
-                    {Object.keys(fuses).length > 0 && (
-                      <div className="mt-4 p-4 bg-gray-800 rounded-lg">
-                        <h4 className="text-lg font-semibold text-gray-100 mb-3">Fuses in {rack.name}</h4>
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                          {Object.entries(fuses).map(([fuseId, fuse]) => {
-                            const fuseItem = getFuseData(fuse.type);
-                            if (!fuseItem) return null;
-                            
-                            // Calculate total fuse length
-                            let totalFuseLength = fuse.leadIn || 0;
-                            if (fuse.cells && fuse.cells.length > 1) {
-                              // Calculate distance between consecutive cells
-                              for (let i = 0; i < fuse.cells.length - 1; i++) {
-                                const [x1, y1] = fuse.cells[i].split('_').map(Number);
-                                const [x2, y2] = fuse.cells[i + 1].split('_').map(Number);
-                                
-                                // Calculate distance using rack spacing
-                                const xDiff = Math.abs(x2 - x1);
-                                const yDiff = Math.abs(y2 - y1);
-                                const distance = (xDiff * rack.x_spacing) + (yDiff * rack.y_spacing);
-                                totalFuseLength += distance;
-                              }
-                            }
-                            
-                            // Add 1 inch safety margin
-                            const totalFuseLengthWithMargin = totalFuseLength + 1;
-                            
-                            return (
-                              <div
-                                key={fuseId}
-                                className="border border-yellow-600 rounded p-3 bg-gray-700"
-                              >
-                                <div className="flex items-center gap-2 mb-2">
-                                  <div 
-                                    className="w-4 h-4 rounded-full border border-gray-500"
-                                    style={{ backgroundColor: fuseItem.color || '#FFD700' }}
-                                  />
-                                  <div className="text-sm font-semibold text-gray-100">
-                                    {fuseItem.name}
-                                  </div>
-                                </div>
-                                <div className="text-xs text-gray-400 mb-1">
-                                  Burn Rate: {fuseItem.burn_rate} s/ft
-                                </div>
-                                <div className="text-xs text-yellow-300 mb-1 font-semibold">
-                                  Total Length: {totalFuseLengthWithMargin.toFixed(2)}" (includes 1" safety margin)
-                                </div>
-                                {fuse.leadIn > 0 && (
-                                  <div className="text-xs text-gray-400 mb-1">
-                                    Lead-In: {fuse.leadIn}"
-                                  </div>
-                                )}
-                                {fuse.cells && fuse.cells.length > 0 && (
-                                  <div className="text-xs text-yellow-400 mt-2">
-                                    Connected Cells ({fuse.cells.length}): {fuse.cells.join(', ')}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
+                  )
+                ].filter(Boolean); // Remove any false/null values
               })
-          )}
-        </div>
+        )}
 
         {/* Items with Pictures Section */}
         {(() => {

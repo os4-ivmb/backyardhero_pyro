@@ -7,10 +7,11 @@
 // v5: Baseline version before tracking system (date unknown)
 // v6: 2025-01-XX - Added FW_VERSION tracking system with version history comments (fixed typo: FW_VERISON -> FW_VERSION)
 // v7: 2025-01-XX - Migrated from RF24Mesh to pure RF24 with deterministic addressing
+// v8: 2025-12-30 - Resilience
 #define BOARD_VERISON 7
-#define FW_VERSION 7
+#define FW_VERSION 9
 #define NODE_ID 125
-const char RECEIVER_IDENT[] = "RX125";
+const char RECEIVER_IDENT[] = "RX117";
 
 const bool RECEIVER_USES_V1_CUES = false;
  
@@ -173,6 +174,13 @@ void incrementFailedTXCtAndMaybeChangeTXP(){
   Serial.println("Failed TX. Incrementing counter");
   Serial.println(failed_tx_ct);
 
+  // Board version >= 7 should always use MAX power - don't reduce on failures
+  if(BOARD_VERISON >= 7){
+    Serial.println("Board >= 7: Keeping MAX power level regardless of failures");
+    failed_tx_ct = 0;  // Reset counter but don't change power
+    return;
+  }
+
   if(failed_tx_ct > FAILED_TX_THRESHOLD){
     if(txSetting == 0){
       Serial.println("Failure count exceeded, going back to LOW pa");
@@ -288,9 +296,8 @@ void resetSystem(){
 }
 
 void fireTarget(uint8_t target_pos){
-  uint64_t now = getSynchronizedTime();
   targetFiring[target_pos] = true;
-  fireStartTime[target_pos] = now;
+  fireStartTime[target_pos] = millis();
 
   Serial.print("Firing target at position: ");
   Serial.println(target_pos);
@@ -443,19 +450,19 @@ void runPlayLoop(){
             Serial.print(" | ");
             Serial.println(elapsed);
             targetFiring[i] = true;
-            fireStartTime[i] = now;
+            fireStartTime[i] = millis();
             targetFired[i] = true;
             fireChanged=true;
           }
           
           else if (targetFiring[i]) {
-            if (now - fireStartTime[i] >= FIRE_MS_DURATION) {
+            if (millis() - fireStartTime[i] >= FIRE_MS_DURATION) {
               targetFiring[i] = false;
               fireChanged=true;
               Serial.println("FIRED");
               Serial.println(i);
               Serial.print(" | ");
-              Serial.print(now);
+              Serial.print(millis());
 
             }
           }
@@ -1008,7 +1015,10 @@ void setup(){
   }
   radio.setDataRate(RF24_250KBPS);
 
-  if(BOARD_VERISON < 6){
+  // Board version >= 7 always uses MAX power
+  if(BOARD_VERISON >= 7){
+    radio.setPALevel(RF24_PA_MAX);
+  }else if(BOARD_VERISON < 6){
     radio.setPALevel(RF24_PA_HIGH);
   }else{
     radio.setPALevel(RF24_PA_MAX);
@@ -1097,7 +1107,7 @@ void loop(){
     if(mType == GENERIC_RESET){
       testLEDStrip_smootherSweep();
     }
-    lastCmdReceived = now;
+    lastCmdReceived = millis();
   }
 
   uint16_t lst = 2000;
@@ -1105,47 +1115,53 @@ void loop(){
     lst = 500;
   }
 
-  uint64_t lastSyncTime = now;
-  if(lastSyncTime%lst == 0 && lastSyncLightTime != now){
-    lastSyncLightTime= lastSyncTime;
-    digitalWrite(LED_BUILTIN, LOW);
-  }
-
-  uint16_t flashTime = 100;
+  // Calculate flash period and on-time based on state
+  uint16_t flashPeriod = 2000;
+  uint16_t flashOnTime = 100;
+  
   if(isPlaying){
-    if(now<showStartTime){
-      flashTime = 900;
+    if(now < showStartTime){
+      flashPeriod = 1000;  // Flash every 1 second before show starts
+      flashOnTime = 900;   // On for 900ms
     }else{
-      flashTime = 300;
+      flashPeriod = 600;   // Flash every 600ms during show
+      flashOnTime = 300;   // On for 300ms
     }
   }else if(startReady){
-    flashTime = 400;
+    flashPeriod = 800;     // Flash every 800ms when ready
+    flashOnTime = 400;     // On for 400ms
   }
 
-  if((lastSyncTime+flashTime) % lst == 0 && lastSyncLightTime != now){
-    lastSyncLightTime= lastSyncTime;
-    digitalWrite(LED_BUILTIN, HIGH);
+  // State-based LED flashing using synchronized time
+  // Calculate position within the flash cycle (0 to flashPeriod-1)
+  uint64_t cyclePosition = now % flashPeriod;
+  
+  // Determine desired state: ON if within flashOnTime, OFF otherwise
+  bool desiredState = (cyclePosition < flashOnTime);
+  
+  // Only update LED if state changed (avoids unnecessary writes)
+  if(desiredState != lastSyncLightState){
+    lastSyncLightState = desiredState;
+    digitalWrite(LED_BUILTIN, desiredState ? HIGH : LOW);
   }
 
   
-  if(now - lastCmdReceived > 10000 && gotCommand && !timedOut){
+  if(millis() - lastCmdReceived > 10000 && gotCommand && !timedOut){
     Serial.println("Disconnect detected. Will try to ping again.");
-    Serial.println(now);
+    Serial.println(millis());
     if(isPlaying){
       Serial.println("Disonnected while playing. Stopping show.");
-      testLEDStrip_flashingPurple();
-      isPlaying=false;
+      //testLEDStrip_flashingPurple();
+      //isPlaying=false;
     }
     gotCommand=false;
     timedOut=true;
-     
-
   }
 
   bool doRefresh=false;
   for (uint8_t i = 0; i < 128; i++) {
     if (targetFiring[i]) {
-        if (now - fireStartTime[i] >= FIRE_MS_DURATION) {
+        if (millis() - fireStartTime[i] >= FIRE_MS_DURATION) {
           targetFiring[i] = false;
           doRefresh=true;
         }

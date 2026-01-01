@@ -128,7 +128,7 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId, receiverLabel
         : MdBatteryAlert
       : MdBatteryUnknown;
 
-  const firstZone = Object.keys(receiver.cues)[0]
+  const firstZone = receiver.cues && typeof receiver.cues === 'object' ? Object.keys(receiver.cues)[0] : null;
   const bgColor = "bg-gray-800" + (isConnectionGood ? " opacity-100" : " opacity-50")
 
   return (
@@ -196,35 +196,39 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId, receiverLabel
       {/* Cues Section */}
       <b className="text-gray-300 mt-1 mb-1">Cues</b>
       <div className="flex flex-wrap gap-2 mt-1">
-        {firstZone && receiver.cues[firstZone] && receiver.cues[firstZone].map((target, k) => {
-          // In the previous version, showMapping was keyed by zone. With a single zone, we assume:
-          const item = showMapping?.[firstZone]?.[target]
-          const borderClass = item ? "border-4 border-purple-800" : "border border-gray-500";
+        {firstZone && receiver.cues && receiver.cues[firstZone] && Array.isArray(receiver.cues[firstZone]) ? (
+          receiver.cues[firstZone].map((target, k) => {
+            // In the previous version, showMapping was keyed by zone. With a single zone, we assume:
+            const item = showMapping?.[firstZone]?.[target]
+            const borderClass = item ? "border-4 border-purple-800" : "border border-gray-500";
 
-          // Determine if this cue is active by checking the continuity bits.
-          // receiver.continuity is an array of 4 64-bit numbers covering 256 outputs.
-          let continuityActive = false;
-          if (receiver.status?.continuity && receiver.status?.continuity.length === 2) {
-            const blockIndex = Math.floor(k / 64);
-            const bitIndex = k % 64;
-            const block = receiver.status.continuity[blockIndex];
-            if (block !== undefined) {
-              // Use BigInt to safely handle 64-bit operations.
-              continuityActive = (BigInt(block) & (BigInt(1) << BigInt(bitIndex))) !== BigInt(0);
+            // Determine if this cue is active by checking the continuity bits.
+            // receiver.continuity is an array of 4 64-bit numbers covering 256 outputs.
+            let continuityActive = false;
+            if (receiver.status?.continuity && receiver.status?.continuity.length === 2) {
+              const blockIndex = Math.floor(k / 64);
+              const bitIndex = k % 64;
+              const block = receiver.status.continuity[blockIndex];
+              if (block !== undefined) {
+                // Use BigInt to safely handle 64-bit operations.
+                continuityActive = (BigInt(block) & (BigInt(1) << BigInt(bitIndex))) !== BigInt(0);
+              }
             }
-          }
-          const bgClass = continuityActive ? "bg-green-400" : "bg-red-200";
+            const bgClass = continuityActive ? "bg-green-400" : "bg-red-200";
 
-          return (
-            <div
-              key={k}
-              className={`px-4 py-2 rounded-lg text-sm text-black ${bgClass} cursor-pointer ${borderClass}`}
-              onClick={(e) => handleTargetClick(target, item, e)}
-            >
-              {target}
-            </div>
-          );
-        })}
+            return (
+              <div
+                key={k}
+                className={`px-4 py-2 rounded-lg text-sm text-black ${bgClass} cursor-pointer ${borderClass}`}
+                onClick={(e) => handleTargetClick(target, item, e)}
+              >
+                {target}
+              </div>
+            );
+          })
+        ) : (
+          <div className="text-gray-500 text-sm italic">No cues configured</div>
+        )}
       </div>
 
       {/* Popup for Item Details */}
@@ -321,7 +325,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
     const [showUnusedReceivers, setShowUnusedReceivers] = useState(false);
     const [receiverLabels, setReceiverLabels] = useState({});
 
-    const [receivers, setReceivers] = useState([]);
+    const [receivers, setReceivers] = useState({});
     
     // Load receiver labels from show data
     useEffect(() => {
@@ -352,17 +356,26 @@ export default function ReceiverDisplay({ setCurrentTab }) {
           receiversTmp = stateData.fw_state?.receivers
         }
 
+        console.log('ReceiverDisplay: Setting receivers:', receiversTmp);
+        console.log('ReceiverDisplay: Receiver keys:', Object.keys(receiversTmp));
         setReceivers(receiversTmp);
   
         // Build a lookup table for zones and targets to receivers
         const lookupTable = {};
         Object.keys(receiversTmp).forEach((receiverKey) => {
           const receiver = receiversTmp[receiverKey];
-          Object.keys(receiver.cues).forEach((zoneKey) => {
-            receiver.cues[zoneKey].forEach((target) => {
-              lookupTable[`${zoneKey}:${target}`] = receiverKey; // Create a key for zone:target
+          // Check if receiver has cues property before accessing it
+          if (receiver && receiver.cues && typeof receiver.cues === 'object') {
+            Object.keys(receiver.cues).forEach((zoneKey) => {
+              if (Array.isArray(receiver.cues[zoneKey])) {
+                receiver.cues[zoneKey].forEach((target) => {
+                  lookupTable[`${zoneKey}:${target}`] = receiverKey; // Create a key for zone:target
+                });
+              }
             });
-          });
+          } else {
+            console.warn(`ReceiverDisplay: Receiver ${receiverKey} missing cues property:`, receiver);
+          }
         });
 
   
@@ -643,10 +656,19 @@ export default function ReceiverDisplay({ setCurrentTab }) {
 
             {/* All Receivers (when no show is staged) */}
             {(!stagedShow || Object.keys(targetRcvMap).length === 0) && (
-                <div className="flex flex-wrap gap-5 p-4 justify-center">
-                    {Object.keys(receivers).map((rcv_key, i) => (
-                        <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id} receiverLabel={receiverLabels[rcv_key]}/>
-                    ))}
+                <div>
+                    {Object.keys(receivers).length === 0 ? (
+                        <div className="p-4 text-center text-gray-400">
+                            <p>No receivers found.</p>
+                            <p className="text-sm mt-2">Check console for receiver data from dongle.</p>
+                        </div>
+                    ) : (
+                        <div className="flex flex-wrap gap-5 p-4 justify-center">
+                            {Object.keys(receivers).map((rcv_key, i) => (
+                                <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id} receiverLabel={receiverLabels[rcv_key]}/>
+                            ))}
+                        </div>
+                    )}
                 </div>
             )}
         </div>

@@ -79,6 +79,9 @@ class BYHProtocolHandler:
         
         # Track latency samples for sliding average (max 20 samples per receiver)
         self.latency_samples = {}  # Key: receiver ident, Value: list of latency values
+        
+        # Track last clock sync time to avoid syncing too frequently
+        self.last_sync_time = 0
 
         self.load_initial_receiver_cfg()
         print(f"Initialized Protocol {self.protocol}")
@@ -89,9 +92,16 @@ class BYHProtocolHandler:
         self.sync_tx_clock()
 
     def sync_tx_clock(self):
-        sync_message = "msync 0 " + str(int(time.time() * 1000)) + "\n"
-        print("Syncing tx host clock:", sync_message.strip())
-        self.parent.send_serial_command(sync_message)
+        # Get sync interval from LED handler config (default 60 seconds)
+        sync_interval_ms = self.parent.led_handler.led_states.get("dongle_sync_interval_ms", 60000)
+        current_time_ms = int(time.time() * 1000)
+        
+        # Only sync if enough time has passed since last sync
+        if current_time_ms - self.last_sync_time >= sync_interval_ms:
+            sync_message = "msync 0 " + str(current_time_ms) + "\n"
+            print("Syncing tx host clock:", sync_message.strip())
+            self.parent.send_serial_command(sync_message)
+            self.last_sync_time = current_time_ms
 
     def load_initial_receiver_cfg(self):
         try:
@@ -148,7 +158,9 @@ class BYHProtocolHandler:
 
 
     def process_status_msg(self, msg_obj):
-        self.last_status_ts = msg_obj.get('timestamp', 0)
+        # Message uses 't' for timestamp, not 'timestamp'
+        msg_timestamp = msg_obj.get('t', msg_obj.get('timestamp', 0))
+        self.last_status_ts = msg_timestamp
 
         # Define a mapping for abbreviated keys to full keys
         key_map = {
@@ -164,11 +176,45 @@ class BYHProtocolHandler:
             'sp': 'successPercent'
         }
 
-        lmtoffset = int(time.time() * 1000) - msg_obj.get('timestamp', 0)
+        lmtoffset = int(time.time() * 1000) - msg_timestamp
 
-        for receiver in msg_obj.get('receivers', []):
-            if receiver.get('i') in self.receivers:
-                receiver_ident = receiver.get('i')
+        # Handle both 'r' (array format) and 'receivers' (object format)
+        receivers_data = msg_obj.get('receivers', [])
+        
+        # If 'r' key exists, convert array format to object format
+        if 'r' in msg_obj and not receivers_data:
+            r_array = msg_obj.get('r', [])
+            receivers_data = []
+            print(f"Processing 'r' array with {len(r_array)} receivers")
+            for r_item in r_array:
+                if isinstance(r_item, list) and len(r_item) >= 10:
+                    # Convert array format: [ident, node, battery, showState, ?, ?, lmt, latency?, successPercent, continuity]
+                    # Format: ["RX118", 118, 253, 0, 0, 0, 1767234030105, 0, 100, [0, 0]]
+                    receiver_obj = {
+                        'i': r_item[0],  # ident
+                        'n': r_item[1],  # node
+                        'b': r_item[2],  # battery
+                        't': r_item[6],  # lmt (last message time)
+                        'sp': r_item[8],  # successPercent
+                        'c': r_item[9] if len(r_item) > 9 and isinstance(r_item[9], list) else [0, 0]  # continuity
+                    }
+                    # Check if r_item[3] contains showId/flags (bits 0-13: showId, bit 14: loadComplete, bit 15: startReady)
+                    if len(r_item) > 3:
+                        show_state = r_item[3]
+                        receiver_obj['s'] = show_state & 0x3FFF  # showId (bits 0-13)
+                        receiver_obj['l'] = bool(show_state & (1 << 14))  # loadComplete (bit 14)
+                        receiver_obj['r'] = bool(show_state & (1 << 15))  # startReady (bit 15)
+                    # Check if r_item[7] contains latency
+                    if len(r_item) > 7 and r_item[7] > 0:
+                        receiver_obj['x'] = r_item[7]  # latency
+                    receivers_data.append(receiver_obj)
+                    print(f"Converted receiver: {receiver_obj.get('i')} (node {receiver_obj.get('n')})")
+                else:
+                    print(f"Warning: Invalid receiver array format: {r_item}")
+
+        for receiver in receivers_data:
+            receiver_ident = receiver.get('i')
+            if receiver_ident in self.receivers:
                 # Create a new dictionary with full keys
                 full_receiver = {}
                 for abbr_key, full_key in key_map.items():
@@ -196,10 +242,12 @@ class BYHProtocolHandler:
                             
                             # Round to whole number and set
                             full_receiver[full_key] = round(avg_latency)
-                self.receivers[receiver['i']]['drift'] = lmtoffset
-                self.receivers[receiver['i']]['status'] = full_receiver
+                self.receivers[receiver_ident]['drift'] = lmtoffset
+                self.receivers[receiver_ident]['status'] = full_receiver
+                if self.parent.debug_mode:
+                    print(f"Updated receiver {receiver_ident} status: battery={full_receiver.get('battery')}, lmt={full_receiver.get('lmt')}, successPercent={full_receiver.get('successPercent')}")
             else:
-                print(f"Receiver {receiver.get('i')} is not known. Ignoring.")
+                print(f"Receiver {receiver_ident} is not in config. Available receivers: {list(self.receivers.keys())}")
         
         self.updateRelevantStates()
 
