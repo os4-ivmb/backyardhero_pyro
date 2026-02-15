@@ -7,10 +7,10 @@
 // v5: Baseline version before tracking system (date unknown)
 // v6: 2025-01-XX - Added FW_VERSION tracking system with version history comments (fixed typo: FW_VERISON -> FW_VERSION)
 // v7: 2025-01-XX - Migrated from RF24Mesh to pure RF24 with deterministic addressing
-#define BOARD_VERISON 7
-#define FW_VERSION 7
-#define NODE_ID 125
-const char RECEIVER_IDENT[] = "RX125";
+#define BOARD_VERISON 9
+#define FW_VERSION 8
+#define NODE_ID 155
+const char RECEIVER_IDENT[] = "RX142";
 
 const bool RECEIVER_USES_V1_CUES = false;
  
@@ -27,6 +27,8 @@ const bool RECEIVER_USES_V1_CUES = false;
 #define FIRE_MS_DURATION 1000
 
 #define LED_PIN 11
+#define STATUS_LED_PIN 17  // DAC_1 (GPIO25) - physical pin 23 on ESP32
+#define STATUS_LED_COUNT 3
 #define BATT_VOLTAGE_PIN 3
 #define BOARD_CT_PIN 2
 int NUM_BOARDS = 1;
@@ -46,6 +48,8 @@ int NUM_LEDS = (8 * NUM_BOARDS);
 const uint16_t STATUS_INTERVAL = 2000;
 const uint8_t FAILED_TX_THRESHOLD = 4;
 const uint16_t INPUT_MODE_INTERVAL = 100;
+const uint16_t RX_MESSAGE_FADE_TIME_MS = 1500;  // Fade time for LED #1 (message indicator) in milliseconds
+const uint16_t SYNC_LED_FADE_TIME_MS = 1250;   // Fade time for LED #2 (time sync) in milliseconds
 
 
 bool targetFiring[128] = { false };
@@ -54,10 +58,13 @@ bool targetFired[128] = { false };
 
 bool gotCommand = false;
 bool timedOut = false;
+bool everConnected = false;  // Track if we've ever received a command
 uint64_t lastCmdReceived = 0;
 uint64_t lastInputModeRunTime = 0;
+uint64_t lastMessageReceivedTime = 0;  // Track when last message was received for LED 1 fade
 
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel statusStrip(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
 
 uint32_t COLOR_CONT_NEEDED = strip.Color(180, 0, 0);
 uint32_t COLOR_CONT_ACHIEVED = strip.Color(0, 175, 0);
@@ -290,7 +297,7 @@ void resetSystem(){
 void fireTarget(uint8_t target_pos){
   uint64_t now = getSynchronizedTime();
   targetFiring[target_pos] = true;
-  fireStartTime[target_pos] = now;
+  fireStartTime[target_pos] = millis();
 
   Serial.print("Firing target at position: ");
   Serial.println(target_pos);
@@ -341,16 +348,43 @@ void handleGeneric(GenericMessage* msg){
  
 
 
-void sendStatus(){
-  Serial.println("Stat send");
+// Calculate battery level (returns 5-253)
+uint8_t calculateBatteryLevel() {
   int bval = analogRead(BATT_VOLTAGE_PIN)/2;
   if(bval > 3700){
-    bval=253;
+    return 253;
   }else if(bval < 2350){
-    bval=5;
+    return 5;
   }else{
-    bval = ((bval - 2320) / 15.38)*2.5;
+    return ((bval - 2320) / 15.38)*2.5;
   }
+}
+
+// Get battery color based on level (5-253 range)
+// Returns gradient: red (5) -> yellow (mid) -> green (253)
+// Returns RGB values via pointers
+void getBatteryColorRGB(uint8_t batteryLevel, uint8_t *r, uint8_t *g, uint8_t *b) {
+  // Map 5-253 to 0-248 for easier calculation
+  uint16_t level = batteryLevel - 5;  // Now 0-248
+  
+  if (level < 124) {
+    // Red to Yellow: 0-124
+    // Red stays at 255, Green increases from 0 to 255
+    *r = 255;
+    *g = (level * 255) / 124;
+    *b = 0;
+  } else {
+    // Yellow to Green: 124-248
+    // Red decreases from 255 to 0, Green stays at 255
+    *r = 255 - ((level - 124) * 255) / 124;
+    *g = 255;
+    *b = 0;
+  }
+}
+
+void sendStatus(){
+  Serial.println("Stat send");
+  uint8_t bval = calculateBatteryLevel();
 
   ReceiverStatusMessage msg;
   msg.type = RECEIVER_STATUS;
@@ -419,6 +453,7 @@ uint64_t lastStatus = 0;
 uint64_t lastContinuity = 0;
 bool lastSyncLightState = 0;
 uint64_t lastSyncLightTime = 0;
+uint64_t syncFlashStartTime = 0;  // Track when sync flash started for fade
 bool fireChanged = false;
 
 void runPlayLoop(){
@@ -443,13 +478,13 @@ void runPlayLoop(){
             Serial.print(" | ");
             Serial.println(elapsed);
             targetFiring[i] = true;
-            fireStartTime[i] = now;
+            fireStartTime[i] = millis();
             targetFired[i] = true;
             fireChanged=true;
           }
           
           else if (targetFiring[i]) {
-            if (now - fireStartTime[i] >= FIRE_MS_DURATION) {
+            if (millis() - fireStartTime[i] >= FIRE_MS_DURATION) {
               targetFiring[i] = false;
               fireChanged=true;
               Serial.println("FIRED");
@@ -705,6 +740,207 @@ void testLEDStrip_smootherSweep(){
   strip.show();
 }
 
+void statusLEDStartupSequence() {
+  // 1. Slow purple fade in/out (1.5 sec total = 750ms each direction)
+  int purpleSteps = 50;
+  int purpleDelay = 15;  // 50 * 15 * 2 = 1500ms total
+  
+  // Fade in purple
+  for (int j = 0; j <= purpleSteps; j++) {
+    uint8_t brightness = (j * 255) / purpleSteps;
+    for (int i = 0; i < STATUS_LED_COUNT; i++) {
+      statusStrip.setPixelColor(i, statusStrip.Color(brightness, 0, brightness));  // Purple
+    }
+    statusStrip.show();
+    delay(purpleDelay);
+  }
+  
+  // Fade out purple
+  for (int j = purpleSteps; j >= 0; j--) {
+    uint8_t brightness = (j * 255) / purpleSteps;
+    for (int i = 0; i < STATUS_LED_COUNT; i++) {
+      statusStrip.setPixelColor(i, statusStrip.Color(brightness, 0, brightness));  // Purple
+    }
+    statusStrip.show();
+    delay(purpleDelay);
+  }
+  
+  statusStrip.clear();
+  statusStrip.show();
+  delay(100);
+  
+  // 2. Show battery level with gradient
+  uint8_t batteryLevel = calculateBatteryLevel();
+  
+  // Calculate battery percentage (5-253 maps to 0-100%)
+  uint8_t batteryPercent = ((batteryLevel - 5) * 100) / 248;
+  Serial.print("Battery Level: ");
+  Serial.print(batteryLevel);
+  Serial.print(" (");
+  Serial.print(batteryPercent);
+  Serial.println("%)");
+  
+  // Calculate thresholds: 3 equal chunks from 5 to 253
+  // Range is 248 (253-5), so each chunk is ~82.67
+  uint8_t threshold1 = 5 + 82;   // ~87
+  uint8_t threshold2 = 5 + 165;  // ~170
+  
+  // Determine which LEDs to light based on battery level
+  uint8_t numLEDsToLight = 1;
+  if (batteryLevel >= threshold2) {
+    numLEDsToLight = 3;  // All 3 LEDs
+  } else if (batteryLevel >= threshold1) {
+    numLEDsToLight = 2;  // LEDs 1 and 2
+  } else {
+    numLEDsToLight = 1;  // Just LED 1
+  }
+  
+  // Get battery color RGB
+  uint8_t batR, batG, batB;
+  getBatteryColorRGB(batteryLevel, &batR, &batG, &batB);
+  
+  // Fade up the appropriate LEDs
+  int batteryFadeSteps = 30;
+  int batteryFadeDelay = 5;
+  
+  for (int j = 0; j <= batteryFadeSteps; j++) {
+    uint8_t brightness = (j * 255) / batteryFadeSteps;
+    
+    statusStrip.clear();
+    for (int i = 0; i < numLEDsToLight; i++) {
+      statusStrip.setPixelColor(i, statusStrip.Color(
+        (batR * brightness) / 255,
+        (batG * brightness) / 255,
+        (batB * brightness) / 255
+      ));
+    }
+    statusStrip.show();
+    delay(batteryFadeDelay);
+  }
+  
+  // Hold for 1.5 seconds
+  delay(1500);
+  
+  // 3. White fade in over 1.5 sec
+  int whiteSteps = 50;
+  int whiteDelay = 30;  // 50 * 30 = 1500ms
+  
+  for (int j = 0; j <= whiteSteps; j++) {
+    uint8_t brightness = (j * 255) / whiteSteps;
+    for (int i = 0; i < STATUS_LED_COUNT; i++) {
+      statusStrip.setPixelColor(i, statusStrip.Color(brightness, brightness, brightness));  // White
+    }
+    statusStrip.show();
+    delay(whiteDelay);
+  }
+  
+  // Clear and done
+  statusStrip.clear();
+  statusStrip.show();
+}
+
+void updateStatusLEDs() {
+  uint64_t now = getSynchronizedTime();
+  uint64_t currentMillis = millis();
+  
+  // LED #1: Message indicator - 100ms on when message received, then fade out
+  if (lastMessageReceivedTime > 0) {
+    uint64_t timeSinceMessage = currentMillis - lastMessageReceivedTime;
+    uint16_t totalFadeDuration = 100 + RX_MESSAGE_FADE_TIME_MS;  // 100ms on + fade time
+    
+    if (timeSinceMessage < 100) {
+      // On for 100ms
+      statusStrip.setPixelColor(0, statusStrip.Color(255, 255, 255));  // White
+    } else if (timeSinceMessage < totalFadeDuration) {
+      // Fade out over configured fade time
+      uint16_t fadeTime = timeSinceMessage - 100;  // Time into fade (0 to RX_MESSAGE_FADE_TIME_MS)
+      uint8_t brightness = 255 - ((fadeTime * 255) / RX_MESSAGE_FADE_TIME_MS);
+      statusStrip.setPixelColor(0, statusStrip.Color(brightness, brightness, brightness));
+    } else {
+      // Fade complete, turn off
+      statusStrip.setPixelColor(0, statusStrip.Color(0, 0, 0));
+      lastMessageReceivedTime = 0;  // Reset
+    }
+  } else {
+    statusStrip.setPixelColor(0, statusStrip.Color(0, 0, 0));
+  }
+  
+  // LED #2: Time sync LED with battery color gradient
+  uint8_t batteryLevel = calculateBatteryLevel();
+  uint8_t batR, batG, batB;
+  getBatteryColorRGB(batteryLevel, &batR, &batG, &batB);
+  
+  if (isPlaying) {
+    // Solid purple when show is running
+    statusStrip.setPixelColor(1, statusStrip.Color(128, 0, 128));
+    syncFlashStartTime = 0;  // Reset when playing
+  } else {
+    // Flash with battery color when not running a show (sync indicator)
+    uint16_t lst = 2000;
+    uint16_t flashTime = 100;
+    if (startReady) {
+      flashTime = 400;
+    }
+    
+    // Flash logic: LED turns on at (lst - flashTime) and off at 0
+    uint64_t cyclePos = now % lst;
+    
+    // Check if we're in the flash window - if so, start/reset the fade timer
+    if (cyclePos >= (lst - flashTime)) {
+      // LED should be on during the flash window (end of cycle)
+      // Track when flash starts (only set if not already set or if fade is complete)
+      if (syncFlashStartTime == 0 || (now - syncFlashStartTime) >= SYNC_LED_FADE_TIME_MS) {
+        syncFlashStartTime = now;
+      }
+    }
+    
+    // Calculate fade brightness based on time since flash started
+    uint8_t brightness = 0;
+    if (syncFlashStartTime > 0) {
+      uint64_t fadeElapsed = now - syncFlashStartTime;  // Time since flash started
+      if (fadeElapsed < SYNC_LED_FADE_TIME_MS) {
+        // Fade from full brightness to 0 over configured fade time
+        brightness = 255 - ((fadeElapsed * 255) / SYNC_LED_FADE_TIME_MS);
+      } else {
+        // Fade complete, turn off and reset for next flash
+        brightness = 0;
+        syncFlashStartTime = 0;  // Reset for next cycle
+      }
+    }
+    
+    // Apply brightness to battery color (always show, even if fading)
+    if (brightness > 0) {
+      statusStrip.setPixelColor(1, statusStrip.Color(
+        (batR * brightness) / 255,
+        (batG * brightness) / 255,
+        (batB * brightness) / 255
+      ));
+    } else {
+      statusStrip.setPixelColor(1, statusStrip.Color(0, 0, 0));
+    }
+  }
+  
+  // LED #3: Show run state (keep same as before)
+  if (expectedTargets > 0 && !loadComplete) {
+    // Starting and being in the middle of a show load - Orange
+    statusStrip.setPixelColor(2, statusStrip.Color(255, 165, 0));
+  } else if (loadComplete && !startReady) {
+    // Completing a load (having a show loaded) - Cyan
+    statusStrip.setPixelColor(2, statusStrip.Color(0, 255, 255));
+  } else if (isPlaying && now < showStartTime) {
+    // isPlaying, but time is before showStartTime (waiting to start) - Magenta
+    statusStrip.setPixelColor(2, statusStrip.Color(255, 0, 255));
+  } else if (isPlaying && now >= showStartTime) {
+    // isPlaying, and time is after showStartTime - White
+    statusStrip.setPixelColor(2, statusStrip.Color(255, 255, 255));
+  } else {
+    // Off = standing by
+    statusStrip.setPixelColor(2, statusStrip.Color(0, 0, 0));
+  }
+  
+  statusStrip.show();
+}
+
 void setBoardCount(){
   int tolerance = 100;
 
@@ -788,7 +1024,11 @@ void writeOutputShiftRegister(uint8_t targets[], size_t numTargets) {
     shiftData[boardIndex] |= (1 << position);
   }
 
-  digitalWrite(SHIFT_OUT_OE, LOW);
+  if(BOARD_VERISON >= 8){
+    digitalWrite(SHIFT_OUT_OE, HIGH);
+  }else{
+    digitalWrite(SHIFT_OUT_OE, LOW);
+  }
   digitalWrite(SHIFT_OUT_LATCH, LOW);
 
   
@@ -948,18 +1188,45 @@ void handleInputMode() {
 
 
 void setup(){
+  // Disable OE, set all outputs to 0, then enable OE
   pinMode(SHIFT_OUT_OE, OUTPUT);
-  digitalWrite(SHIFT_OUT_OE, LOW);
+  // OE is disabled: LOW for >=8, HIGH otherwise
+  if(BOARD_VERISON >= 8){
+    digitalWrite(SHIFT_OUT_OE, LOW);  // Disable outputs
+  }else{
+    digitalWrite(SHIFT_OUT_OE, HIGH); // Disable outputs
+  }
+
+  pinMode(SHIFT_OUT_CLOCK, OUTPUT);
+  pinMode(SHIFT_OUT_LATCH, OUTPUT);
+  pinMode(SHIFT_OUT_DATA, OUTPUT);
+  
+  // Set all shift register outputs to 0 (max 8 boards, doesn't require NUM_BOARDS)
+  digitalWrite(SHIFT_OUT_LATCH, LOW);
+  for (int i = 7; i >= 0; i--) {
+    myShiftOut(SHIFT_OUT_DATA, SHIFT_OUT_CLOCK, MSBFIRST, 0);
+  }
+  digitalWrite(SHIFT_OUT_LATCH, HIGH);
+  
+  // Enable outputs (opposite of disable)
+  if(BOARD_VERISON >= 8){
+    digitalWrite(SHIFT_OUT_OE, HIGH); // Enable outputs
+  }else{
+    digitalWrite(SHIFT_OUT_OE, LOW);  // Enable outputs
+  }
 
   Serial.begin(115200);
 
   delay(1000);
 
-  pinMode(LED_BUILTIN, OUTPUT);
-
   Serial.println("SBC");
   setBoardCount();
   Serial.println(NUM_BOARDS);
+  
+  // Set up shift register pins immediately
+  pinMode(SHIFT_IN_CLOCK, OUTPUT);
+  pinMode(SHIFT_IN_LATCH, OUTPUT);
+  pinMode(SHIFT_IN_DATA, INPUT);
 
   Serial.print("Board Version: ");
   Serial.println(BOARD_VERISON);
@@ -970,32 +1237,25 @@ void setup(){
   Serial.print("Ident: ");
   Serial.println(RECEIVER_IDENT);
 
-  for(int i = 0; i < NUM_BOARDS ; i++){
-    delay(250);
-    digitalWrite(LED_BUILTIN, 1);
-    delay(250);
-    digitalWrite(LED_BUILTIN,0);
-  }
+  Serial.println("Initializing status strip...");
+  statusStrip.begin();
+  statusStrip.clear();
+  statusStrip.show();
+  
+  Serial.println("Status start");
+  statusLEDStartupSequence();
 
+  Serial.println("Status finish");
   strip.begin();
   strip.clear();
   strip.show();
 
   strip.updateLength(NUM_LEDS);
+  Serial.println("Main strip length updated");
+  Serial.println(NUM_LEDS);
 
   testLEDStrip();
-  
-  
-  pinMode(SHIFT_OUT_CLOCK, OUTPUT);
-  pinMode(SHIFT_OUT_LATCH, OUTPUT);
-  pinMode(SHIFT_OUT_DATA, OUTPUT);
-
-    
-  pinMode(SHIFT_IN_CLOCK, OUTPUT);
-  pinMode(SHIFT_IN_LATCH, OUTPUT);
-  pinMode(SHIFT_IN_DATA, INPUT);
-
-  writeOutputShiftRegister({},0);
+  Serial.println("Strip tested");
   
   if(BOARD_VERISON < 6){
     SPI.begin(36, 37, 35);
@@ -1054,7 +1314,9 @@ void loop(){
     radio.read(&buf, msgSize);
     uint8_t mType = buf[0];
     gotCommand = true;
+    everConnected = true;  // Mark that we've connected at least once
     timedOut = false;
+    lastMessageReceivedTime = millis();  // Track message reception for LED 1
     switch(mType){
       case MANUAL_FIRE:
         handleManualFire((ManualFireMessage*)buf);
@@ -1100,6 +1362,7 @@ void loop(){
     lastCmdReceived = now;
   }
 
+  // Update status LEDs (replaces old LED_BUILTIN sync light logic)
   uint16_t lst = 2000;
   if(getSynchronizedTime()<showStartTime && isPlaying){
     lst = 500;
@@ -1108,7 +1371,6 @@ void loop(){
   uint64_t lastSyncTime = now;
   if(lastSyncTime%lst == 0 && lastSyncLightTime != now){
     lastSyncLightTime= lastSyncTime;
-    digitalWrite(LED_BUILTIN, LOW);
   }
 
   uint16_t flashTime = 100;
@@ -1124,8 +1386,10 @@ void loop(){
 
   if((lastSyncTime+flashTime) % lst == 0 && lastSyncLightTime != now){
     lastSyncLightTime= lastSyncTime;
-    digitalWrite(LED_BUILTIN, HIGH);
   }
+  
+  // Update all status LEDs based on current state
+  updateStatusLEDs();
 
   
   if(now - lastCmdReceived > 10000 && gotCommand && !timedOut){
@@ -1145,7 +1409,7 @@ void loop(){
   bool doRefresh=false;
   for (uint8_t i = 0; i < 128; i++) {
     if (targetFiring[i]) {
-        if (now - fireStartTime[i] >= FIRE_MS_DURATION) {
+        if (millis() - fireStartTime[i] >= FIRE_MS_DURATION) {
           targetFiring[i] = false;
           doRefresh=true;
         }
