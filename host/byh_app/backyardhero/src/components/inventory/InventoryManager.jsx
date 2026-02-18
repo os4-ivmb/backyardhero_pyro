@@ -3,6 +3,7 @@ import React, { useEffect, useState } from "react"
 import useAppStore from '@/store/useAppStore';
 import InventoryList from "./InventoryList";
 import { INV_TYPES } from "@/constants";
+import { normalizeYouTubeUrl } from "@/util/youtube";
 
 const DEFAULT_DATA = {
     id: "",
@@ -36,7 +37,7 @@ export function CakeFields(props){
             <label className="block text-gray-200 text-sm font-bold mb-2" htmlFor="name">
                 Youtube Link
             </label>
-            <input value={props.formObject.youtube_link || ""} onChange={props.handleInputChange} className="shadow appearance-none border rounded w-full py-2 px-3 mb-2 text-white leading-tight focus:outline-none focus:shadow-outline" name="youtube_link" type="text"/>
+            <input value={props.formObject.youtube_link || ""} onChange={props.handleInputChange} onBlur={props.handleYouTubeLinkBlur} className="shadow appearance-none border rounded w-full py-2 px-3 mb-2 text-white leading-tight focus:outline-none focus:shadow-outline" name="youtube_link" type="text" placeholder="https://youtube.com/watch?v=... or https://youtu.be/..."/>
             <label className="block text-gray-200 text-sm font-bold mb-2" htmlFor="name">
                 Youtube Link Start Seconds
             </label>
@@ -61,7 +62,7 @@ export function ShellFields(props){
             <label className="block text-gray-200 text-sm font-bold mb-2" htmlFor="name">
                 Youtube Link
             </label>
-            <input value={props.formObject.youtube_link || ""} onChange={props.handleInputChange} className="shadow appearance-none border rounded w-full py-2 px-3 mb-2 text-white leading-tight focus:outline-none focus:shadow-outline" name="youtube_link" type="text"/>
+            <input value={props.formObject.youtube_link || ""} onChange={props.handleInputChange} onBlur={props.handleYouTubeLinkBlur} className="shadow appearance-none border rounded w-full py-2 px-3 mb-2 text-white leading-tight focus:outline-none focus:shadow-outline" name="youtube_link" type="text" placeholder="https://youtube.com/watch?v=... or https://youtu.be/..."/>
             <label className="block text-gray-200 text-sm font-bold mb-2" htmlFor="name">
                 Youtube Link Start Seconds
             </label>
@@ -99,6 +100,17 @@ const AddInventoryForm = (props) => {
         setFormObject({ ...DEFAULT_DATA, [name]: value, id: formObject.id });
       } else {
         setFormObject({ ...formObject, [name]: value });
+      }
+    };
+
+    const handleYouTubeLinkBlur = (e) => {
+      const { value } = e.target;
+      if (value && value.trim() !== '') {
+        const normalizedUrl = normalizeYouTubeUrl(value);
+        if (normalizedUrl && normalizedUrl !== value) {
+          // Update the form with normalized URL so user can see it
+          setFormObject({ ...formObject, youtube_link: normalizedUrl });
+        }
       }
     };
   
@@ -209,6 +221,7 @@ const AddInventoryForm = (props) => {
   
           <FieldsComponent
             handleInputChange={handleInputChange}
+            handleYouTubeLinkBlur={handleYouTubeLinkBlur}
             formObject={formObject}
           />
   
@@ -243,14 +256,27 @@ export default function InventoryManager(props){
     }
 
     const addOrCreateItem = (inv_item) => {
-        if(inv_item.id){
+        // Normalize YouTube URL before saving
+        let normalizedItem = { ...inv_item };
+        if (inv_item.youtube_link && inv_item.youtube_link.trim() !== '') {
+            const normalizedUrl = normalizeYouTubeUrl(inv_item.youtube_link);
+            if (normalizedUrl) {
+                normalizedItem.youtube_link = normalizedUrl;
+            } else {
+                // If URL is invalid, clear it or keep as-is (user might want to fix later)
+                // For now, we'll clear invalid URLs
+                normalizedItem.youtube_link = '';
+            }
+        }
+
+        if(normalizedItem.id){
             // Preserve existing metadata if not provided in the update
-            const existingItem = inventory.find(item => item.id === inv_item.id);
+            const existingItem = inventory.find(item => item.id === normalizedItem.id);
             let metadataToSave = null;
             
             // If metadata is explicitly in the form object, use it
-            if (inv_item.metadata !== undefined) {
-                metadataToSave = inv_item.metadata;
+            if (normalizedItem.metadata !== undefined) {
+                metadataToSave = normalizedItem.metadata;
             } else if (existingItem?.metadata) {
                 // Otherwise, preserve existing metadata
                 metadataToSave = existingItem.metadata;
@@ -262,13 +288,13 @@ export default function InventoryManager(props){
             }
             
             const updateData = {
-                ...inv_item,
+                ...normalizedItem,
                 metadata: metadataToSave
             };
             
-            updateInventoryItem(inv_item.id, updateData)
+            updateInventoryItem(normalizedItem.id, updateData)
         }else{
-            createInventoryItem(inv_item)
+            createInventoryItem(normalizedItem)
         }
         setNewItem(false)
     }
