@@ -131,6 +131,53 @@ The system follows a lifecycle for show execution. I learned it from launching r
     *   The main user configuration file is `host/config/systemcfg.json`.
     *   **Serial Port (`SERIAL_PORT`):** This is the most critical setting. Identify the correct serial port for your connected dongle and update it in `host/config/systemcfg.json`. While `docker-compose.yml` also defines `SERIAL_PORT`, the `systemcfg.json` file is the recommended place for this user-specific setting.
     *   **Serial Baud Rate (`SERIAL_BAUD`):** Fixed at `115200` by the dongle hardware; do not change.
+    *   **Add Receivers:** You must add your receivers to `host/config/systemcfg.json` before the system can communicate with them. Each receiver should be listed with its identifier (e.g., "RX161"). The system will only communicate with receivers that are listed in this configuration.
+    
+    **Receiver Configuration Format:**
+    
+    Each receiver entry requires:
+    - **Identifier:** The receiver's unique ID (must match the identifier programmed in the receiver firmware, e.g., "RX161")
+    - **Type:** The receiver type, typically `"BKYD_TS_24_1"` for custom 2.4GHz receivers
+    - **Cues:** An array of cue numbers that this receiver controls
+    
+    **Example: Single 8-Cue Module (8 cues):**
+    ```json
+    "RX161": {
+      "label": "Main Receiver",
+      "type": "BKYD_TS_24_1",
+      "cues": {
+        "RX161": [1, 2, 3, 4, 5, 6, 7, 8]
+      }
+    }
+    ```
+    
+    **Example: Two 8-Cue Modules Chained (16 cues):**
+    ```json
+    "RX162": {
+      "label": "Secondary Receiver",
+      "type": "BKYD_TS_24_1",
+      "cues": {
+        "RX162": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+      }
+    }
+    ```
+    
+    **Example: Four 8-Cue Modules Chained (32 cues):**
+    ```json
+    "RX163": {
+      "label": "Large Receiver Array",
+      "type": "BKYD_TS_24_1",
+      "cues": {
+        "RX163": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
+      }
+    }
+    ```
+    
+    **Important Notes:**
+    - The cue numbers in the array should start at 1 and increment sequentially
+    - The number of cues should match the number of cue modules physically connected to the receiver
+    - Each receiver can support up to 128 cues (16 modules × 8 cues each)
+    - The receiver identifier in the `cues` object key must match the receiver identifier at the top level
     *   **Privileged Mode (Docker):** If you encounter serial port permission issues, ensure `privileged: true` is active in `host/docker-compose.yml` (it is by default). This grants the Docker container necessary hardware access.
 
 ### Running the System
@@ -150,12 +197,15 @@ The system follows a lifecycle for show execution. I learned it from launching r
         ```
     These scripts handle building the Docker images (if not already built) and starting the application stack.
 
+    > **Note for Development:** If you're developing or trying out the system, `start_dev.sh` (OSX/Linux) or `start_dev.bat` (Windows) may be preferable as they provide development-friendly configurations with hot-reloading and easier debugging.
+
 3.  **Access the Web Interface:**
     Open your web browser and go to `http://localhost:1776`.
 
 ## Key Files & Directories
 
 *   `host/start.sh` & `host/start.bat`: Master scripts for starting the system on Unix-like systems and Windows, respectively.
+*   `host/start_dev.sh` & `host/start_dev.bat`: Development scripts with hot-reloading and debugging features (recommended for development and testing).
 *   `host/docker-compose.yml`: Defines the Docker services, networks, and volumes.
 *   `host/Dockerfile`: Specifies the build process for the main `firework-system` Docker image.
 *   `host/supervisord.conf`: Configures `supervisord` to manage the Next.js app, WebSocket server, and Python daemon within the container.
@@ -176,6 +226,7 @@ While the custom RF hardware designs would require FCC certification for commerc
 
 *   **Rack Editing System:** Full rack creation and management - design custom rack layouts, assign shells to cells, create and visualize fuse lines, and assign racks to receivers. Auto-processing of shell description lists extracts colors and effects, making it easy to choose shells for rack spots based on color/effect filters.
 *   **Auto Shell Description Processing:** Paste lists of mortar shell descriptions and the system automatically extracts colors and effects, maps them to standardized types, and creates inventory entries. Makes it easy to filter and select shells by color or effect when building racks.
+*   **Add from Library:** Import shells and effects directly from a comprehensive catalog library, making it easy to add common pyrotechnic products to your inventory without manual data entry.
 *   **YouTube Video Processing:** Automated firing profile extraction from YouTube videos with audio analysis. Supports color detection and population for shells.
 *   **Enhanced Receiver Telemetry:** Comprehensive telemetry including ready count, latency tracking, success percentage, and real-time health monitoring.
 *   **RF Protocol Improvements:** Switched from mesh networking to direct point-to-point communication. Achieves 1000+ yard range without mesh overhead, improving reliability and reducing complexity.
@@ -192,7 +243,7 @@ This project is actively evolving. Here are some potential areas for future deve
     *   Developing more pre-designed hardware modules, maybe a DMX module instead of an 8 cue. 
     *   Official support and documentation for Raspberry Pi as a dedicated host device.
 *   **Advanced Show Synchronization:** Pyromusical support is now available - upload audio files and sync cues to music with waveform visualization.
-*   **Community Features:** Building a platform or forum for users to share show files, hardware mods, and experiences.
+
 *   **Comprehensive Documentation:** Expanding documentation for developers, hardware builders, and end-users.
 *   **Windows Native Support:** Improving native Windows support beyond the current Docker-based `start.bat`.
 

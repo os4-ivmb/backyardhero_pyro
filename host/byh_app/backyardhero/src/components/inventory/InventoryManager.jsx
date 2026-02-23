@@ -240,7 +240,7 @@ const AddInventoryForm = (props) => {
   };
 
 export default function InventoryManager(props){
-    const { inventory, createInventoryItem, updateInventoryItem} = useAppStore();
+    const { inventory, createInventoryItem, updateInventoryItem, fetchInventory} = useAppStore();
     const [activeItem, setActiveItem] = useState(false);
     const [newItem, setNewItem] = useState(false);
 
@@ -312,7 +312,7 @@ export default function InventoryManager(props){
                 </div>
             </div>
             <div className="flex">
-            <InventoryList  className="w-3/4" inventory={inventory} setActiveItem={setEditorActive}/>
+            <InventoryList  className="w-3/4" inventory={inventory} setActiveItem={setEditorActive} refreshInventory={fetchInventory}/>
             <AddInventoryForm activeItem={activeItem} showNewItem={newItem} addItemFnc={addOrCreateItem} className="w-1/4"/>
             </div>
         </div>

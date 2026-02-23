@@ -26,7 +26,7 @@ function initializeDatabase() {
     CREATE TABLE IF NOT EXISTS inventory (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
-      type TEXT CHECK(type IN ('CAKE_FOUNTAIN', 'CAKE_200G', 'CAKE_500G', 'AERIAL_SHELL', 'GENERIC', 'FUSE')) NOT NULL,
+      type TEXT NOT NULL,
       duration REAL CHECK(duration >= 0),
       fuse_delay REAL CHECK(fuse_delay >= 0),
       lift_delay REAL CHECK(lift_delay >= 0),
@@ -96,6 +96,22 @@ function initializeDatabase() {
         console.error("Error adding metadata column:", err.message);
       }
     }
+    
+    // Add source column if it doesn't exist (migration)
+    try {
+      db.exec(`ALTER TABLE inventory ADD COLUMN source TEXT DEFAULT 'user_created'`);
+      console.log("Added source column to inventory table.");
+      // Update existing records to have source = 'user_created'
+      db.exec(`UPDATE inventory SET source = 'user_created' WHERE source IS NULL`);
+    } catch (err) {
+      // Column already exists, ignore error
+      if (!err.message.includes('duplicate column name')) {
+        console.error("Error adding source column:", err.message);
+      }
+    }
+    
+    // Note: Type CHECK constraint removed to allow new types
+    // For existing databases with the constraint, it will remain but won't affect new databases
     db.exec(createInventoryFiringProfileTable);
     console.log("Checked/created inventoryFiringProfile table.");
     
@@ -129,10 +145,10 @@ export const showQueries = {
 
 /** INVENTORY TABLE OPERATIONS */
 export const inventoryQueries = {
-  insert: db.prepare(`INSERT INTO inventory (name, type, duration, fuse_delay, lift_delay, burn_rate, color, available_ct, youtube_link, youtube_link_start_sec, image, metadata)
-                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  insert: db.prepare(`INSERT INTO inventory (name, type, duration, fuse_delay, lift_delay, burn_rate, color, available_ct, youtube_link, youtube_link_start_sec, image, metadata, source)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   getAll: db.prepare(`SELECT * FROM inventory`),
-  update: db.prepare(`UPDATE inventory SET name = ?, type = ?, duration = ?, fuse_delay = ?, lift_delay = ?, burn_rate = ?, color = ?, available_ct = ?, youtube_link = ?, youtube_link_start_sec = ?, image = ?, metadata = ? WHERE id = ?`),
+  update: db.prepare(`UPDATE inventory SET name = ?, type = ?, duration = ?, fuse_delay = ?, lift_delay = ?, burn_rate = ?, color = ?, available_ct = ?, youtube_link = ?, youtube_link_start_sec = ?, image = ?, metadata = ?, source = ? WHERE id = ?`),
 };
 
 /** FIRING PROFILE TABLE OPERATIONS */

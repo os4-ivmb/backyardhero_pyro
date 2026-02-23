@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Backyard Hero - Open Source Firework Control System</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary-color: #d32f2f;
+            --secondary-color: #ff6f00;
+            --dark-bg: #1a1a1a;
+            --darker-bg: #0f0f0f;
+            --light-text: #e0e0e0;
+            --accent: #ffd700;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, var(--darker-bg) 0%, var(--dark-bg) 100%);
+            color: var(--light-text);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        /* Navigation */
+        nav {
+            position: fixed;
+            top: 0;
+            width: 100%;
+            background: rgba(26, 26, 26, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 1rem 2rem;
+            z-index: 1000;
+            border-bottom: 1px solid rgba(255, 111, 0, 0.2);
+        }
+
+        nav .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: var(--secondary-color);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .logo img {
+            height: 40px;
+            filter: brightness(0) invert(1);
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 2rem;
+            list-style: none;
+        }
+
+        .nav-links a {
+            color: var(--light-text);
+            text-decoration: none;
+            transition: color 0.3s;
+        }
+
+        .nav-links a:hover {
+            color: var(--secondary-color);
+        }
+
+        /* Hero Section */
+        .hero {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 8rem 2rem 4rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: radial-gradient(circle at 50% 50%, rgba(255, 111, 0, 0.1) 0%, transparent 70%);
+            pointer-events: none;
+        }
+
+        .hero::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-image: url('fireshot.png');
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+            opacity: 0.08;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .hero-content {
+            max-width: 900px;
+            z-index: 1;
+            position: relative;
+        }
+
+        .hero-logo {
+            margin-bottom: 2rem;
+        }
+
+        .hero-logo img {
+            height: 120px;
+            filter: brightness(0) invert(1);
+            opacity: 0.9;
+        }
+
+        .hero h1 {
+            font-size: 4rem;
+            margin-bottom: 1rem;
+            background: linear-gradient(135deg, var(--secondary-color), var(--accent));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .hero .tagline {
+            font-size: 1.5rem;
+            margin-bottom: 2rem;
+            color: var(--light-text);
+            opacity: 0.9;
+        }
+
+        .hero .description {
+            font-size: 1.2rem;
+            margin-bottom: 3rem;
+            color: var(--light-text);
+            opacity: 0.8;
+        }
+
+        .cta-buttons {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 1rem 2rem;
+            font-size: 1.1rem;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            transition: all 0.3s;
+            font-weight: 600;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(255, 111, 0, 0.3);
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: var(--secondary-color);
+            border: 2px solid var(--secondary-color);
+        }
+
+        .btn-secondary:hover {
+            background: var(--secondary-color);
+            color: white;
+        }
+
+        /* Sections */
+        section {
+            padding: 5rem 2rem;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .section-title {
+            font-size: 2.5rem;
+            text-align: center;
+            margin-bottom: 3rem;
+            color: var(--secondary-color);
+        }
+
+        /* Features Grid */
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-top: 3rem;
+        }
+
+        .feature-card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 111, 0, 0.2);
+            border-radius: 12px;
+            padding: 2rem;
+            transition: all 0.3s;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-5px);
+            border-color: var(--secondary-color);
+            box-shadow: 0 10px 30px rgba(255, 111, 0, 0.2);
+        }
+
+        .feature-card h3 {
+            color: var(--secondary-color);
+            margin-bottom: 1rem;
+            font-size: 1.5rem;
+        }
+
+        .feature-card p {
+            opacity: 0.8;
+        }
+
+        .feature-card img {
+            width: 100%;
+            border-radius: 8px;
+            margin-top: 1rem;
+            border: 1px solid rgba(255, 111, 0, 0.2);
+        }
+
+        /* Capabilities */
+        .capabilities {
+            background: rgba(255, 111, 0, 0.05);
+            border-radius: 20px;
+            padding: 3rem;
+            margin: 3rem 0;
+        }
+
+        .capability-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-top: 2rem;
+        }
+
+        .capability-item {
+            display: flex;
+            align-items: start;
+            gap: 1rem;
+        }
+
+        .capability-item::before {
+            content: '✓';
+            color: var(--accent);
+            font-size: 1.5rem;
+            font-weight: bold;
+        }
+
+        /* Open Source Section */
+        .opensource {
+            text-align: center;
+            background: linear-gradient(135deg, rgba(255, 111, 0, 0.1), rgba(211, 47, 47, 0.1));
+            border-radius: 20px;
+            padding: 4rem 2rem;
+            margin: 3rem 0;
+        }
+
+        .opensource h2 {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            color: var(--secondary-color);
+        }
+
+        .opensource p {
+            font-size: 1.2rem;
+            margin-bottom: 2rem;
+            opacity: 0.9;
+        }
+
+        .github-link {
+            display: inline-block;
+            padding: 1.5rem 2rem;
+            background: rgba(255, 255, 255, 0.1);
+            border: 2px solid var(--secondary-color);
+            border-radius: 12px;
+            color: var(--secondary-color);
+            text-decoration: none;
+            font-weight: 600;
+            transition: all 0.3s;
+            margin: 0.5rem;
+            text-align: center;
+            min-width: 250px;
+        }
+
+        .github-link:hover {
+            background: var(--secondary-color);
+            color: white;
+            transform: translateY(-3px);
+            box-shadow: 0 10px 25px rgba(255, 111, 0, 0.3);
+        }
+
+        .github-link strong {
+            display: block;
+            font-size: 1.2rem;
+            margin-bottom: 0.5rem;
+        }
+
+        /* Pricing */
+        .pricing {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 2rem;
+            margin-top: 3rem;
+        }
+
+        .price-card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 111, 0, 0.3);
+            border-radius: 12px;
+            padding: 2rem;
+            text-align: center;
+        }
+
+        .price-card h3 {
+            color: var(--secondary-color);
+            margin-bottom: 1rem;
+        }
+
+        .price {
+            font-size: 2rem;
+            color: var(--accent);
+            font-weight: bold;
+            margin: 1rem 0;
+        }
+
+        /* Placeholder Section */
+        .placeholder {
+            background: rgba(255, 255, 255, 0.03);
+            border: 2px dashed rgba(255, 111, 0, 0.3);
+            border-radius: 12px;
+            padding: 2rem;
+            text-align: center;
+            margin: 2rem 0;
+            opacity: 0.7;
+        }
+
+        .placeholder h3 {
+            color: var(--secondary-color);
+            margin-bottom: 0.5rem;
+        }
+
+        .placeholder p {
+            opacity: 0.6;
+            font-style: italic;
+        }
+
+        /* Video Grid */
+        .video-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-top: 2rem;
+        }
+
+        .video-item {
+            position: relative;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 111, 0, 0.2);
+            border-radius: 12px;
+            overflow: hidden;
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+
+        .video-item:hover {
+            transform: translateY(-5px);
+            border-color: var(--secondary-color);
+            box-shadow: 0 10px 30px rgba(255, 111, 0, 0.3);
+        }
+
+        .video-thumbnail {
+            position: relative;
+            width: 100%;
+            padding-bottom: 56.25%; /* 16:9 aspect ratio */
+            background: #000;
+            overflow: hidden;
+        }
+
+        .video-thumbnail img {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .video-play-overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 80px;
+            height: 80px;
+            background: rgba(255, 111, 0, 0.9);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s;
+            z-index: 2;
+        }
+
+        .video-item:hover .video-play-overlay {
+            background: var(--secondary-color);
+            transform: translate(-50%, -50%) scale(1.1);
+        }
+
+        .video-play-overlay::after {
+            content: '';
+            width: 0;
+            height: 0;
+            border-left: 25px solid white;
+            border-top: 15px solid transparent;
+            border-bottom: 15px solid transparent;
+            margin-left: 5px;
+        }
+
+        .video-title {
+            padding: 1rem;
+            text-align: center;
+            color: var(--light-text);
+            font-size: 0.9rem;
+            opacity: 0.9;
+        }
+
+        .video-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            z-index: 2000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .video-modal.active {
+            display: flex;
+        }
+
+        .video-modal-content {
+            position: relative;
+            width: 90%;
+            max-width: 1200px;
+            padding-bottom: 56.25%; /* 16:9 aspect ratio */
+            height: 0;
+        }
+
+        .video-modal iframe {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        .video-modal-close {
+            position: absolute;
+            top: -40px;
+            right: 0;
+            color: white;
+            font-size: 2rem;
+            cursor: pointer;
+            background: rgba(255, 111, 0, 0.8);
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s;
+        }
+
+        .video-modal-close:hover {
+            background: var(--secondary-color);
+            transform: scale(1.1);
+        }
+
+        /* Footer */
+        footer {
+            background: var(--darker-bg);
+            padding: 3rem 2rem;
+            text-align: center;
+            border-top: 1px solid rgba(255, 111, 0, 0.2);
+            margin-top: 5rem;
+        }
+
+        .contact-info {
+            margin: 2rem 0;
+        }
+
+        .contact-info a {
+            color: var(--secondary-color);
+            text-decoration: none;
+            font-size: 1.1rem;
+        }
+
+        .contact-info a:hover {
+            text-decoration: underline;
+        }
+
+        .license {
+            margin-top: 2rem;
+            opacity: 0.7;
+            font-style: italic;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .hero h1 {
+                font-size: 2.5rem;
+            }
+
+            .hero .tagline {
+                font-size: 1.2rem;
+            }
+
+            .nav-links {
+                display: none;
+            }
+
+            section {
+                padding: 3rem 1rem;
+            }
+        }
+
+        /* Animations */
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .fade-in {
+            animation: fadeInUp 0.6s ease-out;
+        }
+    </style>
+</head>
+<body>
+    <nav>
+        <div class="container">
+            <div class="logo">
+                <img src="BYHLOGOv1.png" alt="Backyard Hero Logo">
+                <span>Backyard Hero</span>
+            </div>
+            <ul class="nav-links">
+                <li><a href="#features">Features</a></li>
+                <li><a href="#capabilities">Capabilities</a></li>
+                <li><a href="#hardware">Hardware</a></li>
+                <li><a href="#opensource">Open Source</a></li>
+                <li><a href="#contact">Contact</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <section class="hero">
+        <div class="hero-content fade-in">
+            <div class="hero-logo">
+                <img src="BYHLOGOv1.png" alt="Backyard Hero Logo">
+            </div>
+            <h1>Backyard Hero</h1>
+            <p class="tagline">An Excessively DIY Firework Control System</p>
+            <p class="description">
+                A powerful, flexible, and cost-effective open-source solution for pyrotechnic enthusiasts. 
+                Complete software, firmware, and hardware designs for less than $100.
+            </p>
+            <div class="cta-buttons">
+                <a href="#features" class="btn btn-primary">Explore Features</a>
+                <a href="#opensource" class="btn btn-secondary">Get Started</a>
+            </div>
+        </div>
+    </section>
+
+    <section id="features">
+        <h2 class="section-title">Key Features</h2>
+        <div class="features-grid">
+            <div class="feature-card">
+                <h3>Show Design</h3>
+                <p>Intuitive graphical interface for creating and managing firework shows with an improved UI and timeline visualization. The show loadout is displayed in the UI, showing which cues are assigned to which receivers and their status.</p>
+            </div>
+            <div class="feature-card">
+                <h3>Pyromusical Support</h3>
+                <p>Upload audio files and synchronize show timing with music. Waveform visualization enables precise cue placement for music-synchronized shows.</p>
+            </div>
+            <div class="feature-card">
+                <h3>Rack Editing</h3>
+                <p>Create custom racks with configurable dimensions, assign shells to specific cells, and build fuse lines with visual representation.</p>
+                <img src="rackeditorss.png" alt="Rack Editor Screenshot">
+            </div>
+            <div class="feature-card">
+                <h3>Inventory Management</h3>
+                <p>Track your pyro stock with support for shell packs, firing profiles, and metadata. Auto-process shell descriptions to extract colors and effects.</p>
+                <img src="shellselect.png" alt="Shell Selector Screenshot">
+            </div>
+            <div class="feature-card">
+                <h3>YouTube Processing</h3>
+                <p>Automatically crawl YouTube videos and extract firing profiles by analyzing audio. Identify shot timings and populate color information.</p>
+            </div>
+            <div class="feature-card">
+                <h3>Advanced Telemetry</h3>
+                <p>Comprehensive real-time feedback including cue continuity, signal latency, ready count, success percentage, and receiver battery levels. Real-time continuity checking with visual indicators displayed both on the cue modules themselves and in the host UI.</p>
+            </div>
+        </div>
+    </section>
+
+    <section id="capabilities">
+        <h2 class="section-title">System Capabilities</h2>
+        <div class="capabilities">
+            <h3 style="text-align: center; margin-bottom: 2rem; color: var(--secondary-color);">Software Platform</h3>
+            <div class="capability-list">
+                <div class="capability-item">Local web interface for show design and execution</div>
+                <div class="capability-item">Cross-platform compatibility (OSX, Windows, Linux)</div>
+                <div class="capability-item">Docker-based deployment for easy setup</div>
+                <div class="capability-item">Real-time bidirectional communication via WebSocket</div>
+                <div class="capability-item">Advanced fusing logic with automatic delay calculation</div>
+                <div class="capability-item">Show staging and verification system</div>
+                <div class="capability-item">Safety abort mechanisms</div>
+                <div class="capability-item">Autonomous receiver execution for precise timing</div>
+                <div class="capability-item">Precise timing: Clock synchronization to &lt;10ms accuracy enables millisecond-precise cue execution</div>
+                <div class="capability-item">Show loadout visualization in the UI showing cue assignments and status</div>
+            </div>
+        </div>
+    </section>
+
+    <section id="hardware">
+        <h2 class="section-title">Custom Hardware Platform</h2>
+        <div class="features-grid">
+            <div class="feature-card">
+                <h3>2.4GHz RF Communication</h3>
+                <p>Direct point-to-point communication with 1000+ yard range. Superior RF performance through meticulous PCB design and impedance matching.</p>
+            </div>
+            <div class="feature-card">
+                <h3>Long Battery Life</h3>
+                <p>On-board lithium batteries rechargeable via USB-C PD (12V fast charging). Provides well over 24 hours of continuous runtime.</p>
+            </div>
+            <div class="feature-card">
+                <h3>Modular & Expandable</h3>
+                <p>Each receiver supports up to 128 cues via chainable 8-cue modules. Scale your system as needed.</p>
+            </div>
+            <div class="feature-card">
+                <h3>Real-Time Continuity Indicators</h3>
+                <p>Each cue module features LED indicators that provide instant visual feedback: Red indicates a cue is needed for the show but not connected, Green shows a needed cue is properly connected. The host UI also displays continuity status in real-time for all cues across all receivers.</p>
+            </div>
+            <div class="feature-card">
+                <h3>Rugged Design</h3>
+                <p>3D-printable enclosures designed for durability. Can be made water-resistant for outdoor use.</p>
+            </div>
+            <div class="feature-card">
+                <h3>Dual-Frequency Dongle</h3>
+                <p>Interfaces with 2.4GHz custom receivers and includes 433MHz frontend for compatibility with BILUSOCN and similar systems.</p>
+            </div>
+            <div class="feature-card">
+                <h3>Cost-Effective</h3>
+                <p>Complete 2-receiver, 32-cue system can be built for around $110 USD. Scales cheaply with additional components.</p>
+            </div>
+        </div>
+
+        <div class="pricing">
+            <div class="price-card">
+                <h3>Receiver</h3>
+                <div class="price">~$27</div>
+                <p>Custom 2.4GHz receiver with telemetry</p>
+            </div>
+            <div class="price-card">
+                <h3>Dongle</h3>
+                <div class="price">~$25</div>
+                <p>USB dongle for host communication</p>
+            </div>
+            <div class="price-card">
+                <h3>8-Cue Module</h3>
+                <div class="price">~$8</div>
+                <p>Chainable cue module (expandable)</p>
+            </div>
+        </div>
+    </section>
+
+    <section id="opensource">
+        <div class="opensource">
+            <h2>100% Open Source</h2>
+            <p>
+                Backyard Hero is completely open source, providing the full software, firmware, and hardware design resources. 
+                Build, modify, and customize to your heart's content. Join a community of DIY enthusiasts and pyrotechnic hobbyists.
+            </p>
+            <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 1rem; margin: 2rem 0;">
+                <a href="https://github.com/os4-ivmb/backyardhero_pyro" target="_blank" rel="noopener noreferrer" class="github-link">
+                    <strong>GitHub Repository</strong>
+                    <span style="font-size: 0.9rem; opacity: 0.8;">Clone, contribute, and build your own system</span>
+                </a>
+                <a href="https://blog.oneseventyfour.com/projects/backyard-hero-pyro" target="_blank" rel="noopener noreferrer" class="github-link">
+                    <strong>Project Blog</strong>
+                    <span style="font-size: 0.9rem; opacity: 0.8;">Read about development, features, and updates</span>
+                </a>
+            </div>
+            <div class="placeholder" style="margin-top: 2rem;">
+                <h3>Documentation</h3>
+                <p>Complete guides for developers, hardware builders, and end-users</p>
+                <p style="margin-top: 1rem; opacity: 0.8;">See the README in the GitHub repository for detailed documentation</p>
+            </div>
+        </div>
+    </section>
+
+    <section>
+        <h2 class="section-title">Show Control Lifecycle</h2>
+        <div class="capabilities">
+            <div class="capability-list">
+                <div class="capability-item"><strong>Initialization:</strong> Receivers connect and synchronize clocks to &lt;10ms accuracy</div>
+                <div class="capability-item"><strong>Show Staging:</strong> Load shows from database with visual cue usage indicators</div>
+                <div class="capability-item"><strong>System Loading:</strong> Verify all receivers online and transmit firing instructions</div>
+                <div class="capability-item"><strong>LED Status:</strong> Visual feedback on cue modules - Red if cue is needed for show but not connected, Green if needed cue is connected. Blue indicates continuity detected but not required for current show. Host UI also displays real-time continuity status.</div>
+                <div class="capability-item"><strong>Arming:</strong> Physical start/stop switch on dongle for safety</div>
+                <div class="capability-item"><strong>Pre-Launch:</strong> Automated checks for continuity and battery levels</div>
+                <div class="capability-item"><strong>Execution:</strong> Synchronized start time with autonomous receiver control. Precise timing achieved through clock synchronization to &lt;10ms accuracy, ensuring millisecond-precise cue execution independent of RF interference.</div>
+                <div class="capability-item"><strong>Monitoring:</strong> Real-time telemetry and safety abort capabilities</div>
+            </div>
+        </div>
+    </section>
+
+    <section>
+        <h2 class="section-title">Demo & Media</h2>
+        <div class="video-grid">
+            <div class="video-item" data-video-id="ltM9LNHSblY">
+                <div class="video-thumbnail">
+                    <img src="https://img.youtube.com/vi/ltM9LNHSblY/maxresdefault.jpg" alt="Backyard Hero Demo Video">
+                    <div class="video-play-overlay"></div>
+                </div>
+                <div class="video-title">System Demo</div>
+            </div>
+            <div class="video-item" data-video-id="I1SvCigpICI">
+                <div class="video-thumbnail">
+                    <img src="https://img.youtube.com/vi/I1SvCigpICI/maxresdefault.jpg" alt="Backyard Hero Show">
+                    <div class="video-play-overlay"></div>
+                </div>
+                <div class="video-title">Show Example</div>
+            </div>
+            <div class="video-item" data-video-id="t_bwPTa1OMI">
+                <div class="video-thumbnail">
+                    <img src="https://img.youtube.com/vi/t_bwPTa1OMI/maxresdefault.jpg" alt="Backyard Hero Show">
+                    <div class="video-play-overlay"></div>
+                </div>
+                <div class="video-title">Show Example</div>
+            </div>
+            <div class="video-item" data-video-id="Eg3F_gcZD5s">
+                <div class="video-thumbnail">
+                    <img src="https://img.youtube.com/vi/Eg3F_gcZD5s/maxresdefault.jpg" alt="Backyard Hero Show">
+                    <div class="video-play-overlay"></div>
+                </div>
+                <div class="video-title">Show Example</div>
+            </div>
+        </div>
+        
+        <!-- Video Modal -->
+        <div class="video-modal" id="videoModal">
+            <div class="video-modal-content">
+                <div class="video-modal-close" id="videoModalClose">&times;</div>
+                <iframe id="videoFrame" src="" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+            </div>
+        </div>
+    </section>
+
+    <footer id="contact">
+        <h2 style="color: var(--secondary-color); margin-bottom: 1rem;">Get In Touch</h2>
+        <div class="contact-info">
+            <p>Have questions or want to contribute?</p>
+            <p style="margin-top: 1rem;">
+                <a href="mailto:byhpyro@oneseventyfour.com">byhpyro@oneseventyfour.com</a>
+            </p>
+        </div>
+        <div class="license" style="margin-top: 2rem;">
+            <p>License: Don't be a dick</p>
+            <p style="margin-top: 0.5rem; opacity: 0.6;">© 2025 Backyard Hero. Open source firework control system.</p>
+        </div>
+    </footer>
+
+    <script>
+        // Smooth scrolling for anchor links
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'start'
+                    });
+                }
+            });
+        });
+
+        // Fade in animation on scroll
+        const observerOptions = {
+            threshold: 0.1,
+            rootMargin: '0px 0px -50px 0px'
+        };
+
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('fade-in');
+                }
+            });
+        }, observerOptions);
+
+        document.querySelectorAll('.feature-card, .capability-item, .price-card').forEach(el => {
+            observer.observe(el);
+        });
+
+        // Video modal functionality
+        const videoModal = document.getElementById('videoModal');
+        const videoFrame = document.getElementById('videoFrame');
+        const videoModalClose = document.getElementById('videoModalClose');
+        const videoItems = document.querySelectorAll('.video-item');
+
+        videoItems.forEach(item => {
+            item.addEventListener('click', function() {
+                const videoId = this.getAttribute('data-video-id');
+                videoFrame.src = `https://www.youtube.com/embed/${videoId}?autoplay=1`;
+                videoModal.classList.add('active');
+                document.body.style.overflow = 'hidden'; // Prevent background scrolling
+            });
+        });
+
+        function closeVideoModal() {
+            videoModal.classList.remove('active');
+            videoFrame.src = ''; // Stop video playback
+            document.body.style.overflow = ''; // Restore scrolling
+        }
+
+        videoModalClose.addEventListener('click', closeVideoModal);
+        
+        // Close modal when clicking outside the video
+        videoModal.addEventListener('click', function(e) {
+            if (e.target === videoModal) {
+                closeVideoModal();
+            }
+        });
+
+        // Close modal with Escape key
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && videoModal.classList.contains('active')) {
+                closeVideoModal();
+            }
+        });
+    </script>
+</body>
+</html>
+

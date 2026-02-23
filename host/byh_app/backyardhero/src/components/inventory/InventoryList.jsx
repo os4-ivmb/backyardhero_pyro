@@ -1,12 +1,13 @@
 import { MdEdit } from "react-icons/md";
 import React, { useState, useMemo, useEffect } from "react";
 import { FaImage, FaVideo, FaChartLine } from "react-icons/fa6";
-import { FaCheckCircle } from "react-icons/fa";
+import { FaCheckCircle, FaUpload } from "react-icons/fa";
 import axios from "axios";
 import ShotProfileModal from "./ShotProfileModal";
 import ShellPackEditor from "./ShellPackEditor";
+import ImportCatalogModal from "./ImportCatalogModal";
 
-export default function InventoryList({inventory, setActiveItem}) {
+export default function InventoryList({inventory, setActiveItem, refreshInventory}) {
 
     const loadIntoEditor = (inv) => {
         document.getElementById('editForm').scrollIntoView({ behavior: 'smooth' });
@@ -33,6 +34,7 @@ export default function InventoryList({inventory, setActiveItem}) {
     const [batchStatus, setBatchStatus] = useState(null); // Status message
     const [selectedShellPackItem, setSelectedShellPackItem] = useState(null); // Item for which to show shell pack editor
     const [isShellPackEditorOpen, setIsShellPackEditorOpen] = useState(false);
+    const [isImportModalOpen, setIsImportModalOpen] = useState(false);
 
     // Handle sorting
     const sortedInventory = useMemo(() => {
@@ -116,6 +118,30 @@ export default function InventoryList({inventory, setActiveItem}) {
         setFiringProfiles(profiles);
     };
 
+    const handleGenerateProfile = async (item) => {
+        if (!item.id || !item.youtube_link) return;
+        
+        try {
+            const response = await axios.post(`/api/inventory/${item.id}/reprocess-profile`, {
+                detectionMethod: 'max_amplitude',
+                thresholdRatio: 0.70,
+                mergeThresholdMs: 500,
+                overrideDuration: false
+            });
+            
+            // Show success message
+            alert('Shot profile generation started. This may take a few minutes. The profile will appear when complete.');
+            
+            // Refresh profiles after a delay
+            setTimeout(() => {
+                handleReprocessComplete();
+            }, 3000);
+        } catch (error) {
+            console.error('Error generating profile:', error);
+            alert(error.response?.data?.error || 'Failed to start profile generation. Please try again.');
+        }
+    };
+
     const handleBatchReprocess = async () => {
         setIsBatchProcessing(true);
         setBatchStatus(null);
@@ -167,23 +193,33 @@ export default function InventoryList({inventory, setActiveItem}) {
     return (
         <div className="w-3/4 mr-4">
             <div className="container mx-auto p-4">
-                {/* Filter Dropdown */}
-                <div className="mb-4">
-                    <label htmlFor="filter" className="mr-2 font-bold">Filter by Type:</label>
-                    <select
-                    id="filter"
-                    value={filterType}
-                    onChange={(e) => setFilterType(e.target.value)}
-                    className="border p-2 rounded"
+                {/* Filter Dropdown and Import Button */}
+                <div className="mb-4 flex items-center gap-4">
+                    <div className="flex-1">
+                        <label htmlFor="filter" className="mr-2 font-bold">Filter by Type:</label>
+                        <select
+                        id="filter"
+                        value={filterType}
+                        onChange={(e) => setFilterType(e.target.value)}
+                        className="border p-2 rounded"
+                        >
+                        <option value="">All</option>
+                        <option value="CAKE_FOUNTAIN">Cake Fountain</option>
+                        <option value="CAKE_200G">Cake 200g</option>
+                        <option value="CAKE_350G">Cake 350g</option>
+                        <option value="CAKE_500G">Cake 500g</option>
+                        <option value="AERIAL_SHELL">Aerial Shell</option>
+                        <option value="GENERIC">Generic</option>
+                        <option value="FUSE">Fuse</option>
+                        </select>
+                    </div>
+                    <button
+                        onClick={() => setIsImportModalOpen(true)}
+                        className="bg-green-900 hover:bg-green-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline flex items-center gap-2"
+                        type="button"
                     >
-                    <option value="">All</option>
-                    <option value="CAKE_FOUNTAIN">Cake Fountain</option>
-                    <option value="CAKE_200G">Cake 200g</option>
-                    <option value="CAKE_500G">Cake 500g</option>
-                    <option value="AERIAL_SHELL">Aerial Shell</option>
-                    <option value="GENERIC">Generic</option>
-                    <option value="FUSE">Fuse</option>
-                    </select>
+                        <FaUpload /> Import from Catalog
+                    </button>
                 </div>
 
                 {/* Batch Reprocess Section */}
@@ -385,6 +421,7 @@ export default function InventoryList({inventory, setActiveItem}) {
                 <th className="py-3 px-6 text-left">Burn Rate</th>
                 <th className="py-3 px-1 text-left">Tags</th>
                 <th className="py-3 px-6 text-left">Color</th>
+                <th className="py-3 px-6 text-left">Source</th>
                 <th className="py-3 px-6 text-left">Actions</th>
                 </tr>
             </thead>
@@ -406,18 +443,37 @@ export default function InventoryList({inventory, setActiveItem}) {
                                 {inv.youtube_link ? (
                                     <a className="hover:text-blue-300" href={inv.youtube_link} target="_blank"><FaVideo/></a>
                                 ) : ""}
-                                {(firingProfiles[inv.id] || (inv.youtube_link && inv.youtube_link.trim() !== '' && inv.youtube_link_start_sec !== null)) && (
-                                    <button
-                                        onClick={() => handleShowProfile(inv)}
-                                        className="hover:text-blue-300 text-blue-400"
-                                        title={firingProfiles[inv.id] ? "View Shot Profile" : "Generate/View Shot Profile"}
-                                    >
-                                        <FaChartLine/>
-                                    </button>
+                                {inv.youtube_link && inv.youtube_link.trim() !== '' && (
+                                    firingProfiles[inv.id] ? (
+                                        <button
+                                            onClick={() => handleShowProfile(inv)}
+                                            className="hover:text-blue-300 text-blue-400"
+                                            title="View Shot Profile"
+                                        >
+                                            <FaChartLine/>
+                                        </button>
+                                    ) : (
+                                        <button
+                                            onClick={() => handleGenerateProfile(inv)}
+                                            className="hover:text-yellow-300 text-yellow-400"
+                                            title="Generate Shot Profile"
+                                        >
+                                            <FaChartLine/>
+                                        </button>
+                                    )
                                 )}
                             </div>
                         </td>
                         <td className="p-1 px-4" style={{backgroundColor: `${inv.color}${inv.color? 'FF' : ''}`}}></td>
+                        <td className="p-1 px-4">
+                            <span className={`px-2 py-1 rounded text-xs ${
+                                inv.source === 'imported' 
+                                    ? 'bg-blue-900 text-blue-200' 
+                                    : 'bg-gray-700 text-gray-300'
+                            }`}>
+                                {inv.source || 'user_created'}
+                            </span>
+                        </td>
                         <td className="p-1 px-4">
                         <div className="flex gap-2">
                             <button onClick={()=> {loadIntoEditor(inv)}} className="bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline flex items-center gap-2" type="button">
@@ -460,6 +516,16 @@ export default function InventoryList({inventory, setActiveItem}) {
                     setSelectedShellPackItem(null);
                 }}
                 item={selectedShellPackItem}
+            />
+            <ImportCatalogModal
+                isOpen={isImportModalOpen}
+                onClose={() => setIsImportModalOpen(false)}
+                onImportComplete={() => {
+                    // Refresh inventory list
+                    if (refreshInventory) {
+                        refreshInventory();
+                    }
+                }}
             />
         </div>
     )

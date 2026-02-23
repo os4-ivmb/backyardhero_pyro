@@ -141,35 +141,32 @@ def get_inventory_items_with_youtube(db_path, reprocess_all=False, item_id=None)
     cursor = conn.cursor()
     
     if item_id is not None:
-        # Get specific item by ID
+        # Get specific item by ID (include items without start_sec to auto-detect)
         query = """
             SELECT id, name, youtube_link, youtube_link_start_sec
             FROM inventory
             WHERE id = ?
             AND youtube_link IS NOT NULL 
             AND youtube_link != ''
-            AND youtube_link_start_sec IS NOT NULL
         """
         cursor.execute(query, (item_id,))
     elif reprocess_all:
-        # Get all items with YouTube links, regardless of existing profiles
+        # Get all items with YouTube links, regardless of existing profiles (include items without start_sec)
         query = """
             SELECT id, name, youtube_link, youtube_link_start_sec
             FROM inventory
             WHERE youtube_link IS NOT NULL 
             AND youtube_link != ''
-            AND youtube_link_start_sec IS NOT NULL
         """
         cursor.execute(query)
     else:
-        # Only get items that don't have a firing profile yet
+        # Only get items that don't have a firing profile yet (include items without start_sec)
         query = """
             SELECT i.id, i.name, i.youtube_link, i.youtube_link_start_sec
             FROM inventory i
             LEFT JOIN inventoryFiringProfile ifp ON i.id = ifp.inventory_id
             WHERE i.youtube_link IS NOT NULL 
             AND i.youtube_link != ''
-            AND i.youtube_link_start_sec IS NOT NULL
             AND ifp.id IS NULL
         """
         cursor.execute(query)
@@ -240,14 +237,14 @@ def download_audio_from_youtube(youtube_url, start_sec, duration=None, temp_dir=
         
         # If we need to trim or convert, use ffmpeg
         # Always use a different output file to avoid conflicts
-        needs_processing = (start_sec > 0 or duration or not downloaded_file.endswith('.wav'))
+        needs_processing = ((start_sec is not None and start_sec > 0) or duration or not downloaded_file.endswith('.wav'))
         
         if needs_processing:
             # Use a different filename for output to avoid conflicts
             final_audio_file = os.path.join(temp_dir, f"audio_{os.getpid()}_processed.wav")
             ffmpeg_cmd = [FFMPEG_PATH, '-y', '-i', downloaded_file]
             
-            if start_sec > 0:
+            if start_sec is not None and start_sec > 0:
                 ffmpeg_cmd.extend(['-ss', str(start_sec)])
             if duration:
                 ffmpeg_cmd.extend(['-t', str(duration)])
@@ -564,22 +561,85 @@ def process_item(item, db_path, threshold_ratio=0.70, temp_dir=None, log_file=No
     log_message(f"  Start: {youtube_link_start_sec}s", log_file)
     
     try:
-        # Download audio
-        log_message("  Downloading audio...", log_file)
-        audio_file = download_audio_from_youtube(
-            youtube_link, 
-            youtube_link_start_sec,
-            temp_dir=temp_dir
-        )
-        
-        # Detect shots
-        log_message("  Analyzing audio for shots...", log_file)
-        if detection_method == 'noise_floor':
-            log_message(f"  Using noise floor method (floor_percent: {floor_percent}%)", log_file)
-            shots = detect_shots_noise_floor(audio_file, floor_percent=floor_percent)
+        # If no start time is set, detect it from the first shot
+        if youtube_link_start_sec is None:
+            log_message("  No start time set - detecting first shot to determine start time...", log_file)
+            
+            # Download full video audio (no start time)
+            log_message("  Downloading full video audio...", log_file)
+            full_audio_file = download_audio_from_youtube(
+                youtube_link, 
+                0,  # Start from beginning
+                temp_dir=temp_dir
+            )
+            
+            # Detect shots in the full video
+            log_message("  Analyzing full audio for first shot...", log_file)
+            if detection_method == 'noise_floor':
+                full_shots = detect_shots_noise_floor(full_audio_file, floor_percent=floor_percent)
+            else:
+                full_shots = detect_shots(full_audio_file, threshold_ratio=threshold_ratio)
+            
+            if not full_shots:
+                log_message("  ✗ No shots detected in video. Cannot determine start time.", log_file)
+                if os.path.exists(full_audio_file):
+                    os.remove(full_audio_file)
+                return False
+            
+            # Use the first shot's start time as the offset
+            first_shot_start_ms = full_shots[0][0]
+            detected_start_sec = round(first_shot_start_ms / 1000.0, 1)
+            
+            log_message(f"  ✓ Detected first shot at {detected_start_sec}s - using as start time", log_file)
+            
+            # Update the inventory item with the detected start time
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE inventory SET youtube_link_start_sec = ? WHERE id = ?",
+                (int(detected_start_sec), inventory_id)
+            )
+            conn.commit()
+            conn.close()
+            
+            youtube_link_start_sec = int(detected_start_sec)
+            log_message(f"  ✓ Updated inventory item start time to {detected_start_sec}s", log_file)
+            
+            # Clean up the full audio file
+            if os.path.exists(full_audio_file):
+                os.remove(full_audio_file)
+            
+            # Now download audio from the detected start time
+            log_message("  Downloading audio from detected start time...", log_file)
+            audio_file = download_audio_from_youtube(
+                youtube_link, 
+                youtube_link_start_sec,
+                temp_dir=temp_dir
+            )
+            
+            # Re-detect shots from the trimmed audio (they'll be relative to start time)
+            log_message("  Analyzing audio for shots...", log_file)
+            if detection_method == 'noise_floor':
+                shots = detect_shots_noise_floor(audio_file, floor_percent=floor_percent)
+            else:
+                shots = detect_shots(audio_file, threshold_ratio=threshold_ratio)
         else:
-            log_message(f"  Using max amplitude method (threshold_ratio: {threshold_ratio})", log_file)
-            shots = detect_shots(audio_file, threshold_ratio=threshold_ratio)
+            # Download audio with existing start time
+            log_message("  Downloading audio...", log_file)
+            audio_file = download_audio_from_youtube(
+                youtube_link, 
+                youtube_link_start_sec,
+                temp_dir=temp_dir
+            )
+            
+            # Detect shots
+            log_message("  Analyzing audio for shots...", log_file)
+            if detection_method == 'noise_floor':
+                log_message(f"  Using noise floor method (floor_percent: {floor_percent}%)", log_file)
+                shots = detect_shots_noise_floor(audio_file, floor_percent=floor_percent)
+            else:
+                log_message(f"  Using max amplitude method (threshold_ratio: {threshold_ratio})", log_file)
+                shots = detect_shots(audio_file, threshold_ratio=threshold_ratio)
         
         log_message(f"  Found {len(shots)} shots before merging", log_file)
         

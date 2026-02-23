@@ -1,6 +1,7 @@
 export const INV_TYPES = {
     CAKE_FOUNTAIN: 'Fountain Cake',
     CAKE_200G: '200G Cake',
+    CAKE_350G: '350G Cake',
     CAKE_500G: '500G Cake',
     AERIAL_SHELL: 'AERIAL SHELL',
     GENERIC: 'Generic',
@@ -14,6 +15,7 @@ export const SPECIAL_TYPES = {
 export const INV_COLOR_CODE = {
     CAKE_FOUNTAIN: '#AAAA33',
     CAKE_200G: '#33AAAA',
+    CAKE_350G: '#33CCAA',
     CAKE_500G: '#26b0ff',
     AERIAL_SHELL: '#FF0000',
     GENERIC: '#FFFFFF',
