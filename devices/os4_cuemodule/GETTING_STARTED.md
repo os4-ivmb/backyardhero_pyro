@@ -7,6 +7,9 @@
 ⚠️ **Short Circuit Warning:**
 - While the system includes continuity checking, it does **not** detect short circuits
 - Ensure your cue wires are **not** twisted together at the terminal and touching
+
+![Crossed wires example](../../doc_img/CrossWires.png)
+
 - If the system fires into a short circuit, it will shut itself down, which will effectively disable that receiver for the rest of the show
 - Always verify wire connections before powering on
 
