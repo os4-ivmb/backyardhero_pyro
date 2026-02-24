@@ -217,7 +217,7 @@ uint64_t lastPrintTime = 0;
 uint64_t lastScheduledClockSyncTime = 0;
 
 // Non-blocking serial line buffer
-#define SERIAL_BUFFER_SIZE 256
+#define SERIAL_BUFFER_SIZE 512  // Increased from 256 to accommodate full LED state JSON
 char serialLineBuffer[SERIAL_BUFFER_SIZE];
 uint16_t serialBufferIndex = 0; 
 
@@ -345,11 +345,13 @@ void updateLEDs() {
 
 
 void parseLedJSON(const String& json) {
-  StaticJsonDocument<512> doc;
+  StaticJsonDocument<1024> doc;  // Increased from 512 to 1024 to accommodate new fields
   DeserializationError error = deserializeJson(doc, json);
   if (error) {
     Serial.print(F("deserializeJson() failed: "));
-    Serial.println(error.f_str());
+    Serial.print(error.f_str());
+    Serial.print(F(" JSON length: "));
+    Serial.println(json.length());
     return;
   }
   
@@ -388,6 +390,16 @@ void parseLedJSON(const String& json) {
   }
   if (doc.containsKey("error_state")) {
     ledStates[5] = doc["error_state"].as<int>();
+  }
+  if (doc.containsKey("arm_state")) {
+    int armState = doc["arm_state"].as<int>();
+    if (armState == 1) {  // ARMED - slowly fade-pulsing red
+      ledStates[6] = 3;  // RED
+      ledEffects[6] = 2; // Pulse effect
+    } else {  // DISARMED - just blue
+      ledStates[6] = 4;  // BLUE
+      ledEffects[6] = 0; // No effect
+    }
   }
 
   

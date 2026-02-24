@@ -45,3 +45,7 @@ class ERR_STATE(Enum):
     RF_FRONTEND = 2
     SOCKET = 3
     FUCKIFIKNOW = 4
+
+class ARM_STATE(Enum):
+    DISARMED = 0
+    ARMED = 1

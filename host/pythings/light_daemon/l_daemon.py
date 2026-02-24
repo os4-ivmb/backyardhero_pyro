@@ -11,9 +11,10 @@ TX_ACTIVE_POS = 2
 SHOW_LOADED_POS = 3
 SHOW_RUNNING_POS = 4
 ERROR_POS = 5
+ARM_STATE_POS = 6
 
 # Configuration
-NUM_PIXELS = 6
+NUM_PIXELS = 7
 SPI_PORT = board.SPI()
 BRIGHTNESS = int(0.5 * 255)
 FADE_FACTOR = 0.7
@@ -74,9 +75,11 @@ def run_sweep():
 last_update_time = time.time()
 pulse_step = 0
 blink_state = False
+arm_pulse_step = 0
+arm_last_update_time = time.time()
 
 def apply_led_states(state, current_time):
-    global pulse_step, blink_state, last_update_time
+    global pulse_step, blink_state, last_update_time, arm_pulse_step, arm_last_update_time
 
     brightness = state.get("led_brightness", 100)
 
@@ -145,6 +148,18 @@ def apply_led_states(state, current_time):
                         adjusted_colors["yellow"] if error_state == 2 else \
                         adjusted_colors["purple"] if error_state == 3 else \
                         adjusted_colors["off"]
+
+    # ARM_STATE: position 6
+    arm_state = state.get("arm_state", 0)
+    if arm_state == 1:  # ARMED - slowly fade-pulsing red
+        time_since_last_update = current_time - arm_last_update_time
+        if time_since_last_update > 0.05:  # Adjust timing for smooth animation
+            arm_pulse_step = (arm_pulse_step + 1) % 40  # Slower pulse cycle (40 steps instead of 20)
+            scale = arm_pulse_step / 20 if arm_pulse_step <= 20 else (40 - arm_pulse_step) / 20
+            pixels[ARM_STATE_POS] = fade_color(adjusted_colors["red"], scale)
+            arm_last_update_time = current_time
+    else:  # DISARMED - just blue
+        pixels[ARM_STATE_POS] = adjusted_colors["blue"]
 
     pixels.show()
 

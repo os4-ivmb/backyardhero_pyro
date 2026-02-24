@@ -64,6 +64,7 @@ class LEDHandler:
             "show_load_state": 0,
             "show_run_state": 0,
             "error_state": 0,
+            "arm_state": 0,
             "led_brightness": 10,
             "receiver_timeout_ms": 30000,
             "command_response_timeout_ms": 100,
@@ -114,6 +115,12 @@ class LEDHandler:
                 self.led_states[key] = value
                 self.parent.send_serial_command(json.dumps(self.led_states))
                 self._persist_led_states()
+                # Write to LED state file for light daemon
+                try:
+                    with open(LED_FILE_PATH, 'w') as f:
+                        json.dump(self.led_states, f, indent=4)
+                except Exception as e:
+                    print(f"Error writing LED state to {LED_FILE_PATH}: {e}")
         else:
             print(f"Warning: Attempted to update non-existent LED state key '{key}'")
 
@@ -403,12 +410,14 @@ class FireworkDaemon:
                     print("Arming switch deactivated. Disarming the system.")
                     self.stop_schedule()
                     self.is_armed=False
+                    self.led_handler.update("arm_state", ARM_STATE.DISARMED.value)
                 elif self.last_arming_state == HIGH and arming_state == LOW:
                     print("Arming switch activated. System is armed.")
                     if self.protocol_handler:
                         if self.protocol_handler.show_loaded:
                             self.led_handler.update("show_run_state", RUN_STATE.ARMED.value)
                     self.is_armed=True
+                    self.led_handler.update("arm_state", ARM_STATE.ARMED.value)
 
                 # Start/stop switch logic
                 if arming_state == LOW:  # Only allow actions if the system is armed
