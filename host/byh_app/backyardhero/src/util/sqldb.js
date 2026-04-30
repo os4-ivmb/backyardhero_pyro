@@ -3,6 +3,54 @@ const path = require('path');
 
 const db = new Database('/data/backyardhero.db', { verbose: console.log });
 
+/**
+ * Legacy DBs used CHECK(type IN ('CAKE_FOUNTAIN', ...)) which blocks new types.
+ * SQLite cannot drop a column CHECK; recreate the table without a type enum.
+ */
+function migrateInventoryRemoveLegacyTypeCheck() {
+  const row = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'inventory'`)
+    .get();
+  if (!row?.sql || !row.sql.includes("type IN ('CAKE_FOUNTAIN'")) {
+    return;
+  }
+
+  const cols = db.prepare(`PRAGMA table_info(inventory)`).all();
+  const colNames = cols.map((c) => c.name);
+  const colList = colNames.join(', ');
+
+  console.log('Migrating inventory: removing legacy type IN(...) CHECK constraint...');
+  db.exec('PRAGMA foreign_keys = OFF');
+  db.exec('BEGIN');
+  db.exec(`
+    CREATE TABLE inventory__type_check_migration (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      duration REAL,
+      fuse_delay REAL,
+      lift_delay REAL,
+      burn_rate REAL,
+      color TEXT,
+      available_ct INTEGER DEFAULT 0,
+      youtube_link TEXT,
+      image TEXT,
+      youtube_link_start_sec INTEGER,
+      metadata TEXT,
+      source TEXT DEFAULT 'user_created',
+      unit_cost REAL CHECK(unit_cost IS NULL OR unit_cost >= 0)
+    );
+  `);
+  db.exec(
+    `INSERT INTO inventory__type_check_migration (${colList}) SELECT ${colList} FROM inventory`
+  );
+  db.exec('DROP TABLE inventory');
+  db.exec('ALTER TABLE inventory__type_check_migration RENAME TO inventory');
+  db.exec('COMMIT');
+  db.exec('PRAGMA foreign_keys = ON');
+  console.log('Inventory type CHECK migration finished.');
+}
+
 function initializeDatabase() {
   const createShowTable = `
     CREATE TABLE IF NOT EXISTS Show (
@@ -35,7 +83,8 @@ function initializeDatabase() {
       available_ct INTEGER DEFAULT 0,
       youtube_link TEXT,
       image TEXT,
-      youtube_link_start_sec INTEGER
+      youtube_link_start_sec INTEGER,
+      unit_cost REAL CHECK(unit_cost IS NULL OR unit_cost >= 0)
     );
   `;
 
@@ -109,6 +158,17 @@ function initializeDatabase() {
         console.error("Error adding source column:", err.message);
       }
     }
+
+    try {
+      db.exec(`ALTER TABLE inventory ADD COLUMN unit_cost REAL`);
+      console.log("Added unit_cost column to inventory table.");
+    } catch (err) {
+      if (!err.message.includes('duplicate column name')) {
+        console.error("Error adding unit_cost column:", err.message);
+      }
+    }
+
+    migrateInventoryRemoveLegacyTypeCheck();
     
     // Note: Type CHECK constraint removed to allow new types
     // For existing databases with the constraint, it will remain but won't affect new databases
@@ -145,10 +205,11 @@ export const showQueries = {
 
 /** INVENTORY TABLE OPERATIONS */
 export const inventoryQueries = {
-  insert: db.prepare(`INSERT INTO inventory (name, type, duration, fuse_delay, lift_delay, burn_rate, color, available_ct, youtube_link, youtube_link_start_sec, image, metadata, source)
-                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  insert: db.prepare(`INSERT INTO inventory (name, type, duration, fuse_delay, lift_delay, burn_rate, color, available_ct, youtube_link, youtube_link_start_sec, image, metadata, unit_cost, source)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   getAll: db.prepare(`SELECT * FROM inventory`),
-  update: db.prepare(`UPDATE inventory SET name = ?, type = ?, duration = ?, fuse_delay = ?, lift_delay = ?, burn_rate = ?, color = ?, available_ct = ?, youtube_link = ?, youtube_link_start_sec = ?, image = ?, metadata = ?, source = ? WHERE id = ?`),
+  update: db.prepare(`UPDATE inventory SET name = ?, type = ?, duration = ?, fuse_delay = ?, lift_delay = ?, burn_rate = ?, color = ?, available_ct = ?, youtube_link = ?, youtube_link_start_sec = ?, image = ?, metadata = ?, unit_cost = ?, source = ? WHERE id = ?`),
+  delete: db.prepare(`DELETE FROM inventory WHERE id = ?`),
 };
 
 /** FIRING PROFILE TABLE OPERATIONS */
@@ -156,6 +217,7 @@ export const firingProfileQueries = {
   getByInventoryId: db.prepare(`SELECT * FROM inventoryFiringProfile WHERE inventory_id = ?`),
   getAll: db.prepare(`SELECT * FROM inventoryFiringProfile`),
   update: db.prepare(`UPDATE inventoryFiringProfile SET shot_timestamps = ? WHERE inventory_id = ?`),
+  deleteByInventoryId: db.prepare(`DELETE FROM inventoryFiringProfile WHERE inventory_id = ?`),
 };
 
 /** RACKS TABLE OPERATIONS */

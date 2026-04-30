@@ -1,9 +1,11 @@
-import React, { useEffect, useState } from "react"
+import React, { useCallback, useEffect, useState } from "react"
+import { MdClose } from "react-icons/md";
 
 import useAppStore from '@/store/useAppStore';
 import InventoryList from "./InventoryList";
 import { INV_TYPES } from "@/constants";
 import { normalizeYouTubeUrl } from "@/util/youtube";
+import { parseOptionalUnitCost } from "@/util/inventoryUnitCost";
 
 const DEFAULT_DATA = {
     id: "",
@@ -15,6 +17,7 @@ const DEFAULT_DATA = {
     burn_rate: "",
     color: "",
     available_ct: "",
+    unit_cost: "",
     youtube_link: "",
     youtube_link_start_sec: "",
     image: ""
@@ -90,8 +93,31 @@ const AddInventoryForm = (props) => {
     const [formObject, setFormObject] = useState(props.activeItem || DEFAULT_DATA);
     const [isNewItem, setIsNewItem] = useState(props.activeItem || DEFAULT_DATA);
   
-    const commitObject = () => {
-      props.addItemFnc(formObject);
+    const commitObject = async () => {
+      try {
+        await props.addItemFnc(formObject);
+      } catch (err) {
+        console.error(err);
+        alert(err.response?.data?.error || err.message || "Failed to save inventory item.");
+      }
+    };
+
+    const handleDismiss = () => {
+      props.onDismiss?.();
+    };
+
+    const handleDeleteItem = async () => {
+      if (!formObject.id || !props.deleteInventoryItem) return;
+      if (!window.confirm(`Delete "${formObject.name}"? This cannot be undone.`)) return;
+      try {
+        await props.deleteInventoryItem(formObject.id);
+        props.onItemDeleted?.(formObject.id);
+        props.onDismiss?.();
+        setFormObject(DEFAULT_DATA);
+      } catch (error) {
+        console.error("Error deleting inventory item:", error);
+        alert(error.response?.data?.error || "Failed to delete inventory item.");
+      }
     };
   
     const handleInputChange = (e) => {
@@ -132,9 +158,25 @@ const AddInventoryForm = (props) => {
         });
       }
     }, [props.activeItem]);
-  
-    const shouldShow = props.activeItem || props.showNewItem;
-  
+
+    const shouldShow = Boolean(
+      props.showNewItem || (props.activeItem && props.activeItem.id)
+    );
+
+    useEffect(() => {
+      if (!shouldShow) return undefined;
+      const onKey = (e) => {
+        if (e.key === "Escape") props.onDismiss?.();
+      };
+      window.addEventListener("keydown", onKey);
+      const prevOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      return () => {
+        window.removeEventListener("keydown", onKey);
+        document.body.style.overflow = prevOverflow;
+      };
+    }, [shouldShow, props.onDismiss]);
+
     const FieldsComponent =
       formObject.type === "FUSE"
         ? FuseFields
@@ -142,14 +184,42 @@ const AddInventoryForm = (props) => {
         ? ShellFields
         : CakeFields;
   
+    if (!shouldShow) {
+      return null;
+    }
+
     return (
       <div
-        className={`w-full sticky top-4 max-w-xs ${
-          shouldShow ? "" : "hidden"
-        }`}
-        id="editForm"
+        className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="inventory-editor-title"
       >
-        <form className="bg-gray-800 shadow-md rounded px-8 pt-6 pb-8 mb-4">
+        <div
+          className="absolute inset-0 bg-black/60"
+          onClick={handleDismiss}
+          role="presentation"
+        />
+        <div
+          id="editForm"
+          className="relative z-[101] w-full max-w-md max-h-[min(90dvh,720px)] overflow-y-auto overscroll-contain rounded-lg border border-gray-600 bg-gray-900 shadow-2xl"
+          onClick={(e) => e.stopPropagation()}
+        >
+        <form className="bg-gray-800 px-6 sm:px-8 pt-6 pb-8 rounded-lg">
+          <div className="flex items-center justify-between gap-2 mb-4 pb-3 border-b border-gray-600">
+            <h3 id="inventory-editor-title" className="text-base font-semibold text-gray-100">
+              {props.activeItem?.id ? "Edit item" : "Add item"}
+            </h3>
+            <button
+              type="button"
+              onClick={handleDismiss}
+              className="shrink-0 p-1.5 rounded-md text-gray-400 hover:text-white hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-cyan-500"
+              title="Close"
+              aria-label="Close editor"
+            >
+              <MdClose className="w-5 h-5" />
+            </button>
+          </div>
           {/* Form Fields */}
           <div className="mb-4">
             <label
@@ -202,6 +272,26 @@ const AddInventoryForm = (props) => {
             <p className="text-gray-400 text-xs italic">
               The Amount you have on you.
             </p>
+
+            <label
+              className="block text-gray-200 text-sm font-bold mb-2"
+              htmlFor="unit_cost"
+            >
+              Unit cost (optional)
+            </label>
+            <input
+              value={formObject.unit_cost === null || formObject.unit_cost === undefined ? "" : formObject.unit_cost}
+              onChange={handleInputChange}
+              className="shadow appearance-none border rounded w-full py-2 px-3 text-white mb-3 leading-tight focus:outline-none focus:shadow-outline"
+              name="unit_cost"
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="0.00"
+            />
+            <p className="text-gray-400 text-xs italic">
+              Cost per unit (2 decimal places). Leave blank if unknown.
+            </p>
   
             <label
               className="block text-gray-200 text-sm font-bold mb-2"
@@ -225,7 +315,7 @@ const AddInventoryForm = (props) => {
             formObject={formObject}
           />
   
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-3 pt-2 border-t border-gray-700">
             <button
               onClick={commitObject}
               className="bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline"
@@ -233,14 +323,25 @@ const AddInventoryForm = (props) => {
             >
               {props.activeItem ? "Update" : "Add"}
             </button>
+            {props.activeItem?.id && props.deleteInventoryItem ? (
+              <button
+                type="button"
+                onClick={handleDeleteItem}
+                className="text-xs text-gray-500 hover:text-red-400 focus:outline-none focus:underline"
+                title="Permanently delete this item"
+              >
+                Delete
+              </button>
+            ) : null}
           </div>
         </form>
+        </div>
       </div>
     );
   };
 
 export default function InventoryManager(props){
-    const { inventory, createInventoryItem, updateInventoryItem, fetchInventory} = useAppStore();
+    const { inventory, createInventoryItem, updateInventoryItem, fetchInventory, deleteInventoryItem } = useAppStore();
     const [activeItem, setActiveItem] = useState(false);
     const [newItem, setNewItem] = useState(false);
 
@@ -255,9 +356,20 @@ export default function InventoryManager(props){
         setNewItem(true)
     }
 
-    const addOrCreateItem = (inv_item) => {
+    const dismissEditor = useCallback(() => {
+        setActiveItem(false);
+        setNewItem(false);
+    }, []);
+
+    const handleItemDeleted = (id) => {
+        if (activeItem && activeItem.id === id) {
+            setActiveItem(false);
+        }
+    };
+
+    const addOrCreateItem = async (inv_item) => {
         // Normalize YouTube URL before saving
-        let normalizedItem = { ...inv_item };
+        let normalizedItem = { ...inv_item, unit_cost: parseOptionalUnitCost(inv_item.unit_cost) };
         if (inv_item.youtube_link && inv_item.youtube_link.trim() !== '') {
             const normalizedUrl = normalizeYouTubeUrl(inv_item.youtube_link);
             if (normalizedUrl) {
@@ -269,7 +381,7 @@ export default function InventoryManager(props){
             }
         }
 
-        if(normalizedItem.id){
+        if (normalizedItem.id) {
             // Preserve existing metadata if not provided in the update
             const existingItem = inventory.find(item => item.id === normalizedItem.id);
             let metadataToSave = null;
@@ -292,29 +404,34 @@ export default function InventoryManager(props){
                 metadata: metadataToSave
             };
             
-            updateInventoryItem(normalizedItem.id, updateData)
-        }else{
-            createInventoryItem(normalizedItem)
+            await updateInventoryItem(normalizedItem.id, updateData);
+        } else {
+            await createInventoryItem(normalizedItem);
         }
-        setNewItem(false)
-    }
+        dismissEditor();
+    };
 
     return (
-        <div className="mx-2">
-            <div className="w-full flex justify-center items-center gap-2 my-6">
-                <div className="w-4/6 justify-left items-left">
-                    <h2 className="text-2xl">Inventory List</h2>
-                </div>
-                <div className="w-1/6">
-                    <button onClick={()=>startNewItem()} className="bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline" type="button">
-                        Add New
-                    </button>
-                </div>
-            </div>
-            <div className="flex">
-            <InventoryList  className="w-3/4" inventory={inventory} setActiveItem={setEditorActive} refreshInventory={fetchInventory}/>
-            <AddInventoryForm activeItem={activeItem} showNewItem={newItem} addItemFnc={addOrCreateItem} className="w-1/4"/>
-            </div>
+        <div className="w-full max-w-7xl mx-auto px-4 sm:px-6 pb-8">
+            <header className="flex flex-wrap items-center justify-between gap-3 mb-5 pt-2">
+                <h2 className="text-2xl font-semibold text-gray-100 shrink-0">Inventory List</h2>
+                <button onClick={()=>startNewItem()} className="shrink-0 bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline" type="button">
+                    Add New
+                </button>
+            </header>
+            <InventoryList
+                inventory={inventory}
+                setActiveItem={setEditorActive}
+                refreshInventory={fetchInventory}
+            />
+            <AddInventoryForm
+                activeItem={activeItem}
+                showNewItem={newItem}
+                addItemFnc={addOrCreateItem}
+                deleteInventoryItem={deleteInventoryItem}
+                onItemDeleted={handleItemDeleted}
+                onDismiss={dismissEditor}
+            />
         </div>
     )
 }

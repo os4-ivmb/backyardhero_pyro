@@ -1,6 +1,21 @@
 import React, { useState, useMemo } from 'react';
+import {
+  buildShellUsageCountsFromShowItems,
+  buildShellUsageCountsFromRacks,
+  mergeShellUsageCounts,
+  shellPackShellKey
+} from '../../utils/shellUsageCounts';
 
-export default function CellShellSelector({ isOpen, onClose, onSelect, cellData, inventory, isBatch = false }) {
+export default function CellShellSelector({
+  isOpen,
+  onClose,
+  onSelect,
+  cellData,
+  inventory,
+  isBatch = false,
+  showItems,
+  racks
+}) {
   const [selectedShellId, setSelectedShellId] = useState(cellData?.shellId || null);
   const [selectedShellNumber, setSelectedShellNumber] = useState(cellData?.shellNumber || null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -161,6 +176,17 @@ export default function CellShellSelector({ isOpen, onClose, onSelect, cellData,
     });
   }, [selectedColor, searchQuery, filterShellPackId, shellsWithPacks]);
 
+  const shellUsageCounts = useMemo(
+    () =>
+      mergeShellUsageCounts(
+        buildShellUsageCountsFromShowItems(showItems || []),
+        buildShellUsageCountsFromRacks(racks || [])
+      ),
+    [showItems, racks]
+  );
+
+  const showUsageCounts = showItems != null || (racks?.length ?? 0) > 0;
+
   const handleSelect = () => {
     onSelect(selectedShellId, selectedShellNumber);
   };
@@ -252,7 +278,12 @@ export default function CellShellSelector({ isOpen, onClose, onSelect, cellData,
                 displayShells.map((result, idx) => {
                   const isSelected = result.item.id === selectedShellId && 
                     (result.shell === null ? selectedShellNumber === null : result.shell?.number === selectedShellNumber);
-                  
+                  const usageKey = shellPackShellKey(
+                    result.item.id,
+                    result.shell?.number ?? null
+                  );
+                  const usedTotal = showUsageCounts ? shellUsageCounts.get(usageKey) || 0 : null;
+
                   return (
                     <div
                       key={`${result.item.id}_${result.shell?.number || 'any'}_${idx}`}
@@ -260,7 +291,7 @@ export default function CellShellSelector({ isOpen, onClose, onSelect, cellData,
                         setSelectedShellId(result.item.id);
                         setSelectedShellNumber(result.shell?.number || null);
                       }}
-                      className={`p-3 rounded cursor-pointer flex items-center justify-between ${
+                      className={`p-3 rounded cursor-pointer flex items-center justify-between gap-2 ${
                         isSelected
                           ? 'bg-blue-600'
                           : 'bg-gray-700 hover:bg-gray-600'
@@ -282,6 +313,15 @@ export default function CellShellSelector({ isOpen, onClose, onSelect, cellData,
                           </>
                         ) : (
                           <div className="text-sm text-gray-300">ANY shell</div>
+                        )}
+                        {usedTotal !== null && (
+                          <div
+                            className={`text-xs mt-1 font-medium ${
+                              usedTotal > 0 ? 'text-amber-400' : 'text-gray-500'
+                            }`}
+                          >
+                            Used: {usedTotal}×
+                          </div>
                         )}
                       </div>
                       <div className="flex gap-1 ml-2 flex-shrink-0">
@@ -331,6 +371,29 @@ export default function CellShellSelector({ isOpen, onClose, onSelect, cellData,
                   ) : (
                     <div className="text-sm text-gray-300 mb-3">
                       ANY shell from this pack
+                    </div>
+                  )}
+                  {showUsageCounts && selectedResult && (
+                    <div
+                      className={`text-sm mt-2 ${
+                        (shellUsageCounts.get(
+                          shellPackShellKey(
+                            selectedResult.item.id,
+                            selectedResult.shell?.number ?? null
+                          )
+                        ) || 0) > 0
+                          ? 'text-amber-400'
+                          : 'text-gray-500'
+                      }`}
+                    >
+                      Used (racks + timeline):{' '}
+                      {shellUsageCounts.get(
+                        shellPackShellKey(
+                          selectedResult.item.id,
+                          selectedResult.shell?.number ?? null
+                        )
+                      ) || 0}
+                      ×
                     </div>
                   )}
                 </div>

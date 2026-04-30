@@ -1,18 +1,31 @@
 import { MdEdit } from "react-icons/md";
 import React, { useState, useMemo, useEffect } from "react";
-import { FaImage, FaVideo, FaChartLine } from "react-icons/fa6";
+import { INV_TYPES } from "@/constants";
+import { FaImage, FaVideo, FaChartLine, FaTriangleExclamation } from "react-icons/fa6";
 import { FaCheckCircle, FaUpload } from "react-icons/fa";
 import axios from "axios";
 import ShotProfileModal from "./ShotProfileModal";
 import ShellPackEditor from "./ShellPackEditor";
 import ImportCatalogModal from "./ImportCatalogModal";
 
+const INVENTORY_ROW_ATTENTION_TYPES = new Set(
+    Object.keys(INV_TYPES).filter(
+        (k) => k.startsWith("CAKE_") || k === "COMPOUND_CAKE"
+    )
+);
+
 export default function InventoryList({inventory, setActiveItem, refreshInventory}) {
 
     const loadIntoEditor = (inv) => {
-        document.getElementById('editForm').scrollIntoView({ behavior: 'smooth' });
         setActiveItem(inv);
-    }
+        // Modal mounts after state update; defer so #editForm exists (optional chaining avoids crash).
+        setTimeout(() => {
+            document.getElementById("editForm")?.scrollIntoView({
+                behavior: "smooth",
+                block: "nearest",
+            });
+        }, 0);
+    };
 
     const [sortKey, setSortKey] = useState("name"); // Key to sort by
     const [sortDirection, setSortDirection] = useState("asc"); // 'asc' or 'desc'
@@ -39,6 +52,25 @@ export default function InventoryList({inventory, setActiveItem, refreshInventor
     // Handle sorting
     const sortedInventory = useMemo(() => {
         const sorted = [...inventory].sort((a, b) => {
+        if (sortKey === "unit_cost") {
+            const av = a.unit_cost != null && a.unit_cost !== "" ? Number(a.unit_cost) : null;
+            const bv = b.unit_cost != null && b.unit_cost !== "" ? Number(b.unit_cost) : null;
+            if (av === null && bv === null) return 0;
+            if (av === null) return sortDirection === "asc" ? 1 : -1;
+            if (bv === null) return sortDirection === "asc" ? -1 : 1;
+            if (av < bv) return sortDirection === "asc" ? -1 : 1;
+            if (av > bv) return sortDirection === "asc" ? 1 : -1;
+            return 0;
+        }
+        if (sortKey === "available_ct") {
+            const av = a.available_ct != null && a.available_ct !== "" ? Number(a.available_ct) : 0;
+            const bv = b.available_ct != null && b.available_ct !== "" ? Number(b.available_ct) : 0;
+            const aNum = Number.isNaN(av) ? 0 : av;
+            const bNum = Number.isNaN(bv) ? 0 : bv;
+            if (aNum < bNum) return sortDirection === "asc" ? -1 : 1;
+            if (aNum > bNum) return sortDirection === "asc" ? 1 : -1;
+            return 0;
+        }
         if (a[sortKey] < b[sortKey]) return sortDirection === "asc" ? -1 : 1;
         if (a[sortKey] > b[sortKey]) return sortDirection === "asc" ? 1 : -1;
         return 0;
@@ -46,11 +78,59 @@ export default function InventoryList({inventory, setActiveItem, refreshInventor
         return sorted;
     }, [inventory, sortKey, sortDirection]);
 
+    const formatUnitCost = (val) => {
+        if (val === null || val === undefined || val === "") return "—";
+        const n = Number(val);
+        if (Number.isNaN(n)) return "—";
+        return `$${n.toFixed(2)}`;
+    };
+
+    const formatAvailableCt = (val) => {
+        if (val === null || val === undefined || val === "") return "0";
+        const n = Number(val);
+        if (Number.isNaN(n)) return "0";
+        return String(Math.trunc(n));
+    };
+
+    /** Fuse / lift delays for table: F:<n> and/or L:<n> when value is a number ≥ 0 */
+    const formatDelayCell = (item) => {
+        const parts = [];
+        const fd = item.fuse_delay;
+        const ld = item.lift_delay;
+        const fNum = fd === "" || fd === null || fd === undefined ? NaN : Number(fd);
+        const lNum = ld === "" || ld === null || ld === undefined ? NaN : Number(ld);
+        if (!Number.isNaN(fNum) && fNum >= 0) {
+            parts.push(`F:${fNum}`);
+        }
+        if (!Number.isNaN(lNum) && lNum >= 0) {
+            parts.push(`L:${lNum}`);
+        }
+        return parts.length ? parts.join(" ") : "—";
+    };
+
     // Handle filtering
     const filteredInventory = useMemo(() => {
         if (!filterType) return sortedInventory;
         return sortedInventory.filter((item) => item.type === filterType);
     }, [sortedInventory, filterType]);
+
+    /** Sum of (available_ct × unit_cost) for rows currently shown (respects type filter). */
+    const filteredInventoryTotalValue = useMemo(() => {
+        let sum = 0;
+        for (const inv of filteredInventory) {
+            const qtyRaw =
+                inv.available_ct != null && inv.available_ct !== ""
+                    ? Number(inv.available_ct)
+                    : 0;
+            const qty = Number.isNaN(qtyRaw) ? 0 : Math.max(0, Math.trunc(qtyRaw));
+            const priceRaw =
+                inv.unit_cost != null && inv.unit_cost !== "" ? Number(inv.unit_cost) : NaN;
+            if (!Number.isNaN(priceRaw) && priceRaw >= 0) {
+                sum += qty * priceRaw;
+            }
+        }
+        return sum;
+    }, [filteredInventory]);
 
     // Toggle sort direction
     const handleSort = (key) => {
@@ -176,6 +256,27 @@ export default function InventoryList({inventory, setActiveItem, refreshInventor
         }
     };
 
+    const inventoryRowAttention = (item) => {
+        if (!INVENTORY_ROW_ATTENTION_TYPES.has(item.type)) {
+            return { show: false, title: "" };
+        }
+        const noDuration =
+            item.duration == null ||
+            (typeof item.duration === "string" && item.duration.trim() === "");
+        const hasYt =
+            item.youtube_link && String(item.youtube_link).trim() !== "";
+        const start = item.youtube_link_start_sec;
+        const ytMissingStart =
+            hasYt &&
+            (start == null ||
+                (typeof start === "string" && start.trim() === ""));
+        const show = noDuration || ytMissingStart;
+        const reasons = [];
+        if (noDuration) reasons.push("Missing duration");
+        if (ytMissingStart) reasons.push("YouTube link needs a start time (seconds)");
+        return { show, title: reasons.join(". ") };
+    };
+
     // Check if an item has shell pack data
     const hasShellPackData = (item) => {
         if (!item || item.type !== 'AERIAL_SHELL' || !item.metadata) {
@@ -191,11 +292,10 @@ export default function InventoryList({inventory, setActiveItem, refreshInventor
     };
 
     return (
-        <div className="w-3/4 mr-4">
-            <div className="container mx-auto p-4">
+        <div className="min-w-0 w-full space-y-4">
                 {/* Filter Dropdown and Import Button */}
-                <div className="mb-4 flex items-center gap-4">
-                    <div className="flex-1">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
                         <label htmlFor="filter" className="mr-2 font-bold">Filter by Type:</label>
                         <select
                         id="filter"
@@ -208,6 +308,7 @@ export default function InventoryList({inventory, setActiveItem, refreshInventor
                         <option value="CAKE_200G">Cake 200g</option>
                         <option value="CAKE_350G">Cake 350g</option>
                         <option value="CAKE_500G">Cake 500g</option>
+                        <option value="COMPOUND_CAKE">Compound</option>
                         <option value="AERIAL_SHELL">Aerial Shell</option>
                         <option value="GENERIC">Generic</option>
                         <option value="FUSE">Fuse</option>
@@ -215,7 +316,7 @@ export default function InventoryList({inventory, setActiveItem, refreshInventor
                     </div>
                     <button
                         onClick={() => setIsImportModalOpen(true)}
-                        className="bg-green-900 hover:bg-green-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline flex items-center gap-2"
+                        className="shrink-0 self-start sm:self-auto bg-green-900 hover:bg-green-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline inline-flex items-center gap-2"
                         type="button"
                     >
                         <FaUpload /> Import from Catalog
@@ -223,7 +324,7 @@ export default function InventoryList({inventory, setActiveItem, refreshInventor
                 </div>
 
                 {/* Batch Reprocess Section */}
-                <div className="mb-4 bg-gray-800 rounded-lg border border-gray-700">
+                <div className="bg-gray-800 rounded-lg border border-gray-700">
                     <button
                         onClick={() => setIsBatchReprocessOpen(!isBatchReprocessOpen)}
                         className="w-full px-4 py-3 flex justify-between items-center text-left hover:bg-gray-700 transition-colors"
@@ -399,8 +500,7 @@ export default function InventoryList({inventory, setActiveItem, refreshInventor
                         </div>
                     )}
                 </div>
-                </div>
-        <table className="table-auto bg-gray-800 border border-gray-200 rounded-lg shadow-md">
+        <table className="w-full min-w-0 table-auto bg-gray-800 border border-gray-200 rounded-lg shadow-md">
             <thead>
                 <tr className="bg-gray-600 text-gray-200 uppercase text-sm leading-normal">
                 <th
@@ -416,9 +516,21 @@ export default function InventoryList({inventory, setActiveItem, refreshInventor
                 Type {sortKey === "type" && (sortDirection === "asc" ? "↑" : "↓")}
                 </th>
                 <th className="py-3 px-6 text-left">Duration</th>
-                <th className="py-3 px-6 text-left">Fuse Delay</th>
-                <th className="py-3 px-6 text-left">Lift Delay</th>
+                <th className="py-3 px-6 text-left whitespace-nowrap">Delay</th>
                 <th className="py-3 px-6 text-left">Burn Rate</th>
+                <th
+                    className="py-3 px-4 text-right cursor-pointer whitespace-nowrap"
+                    onClick={() => handleSort("available_ct")}
+                    title="Quantity on hand"
+                >
+                    Qty avail {sortKey === "available_ct" && (sortDirection === "asc" ? "↑" : "↓")}
+                </th>
+                <th
+                    className="py-3 px-4 text-left cursor-pointer whitespace-nowrap"
+                    onClick={() => handleSort("unit_cost")}
+                >
+                    Unit cost {sortKey === "unit_cost" && (sortDirection === "asc" ? "↑" : "↓")}
+                </th>
                 <th className="py-3 px-1 text-left">Tags</th>
                 <th className="py-3 px-6 text-left">Color</th>
                 <th className="py-3 px-6 text-left">Source</th>
@@ -427,16 +539,34 @@ export default function InventoryList({inventory, setActiveItem, refreshInventor
             </thead>
             <tbody  className="text-gray-6400 text-sm font-light">
             {filteredInventory.map((inv,ki) => {
+                const attention = inventoryRowAttention(inv);
                 return (
                     <tr key={ki} className={`${
                   ki % 2 === 0 ? "bg-gray-900" : "bg-gray-800"
                 } hover:bg-gray-700`}>
-                        <td className="p-1 px-4">{inv.name}</td>
+                        <td className="p-1 px-4">
+                            <div className="flex items-center gap-2 min-w-0">
+                                {attention.show && (
+                                    <span
+                                        className="inline-flex shrink-0 text-yellow-400"
+                                        title={attention.title}
+                                        role="img"
+                                        aria-label={attention.title}
+                                    >
+                                        <FaTriangleExclamation aria-hidden />
+                                    </span>
+                                )}
+                                <span className="min-w-0">{inv.name}</span>
+                            </div>
+                        </td>
                         <td className="p-1 px-4">{inv.type}</td>
                         <td className="p-1 px-4">{inv.duration}</td>
-                        <td className="p-1 px-4">{inv.fuse_delay}</td>
-                        <td className="p-1 px-4">{inv.lift_delay}</td>
+                        <td className="p-1 px-4 font-mono text-xs whitespace-nowrap" title="Fuse delay (F) / lift delay (L)">
+                            {formatDelayCell(inv)}
+                        </td>
                         <td className="p-1 px-4">{inv.burn_rate}</td>
+                        <td className="p-1 px-4 text-right tabular-nums">{formatAvailableCt(inv.available_ct)}</td>
+                        <td className="p-1 px-4 text-right tabular-nums">{formatUnitCost(inv.unit_cost)}</td>
                         <td className="p-1 px-1">
                             <div className="flex items-center gap-2">
                                 {inv.image ? <FaImage/> : ""}
@@ -502,6 +632,15 @@ export default function InventoryList({inventory, setActiveItem, refreshInventor
             })}
             </tbody>
             </table>
+            <p className="text-sm text-gray-400 mt-3 text-right tabular-nums">
+                Total value (qty × unit cost, items above)
+                {filterType ? " — filtered" : ""}
+                :{" "}
+                {filteredInventoryTotalValue.toLocaleString("en-US", {
+                    style: "currency",
+                    currency: "USD",
+                })}
+            </p>
             <ShotProfileModal
                 isVisible={isProfileModalOpen}
                 item={selectedProfileItem}

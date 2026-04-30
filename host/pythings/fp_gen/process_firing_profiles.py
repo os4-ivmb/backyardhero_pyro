@@ -143,7 +143,7 @@ def get_inventory_items_with_youtube(db_path, reprocess_all=False, item_id=None)
     if item_id is not None:
         # Get specific item by ID (include items without start_sec to auto-detect)
         query = """
-            SELECT id, name, youtube_link, youtube_link_start_sec
+            SELECT id, name, youtube_link, youtube_link_start_sec, duration
             FROM inventory
             WHERE id = ?
             AND youtube_link IS NOT NULL 
@@ -153,7 +153,7 @@ def get_inventory_items_with_youtube(db_path, reprocess_all=False, item_id=None)
     elif reprocess_all:
         # Get all items with YouTube links, regardless of existing profiles (include items without start_sec)
         query = """
-            SELECT id, name, youtube_link, youtube_link_start_sec
+            SELECT id, name, youtube_link, youtube_link_start_sec, duration
             FROM inventory
             WHERE youtube_link IS NOT NULL 
             AND youtube_link != ''
@@ -162,7 +162,7 @@ def get_inventory_items_with_youtube(db_path, reprocess_all=False, item_id=None)
     else:
         # Only get items that don't have a firing profile yet (include items without start_sec)
         query = """
-            SELECT i.id, i.name, i.youtube_link, i.youtube_link_start_sec
+            SELECT i.id, i.name, i.youtube_link, i.youtube_link_start_sec, i.duration
             FROM inventory i
             LEFT JOIN inventoryFiringProfile ifp ON i.id = ifp.inventory_id
             WHERE i.youtube_link IS NOT NULL 
@@ -510,6 +510,19 @@ def merge_close_shots(shots, merge_threshold_ms=500):
     return merged_shots
 
 
+def duration_seconds_from_shots(shots):
+    """Derive cake duration from shot profile (same as ShotProfileModal: max end time in ms / 1000)."""
+    if not shots:
+        return None
+    last_shot_end_ms = max(shot[1] for shot in shots)
+    return round(last_shot_end_ms / 1000.0, 2)
+
+
+def inventory_duration_is_undefined(duration_value):
+    """True when DB has no duration set (NULL)."""
+    return duration_value is None
+
+
 def save_firing_profile(db_path, inventory_id, youtube_link, youtube_link_start_sec, shots):
     """Save or update a firing profile in the database.
     
@@ -659,25 +672,33 @@ def process_item(item, db_path, threshold_ratio=0.70, temp_dir=None, log_file=No
                 shot_preview += f" ... ({len(shots) - 5} more)"
             log_message(f"  Shot ranges: {shot_preview}", log_file)
         
-        # Override duration if requested
-        if override_duration and shots:
-            # Duration is simply the end time of the last shot (assuming video starts at 0)
-            last_shot_end = max(shot[1] for shot in shots)  # End time of last shot
-            duration_seconds = round(last_shot_end / 1000.0, 1)  # Round to 0.1 seconds
-            
-            log_message(f"  Overriding duration: {duration_seconds:.1f}s (end of last shot at {last_shot_end}ms)", log_file)
-            
-            # Update inventory item duration in database
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE inventory SET duration = ? WHERE id = ?",
-                (duration_seconds, inventory_id)
-            )
-            conn.commit()
-            conn.close()
-            
-            log_message(f"  ✓ Updated inventory item duration to {duration_seconds:.1f}s", log_file)
+        # Duration from profile: max shot end in ms -> seconds (matches ShotProfileModal).
+        # Apply when --override-duration, or when inventory.duration is NULL.
+        if shots:
+            duration_seconds = duration_seconds_from_shots(shots)
+            last_shot_end_ms = max(shot[1] for shot in shots)
+            current_duration = item['duration']
+            missing_duration = inventory_duration_is_undefined(current_duration)
+            if override_duration:
+                log_message(
+                    f"  Overriding duration: {duration_seconds}s (end of last shot at {last_shot_end_ms}ms)",
+                    log_file,
+                )
+            elif missing_duration:
+                log_message(
+                    f"  Duration unset — setting from profile: {duration_seconds}s (end of last shot at {last_shot_end_ms}ms)",
+                    log_file,
+                )
+            if override_duration or missing_duration:
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE inventory SET duration = ? WHERE id = ?",
+                    (duration_seconds, inventory_id),
+                )
+                conn.commit()
+                conn.close()
+                log_message(f"  ✓ Updated inventory item duration to {duration_seconds}s", log_file)
         
         # Save to database
         save_firing_profile(
@@ -764,7 +785,8 @@ def main():
     parser.add_argument(
         '--override-duration',
         action='store_true',
-        help='Override item duration based on time from first shot start to last shot end'
+        help='Always overwrite inventory duration from the profile (max shot end ms / 1000). '
+             'Without this flag, duration is still set when it is currently NULL (same formula as the shot profile UI).'
     )
     
     args = parser.parse_args()

@@ -294,7 +294,9 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
           >
             <option value="CAKE_FOUNTAIN">Cake Fountain</option>
             <option value="CAKE_200G">Cake 200g</option>
+            <option value="CAKE_350G">Cake 350g</option>
             <option value="CAKE_500G">Cake 500g</option>
+            <option value="COMPOUND_CAKE">Compound</option>
             <option value="AERIAL_SHELL">Aerial Shell</option>
             <option value="GENERIC">Generic</option>
             <option value="FUSE">Fuse</option>
@@ -742,13 +744,16 @@ const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex,
       return;
     }
 
-    // Filter for 200g and 500g cakes
-    const cakeItems = inventory.filter(item => 
-      item.type === "CAKE_200G" || item.type === "CAKE_500G"
+    // Filter for cakes used in quick test layout
+    const cakeItems = inventory.filter(item =>
+      item.type === "CAKE_200G" ||
+      item.type === "CAKE_350G" ||
+      item.type === "CAKE_500G" ||
+      item.type === "COMPOUND_CAKE"
     );
 
     if (cakeItems.length === 0) {
-      alert("No 200g or 500g cakes found in inventory");
+      alert("No 200g, 350g, 500g, or compound cakes found in inventory");
       return;
     }
 
@@ -1682,7 +1687,7 @@ const ShowBuilder = (props) => {
               )}
               
               {activeTab === "racks" && (
-                <RacksTab inventory={inventory} showId={showMetadata.id} />
+                <RacksTab inventory={inventory} showId={showMetadata.id} showItems={items} />
               )}
               
               {activeTab === "test" && (

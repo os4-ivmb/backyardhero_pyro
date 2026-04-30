@@ -3,6 +3,7 @@ export const INV_TYPES = {
     CAKE_200G: '200G Cake',
     CAKE_350G: '350G Cake',
     CAKE_500G: '500G Cake',
+    COMPOUND_CAKE: 'Compound',
     AERIAL_SHELL: 'AERIAL SHELL',
     GENERIC: 'Generic',
     FUSE: 'Fuse'
@@ -17,6 +18,7 @@ export const INV_COLOR_CODE = {
     CAKE_200G: '#33AAAA',
     CAKE_350G: '#33CCAA',
     CAKE_500G: '#26b0ff',
+    COMPOUND_CAKE: '#c026d3',
     AERIAL_SHELL: '#FF0000',
     GENERIC: '#FFFFFF',
     FUSE: '#00FF00',

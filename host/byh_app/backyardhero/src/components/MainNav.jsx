@@ -24,10 +24,15 @@ const MainNav = () => {
     { label: "Settings", icon: <FaGear/>, href: "/profile", key: "setting" },
   ];
 
-  const { fetchInventory, fetchShows, fetchSystemConfig } = useAppStore();
+  const { fetchInventory, fetchShows, fetchSystemConfig, stagedShow } = useAppStore();
   const [currTab, setCurrTab] = useState('main');
-  
+  const hasStagedShow = Boolean(stagedShow?.id);
 
+  useEffect(() => {
+    if (currTab === 'loadout' && !hasStagedShow) {
+      setCurrTab('main');
+    }
+  }, [currTab, hasStagedShow]);
 
   useEffect(() => {
       fetchInventory();
@@ -59,9 +64,11 @@ const MainNav = () => {
 
             {/* Menu */}
             <ul className="flex flex-1 justify-around h-full">
-            {menuItems.map((item, index) => (
+            {menuItems
+              .filter((item) => item.key !== 'loadout' || hasStagedShow)
+              .map((item, index) => (
                 <li onClick={()=> setCurrTab(item.key)}
-                key={index}
+                key={item.key}
                 className={`flex items-center space-x-1.5 px-3 py-1 h-full transition-all duration-200 flex-1 justify-center border-b-2 ${
                   currTab === item.key 
                     ? 'border-cyan-500 text-cyan-300 bg-slate-800 shadow-[0_0_8px_rgba(6,182,212,0.3)]' 

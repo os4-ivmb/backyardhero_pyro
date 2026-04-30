@@ -142,11 +142,10 @@ const useAppStore = create((set, get) => ({
       }));
     } catch (error) {
       console.error('Failed to create inventory item:', error);
+      throw error;
     }
   },
   updateInventoryItem: async (id, updatedData) => {
-    console.log("ID")
-    console.log(id)
     try {
       // Preserve existing metadata if not provided in updatedData
       const existingItem = get().inventoryById[id];
@@ -164,7 +163,12 @@ const useAppStore = create((set, get) => ({
       await get().fetchInventory();
     } catch (error) {
       console.error('Failed to update inventory item:', error);
+      throw error;
     }
+  },
+  deleteInventoryItem: async (id) => {
+    await axios.delete(`/api/inventory/${id}`);
+    await get().fetchInventory();
   },
   stateData: {},
   setStateData: (stateData) => {

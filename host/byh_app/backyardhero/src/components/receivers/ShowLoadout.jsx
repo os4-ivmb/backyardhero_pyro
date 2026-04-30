@@ -1,11 +1,42 @@
 import useAppStore from "@/store/useAppStore"
 import useStateAppStore from "@/store/useStateAppStore";
-import { useEffect, useRef, useState } from "react";
+import {
+  buildShellUsageCountsFromRackCellAssignments,
+  parseShellPackShellKey,
+} from "@/utils/shellUsageCounts";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MdDownload, MdPrint, MdArrowBack, MdSave } from 'react-icons/md';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import SpatialLayoutMap from '../builder/SpatialLayoutMap';
 import axios from 'axios';
+
+function getShellDescriptionFromMetadata(shellData, shellNumber) {
+  if (!shellData || shellNumber == null || shellNumber === 0) return null;
+  try {
+    const metadata = shellData.metadata
+      ? (typeof shellData.metadata === 'string'
+          ? JSON.parse(shellData.metadata)
+          : shellData.metadata)
+      : null;
+    const packShellData = metadata?.pack_shell_data;
+    if (packShellData?.shells && packShellData.shells.length >= shellNumber) {
+      return packShellData.shells[shellNumber - 1]?.description || null;
+    }
+  } catch (e) {
+    console.error('Failed to parse shell metadata:', e);
+  }
+  return null;
+}
+
+/** Timeline item types listed under Items to Pack (shells/racks covered elsewhere). */
+const CAKE_AND_FOUNTAIN_PACK_TYPES = new Set([
+  'CAKE_FOUNTAIN',
+  'CAKE_200G',
+  'CAKE_350G',
+  'CAKE_500G',
+  'COMPOUND_CAKE',
+]);
 
 function ShowLoadout({ setCurrentTab }) {
   const { systemConfig, stagedShow, updateShow, inventory } = useAppStore();
@@ -246,27 +277,71 @@ function ShowLoadout({ setCurrentTab }) {
     return arrangedCues;
   };
 
-  // Function to get all items with pictures and their counts
-  const getItemsWithPictures = () => {
+  // Cakes and fountain cakes only (shells / rack cues are in other sections)
+  const getItemsToPack = () => {
     if (!stagedShow?.items) return [];
-    
+
     const itemCounts = {};
-    
+
     stagedShow.items.forEach((item) => {
-      if (item.image) {
-        const key = `${item.name}-${item.type}`;
-        if (!itemCounts[key]) {
-          itemCounts[key] = {
-            ...item,
-            count: 0
-          };
-        }
-        itemCounts[key].count += 1;
+      if (!CAKE_AND_FOUNTAIN_PACK_TYPES.has(item.type)) return;
+      const key = `${item.name}-${item.type}`;
+      if (!itemCounts[key]) {
+        itemCounts[key] = {
+          ...item,
+          count: 0,
+        };
       }
+      itemCounts[key].count += 1;
     });
-    
+
     return Object.values(itemCounts).sort((a, b) => a.name.localeCompare(b.name));
   };
+
+  const shellsToPackByPack = useMemo(() => {
+    const usage = buildShellUsageCountsFromRackCellAssignments(stagedShow?.items, racks);
+    if (!usage.size) return [];
+
+    const packShells = new Map();
+
+    for (const [usageKey, count] of usage.entries()) {
+      const parsed = parseShellPackShellKey(usageKey);
+      if (!parsed) continue;
+      const { shellId, shellNumber } = parsed;
+      const idKey = String(shellId);
+      if (!packShells.has(idKey)) {
+        packShells.set(idKey, new Map());
+      }
+      const numKey = shellNumber === null ? 'any' : shellNumber;
+      const inner = packShells.get(idKey);
+      inner.set(numKey, (inner.get(numKey) || 0) + count);
+    }
+
+    return [...packShells.entries()]
+      .map(([idKey, shellNumMap]) => {
+        const shellData =
+          inventory.find((inv) => String(inv.id) === idKey || inv.id === Number(idKey)) || null;
+        const packName = shellData?.name || `Shell pack (${idKey})`;
+        const shells = [...shellNumMap.entries()]
+          .map(([snKey, c]) => {
+            const shellNumber = snKey === 'any' ? null : snKey;
+            return {
+              shellNumber,
+              count: c,
+              description: getShellDescriptionFromMetadata(shellData, shellNumber),
+            };
+          })
+          .sort((a, b) => {
+            if (a.shellNumber == null && b.shellNumber == null) return 0;
+            if (a.shellNumber == null) return 1;
+            if (b.shellNumber == null) return -1;
+            return a.shellNumber - b.shellNumber;
+          });
+        return { idKey, packName, shells };
+      })
+      .filter((p) => p.shells.length > 0)
+      .sort((a, b) => a.packName.localeCompare(b.packName));
+  }, [stagedShow?.items, racks, inventory]);
 
   // Save receiver locations to show data
   const saveReceiverLocations = async () => {
@@ -297,6 +372,131 @@ function ShowLoadout({ setCurrentTab }) {
       const pageWidth = 190; // A4 width minus margins
       const pageHeight = 277; // A4 height minus margins
       let currentY = 10; // Starting Y position
+      const margin = 10;
+      const PDF_CAPTURE_SCALE = 1;
+      const PDF_JPEG_QUALITY = 0.82;
+      const PDF_IMG_MAX_CSS_PX = 200;
+
+      const downscaleImagesForPdf = (root) => {
+        if (!root.querySelectorAll) return;
+        root.querySelectorAll('img').forEach((img) => {
+          img.style.maxWidth = `${PDF_IMG_MAX_CSS_PX}px`;
+          img.style.maxHeight = `${PDF_IMG_MAX_CSS_PX}px`;
+          img.style.objectFit = 'contain';
+        });
+      };
+
+      /** Dense, readable layout for Shells section in PDF rasterization only */
+      const compactShellsSectionForPdf = (sectionRoot) => {
+        if (sectionRoot.getAttribute('data-loadout-section') !== 'shells') return;
+
+        sectionRoot.style.marginTop = '0';
+        sectionRoot.style.backgroundColor = '#ffffff';
+
+        const headerBlock = sectionRoot.querySelector('[data-shell-pdf-header]');
+        if (headerBlock) {
+          headerBlock.style.paddingBottom = '4px';
+          headerBlock.style.marginBottom = '6px';
+          headerBlock.style.borderBottom = '2px solid #333';
+          headerBlock.querySelectorAll('h2').forEach((h) => {
+            h.style.fontSize = '16px';
+            h.style.margin = '0';
+            h.style.color = '#111827';
+            h.style.fontWeight = '700';
+          });
+          headerBlock.querySelectorAll('p').forEach((p) => {
+            p.style.fontSize = '10px';
+            p.style.margin = '2px 0 0 0';
+            p.style.color = '#374151';
+            p.style.lineHeight = '1.2';
+          });
+        }
+
+        const grid = sectionRoot.querySelector('[data-shells-grid]');
+        if (grid) {
+          grid.style.display = 'grid';
+          grid.style.gridTemplateColumns = 'repeat(3, minmax(0, 1fr))';
+          grid.style.gap = '6px';
+          grid.style.alignItems = 'start';
+        } else {
+          sectionRoot.style.display = 'flex';
+          sectionRoot.style.flexDirection = 'column';
+          sectionRoot.style.gap = '6px';
+          sectionRoot.style.alignItems = 'stretch';
+        }
+
+        sectionRoot.querySelectorAll('[data-shell-pack]').forEach((card) => {
+          card.style.padding = '5px 7px';
+          card.style.margin = '0';
+          card.style.width = '100%';
+          card.style.maxWidth = '100%';
+          card.style.backgroundColor = '#f3f4f6';
+          card.style.border = '1px solid #9ca3af';
+          card.style.borderRadius = '3px';
+          card.style.minHeight = 'unset';
+          card.style.boxSizing = 'border-box';
+
+          const title = card.querySelector('h3');
+          if (title) {
+            title.style.fontSize = '11px';
+            title.style.fontWeight = '700';
+            title.style.margin = '0 0 3px 0';
+            title.style.padding = '0';
+            title.style.color = '#111827';
+            title.style.lineHeight = '1.2';
+            title.querySelectorAll('span').forEach((s) => {
+              s.style.color = '#4b5563';
+              s.style.fontWeight = '600';
+            });
+          }
+
+          const ul = card.querySelector('ul');
+          if (ul) {
+            ul.style.margin = '0';
+            ul.style.padding = '0';
+            ul.style.listStyle = 'none';
+          }
+
+          card.querySelectorAll('li').forEach((li) => {
+            li.style.display = 'flex';
+            li.style.flexDirection = 'row';
+            li.style.flexWrap = 'wrap';
+            li.style.alignItems = 'baseline';
+            li.style.columnGap = '6px';
+            li.style.rowGap = '0';
+            li.style.padding = '1px 0 2px 0';
+            li.style.margin = '0';
+            li.style.borderBottom = '1px solid #d1d5db';
+            li.style.fontSize = '10px';
+            li.style.lineHeight = '1.25';
+            li.style.color = '#1f2937';
+
+            const spans = li.querySelectorAll(':scope > span');
+            spans.forEach((sp, idx) => {
+              sp.style.margin = '0';
+              sp.style.padding = '0';
+              if (idx === 0) {
+                sp.style.fontFamily = 'ui-monospace, monospace';
+                sp.style.fontWeight = '700';
+                sp.style.color = '#1d4ed8';
+                sp.style.flexShrink = '0';
+              } else if (idx === 1) {
+                sp.style.fontWeight = '700';
+                sp.style.color = '#047857';
+                sp.style.flexShrink = '0';
+              } else {
+                sp.style.fontWeight = '400';
+                sp.style.color = '#111827';
+                sp.style.flex = '1 1 120px';
+                sp.style.minWidth = '0';
+              }
+            });
+          });
+
+          const lastLi = card.querySelector('li:last-of-type');
+          if (lastLi) lastLi.style.borderBottom = 'none';
+        });
+      };
 
       // Function to create a temporary container for a section
       const createSectionContainer = (sectionElement) => {
@@ -312,6 +512,7 @@ function ShowLoadout({ setCurrentTab }) {
         
         // Clone the section
         const sectionClone = sectionElement.cloneNode(true);
+        downscaleImagesForPdf(sectionClone);
         
         // Convert dark theme to light theme for PDF
         const convertToLightTheme = (element) => {
@@ -356,59 +557,143 @@ function ShowLoadout({ setCurrentTab }) {
         };
         
         convertToLightTheme(sectionClone);
+        compactShellsSectionForPdf(sectionClone);
         tempContainer.appendChild(sectionClone);
         return tempContainer;
       };
 
-      // Function to add a section to PDF
+      // Rasterize as JPEG (much smaller than PNG) and slice tall captures across pages.
       const addSectionToPDF = async (sectionElement, startNewPage = false) => {
         if (startNewPage) {
           pdf.addPage();
-          currentY = 10;
+          currentY = margin;
         }
 
         const tempContainer = createSectionContainer(sectionElement);
         document.body.appendChild(tempContainer);
 
         const canvas = await html2canvas(tempContainer, {
-          scale: 2,
+          scale: PDF_CAPTURE_SCALE,
           useCORS: true,
           allowTaint: true,
           backgroundColor: '#ffffff',
           width: 800,
-          height: tempContainer.scrollHeight
+          height: tempContainer.scrollHeight,
+          logging: false,
         });
 
         document.body.removeChild(tempContainer);
 
-        const imgData = canvas.toDataURL('image/png');
-        const imgHeight = (canvas.height * pageWidth) / canvas.width;
-        
-        // Check if content fits on current page
-        if (currentY + imgHeight > pageHeight) {
-          pdf.addPage();
-          currentY = 10;
-        }
+        const imgWmm = pageWidth;
+        const fullHmm = (canvas.height * imgWmm) / canvas.width;
+        const bottomLimit = pageHeight - margin;
 
-        pdf.addImage(imgData, 'PNG', 10, currentY, pageWidth, imgHeight);
-        currentY += imgHeight + 10;
+        const placeOneShot = () => {
+          if (currentY + fullHmm > bottomLimit) {
+            pdf.addPage();
+            currentY = margin;
+          }
+          const imgData = canvas.toDataURL('image/jpeg', PDF_JPEG_QUALITY);
+          pdf.addImage(imgData, 'JPEG', margin, currentY, imgWmm, fullHmm);
+          currentY += fullHmm + 5;
+        };
+
+        const placeSliced = () => {
+          let srcY = 0;
+          while (srcY < canvas.height) {
+            if (currentY >= bottomLimit - 5) {
+              pdf.addPage();
+              currentY = margin;
+            }
+            const availableMm = bottomLimit - currentY;
+            let slicePx = Math.floor((availableMm * canvas.width) / imgWmm);
+            slicePx = Math.min(Math.max(1, slicePx), canvas.height - srcY);
+            const sliceCanvas = document.createElement('canvas');
+            sliceCanvas.width = canvas.width;
+            sliceCanvas.height = slicePx;
+            sliceCanvas.getContext('2d').drawImage(
+              canvas,
+              0,
+              srcY,
+              canvas.width,
+              slicePx,
+              0,
+              0,
+              canvas.width,
+              slicePx
+            );
+            const sliceHmm = (slicePx * imgWmm) / canvas.width;
+            const imgData = sliceCanvas.toDataURL('image/jpeg', PDF_JPEG_QUALITY);
+            pdf.addImage(imgData, 'JPEG', margin, currentY, imgWmm, sliceHmm);
+            currentY += sliceHmm;
+            srcY += slicePx;
+          }
+          currentY += 5;
+        };
+
+        if (fullHmm <= bottomLimit - margin) {
+          placeOneShot();
+        } else {
+          placeSliced();
+        }
       };
 
       // Get all sections
       const loadoutContent = loadoutRef.current;
       const sections = loadoutContent.children;
 
-      // Process each section
+      // Process each section (split rack block into one capture per rack — avoids huge bitmaps)
       for (let i = 0; i < sections.length; i++) {
         const section = sections[i];
         const shouldStartNewPage = section.classList.contains('page-break-before-always');
-        
+
         // Skip the spatial layout section for PDF export
         const isSpatialLayout = section.textContent.includes('Spatial Layout');
         if (isSpatialLayout) {
           continue;
         }
-        
+
+        const isRacksSection = section.getAttribute('data-loadout-section') === 'racks';
+        if (isRacksSection) {
+          const headerEl = section.querySelector('[data-rack-pdf-header]');
+          const rackChunks = section.querySelectorAll('[data-rack-pdf-chunk]');
+          if (rackChunks.length === 0) {
+            await addSectionToPDF(section, shouldStartNewPage);
+            continue;
+          }
+          for (let r = 0; r < rackChunks.length; r++) {
+            const wrapper = document.createElement('div');
+            if (r === 0 && headerEl) {
+              wrapper.appendChild(headerEl.cloneNode(true));
+            }
+            wrapper.appendChild(rackChunks[r].cloneNode(true));
+            const startPage = r === 0 ? shouldStartNewPage : true;
+            await addSectionToPDF(wrapper, startPage);
+          }
+          continue;
+        }
+
+        const isShellsSection = section.getAttribute('data-loadout-section') === 'shells';
+        if (isShellsSection) {
+          const shellHeaderEl = section.querySelector('[data-shell-pdf-header]');
+          const shellPacks = section.querySelectorAll('[data-shell-pack]');
+          if (shellPacks.length === 0) {
+            await addSectionToPDF(section, shouldStartNewPage);
+            continue;
+          }
+          for (let s = 0; s < shellPacks.length; s++) {
+            const wrapper = document.createElement('div');
+            wrapper.setAttribute('data-loadout-section', 'shells');
+            if (s === 0 && shellHeaderEl) {
+              wrapper.appendChild(shellHeaderEl.cloneNode(true));
+            }
+            wrapper.appendChild(shellPacks[s].cloneNode(true));
+            const startPage = s === 0 ? shouldStartNewPage : true;
+            await addSectionToPDF(wrapper, startPage);
+          }
+          continue;
+        }
+
         await addSectionToPDF(section, shouldStartNewPage);
       }
 
@@ -568,8 +853,11 @@ function ShowLoadout({ setCurrentTab }) {
         })}
 
         {/* Racks Section */}
-        <div className="mt-8 page-break-inside-avoid page-break-before-always">
-          <div className="border-b-2 border-gray-600 pb-2 mb-4">
+        <div
+          className="mt-8 page-break-inside-avoid page-break-before-always"
+          data-loadout-section="racks"
+        >
+          <div className="border-b-2 border-gray-600 pb-2 mb-4" data-rack-pdf-header>
             <h2 className="text-2xl font-bold text-gray-100">Rack Loadouts</h2>
             <p className="text-gray-400">Racks and their shell assignments with receiver and cue mappings</p>
           </div>
@@ -588,25 +876,6 @@ function ShowLoadout({ setCurrentTab }) {
                 const getShellData = (shellId) => {
                   if (!inventory || !shellId) return null;
                   return inventory.find(item => item.id === shellId);
-                };
-
-                // Get shell description from metadata
-                const getShellDescription = (shellData, shellNumber) => {
-                  if (!shellData || !shellNumber) return null;
-                  try {
-                    const metadata = shellData.metadata 
-                      ? (typeof shellData.metadata === 'string' 
-                          ? JSON.parse(shellData.metadata) 
-                          : shellData.metadata)
-                      : null;
-                    const packShellData = metadata?.pack_shell_data;
-                    if (packShellData?.shells && packShellData.shells.length >= shellNumber) {
-                      return packShellData.shells[shellNumber - 1]?.description || null;
-                    }
-                  } catch (e) {
-                    console.error('Failed to parse shell metadata:', e);
-                  }
-                  return null;
                 };
 
                 // Get fuse data helper
@@ -669,7 +938,7 @@ function ShowLoadout({ setCurrentTab }) {
                 const gridHeight = rack.y_rows * (cellHeight + gap) - gap;
 
                 return (
-                  <div key={rack.id} className="mb-8 page-break-inside-avoid">
+                  <div key={rack.id} className="mb-8 page-break-inside-avoid" data-rack-pdf-chunk>
                     {/* Rack Header */}
                     <div className="border-b border-gray-600 pb-2 mb-4">
                       <h3 className="text-xl font-bold text-gray-100">{rack.name}</h3>
@@ -709,8 +978,8 @@ function ShowLoadout({ setCurrentTab }) {
                               console.log(`Cell ${cellKey} has mapping:`, cellMapping);
                             }
                             const shellData = cellData?.shellId ? getShellData(cellData.shellId) : null;
-                            const shellDescription = shellData && cellData?.shellNumber 
-                              ? getShellDescription(shellData, cellData.shellNumber) 
+                            const shellDescription = shellData && cellData?.shellNumber
+                              ? getShellDescriptionFromMetadata(shellData, cellData.shellNumber)
                               : null;
                             const fuseData = cellData?.fuseId ? fuses[cellData.fuseId] : null;
                             const fuseItem = fuseData ? getFuseData(fuseData.type) : null;
@@ -858,33 +1127,92 @@ function ShowLoadout({ setCurrentTab }) {
           )}
         </div>
 
-        {/* Items with Pictures Section */}
+        {/* Shells to pack — by shell pack, then shell # / description */}
+        <div
+          className="mt-8 page-break-inside-avoid page-break-before-always"
+          data-loadout-section="shells"
+        >
+          <div className="border-b-2 border-gray-600 pb-2 mb-4" data-shell-pdf-header>
+            <h2 className="text-2xl font-bold text-gray-100">Shells</h2>
+            <p className="text-gray-400">
+              Shell packs and positions needed for assigned rack cells in this show
+            </p>
+          </div>
+          {shellsToPackByPack.length === 0 ? (
+            <div className="text-gray-500 italic text-center py-4">
+              No rack shell usage in this show (assign RACK_SHELLS cues to rack cells with shells).
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4" data-shells-grid>
+              {shellsToPackByPack.map((pack) => {
+                const packTotal = pack.shells.reduce((sum, row) => sum + row.count, 0);
+                return (
+                <div
+                  key={pack.idKey}
+                  className="border border-gray-600 rounded-lg p-4 bg-gray-800/80 min-w-0"
+                  data-shell-pack
+                >
+                  <h3 className="text-lg font-semibold text-gray-100 mb-3">
+                    {pack.packName}
+                    <span className="text-gray-400 font-normal"> ({packTotal})</span>
+                  </h3>
+                  <ul className="space-y-2">
+                    {pack.shells.map((row) => (
+                      <li
+                        key={row.shellNumber === null ? 'any' : row.shellNumber}
+                        className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm text-gray-300 border-b border-gray-700/80 pb-2 last:border-0 last:pb-0"
+                      >
+                        <span className="font-mono text-blue-300 shrink-0">
+                          ×{row.count}
+                        </span>
+                        <span className="font-semibold text-gray-200 shrink-0">
+                          {row.shellNumber != null ? `#${row.shellNumber}` : '# (any)'}
+                        </span>
+                        {row.description ? (
+                          <span className="text-gray-400 break-words min-w-0">{row.description}</span>
+                        ) : (
+                          <span className="text-gray-500 italic">No description</span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Items to pack (photo when available) */}
         {(() => {
-          const itemsWithPictures = getItemsWithPictures();
-          if (itemsWithPictures.length === 0) return null;
-          
+          const itemsToPack = getItemsToPack();
+          if (itemsToPack.length === 0) return null;
+
           return (
             <div className="mt-8 page-break-inside-avoid page-break-before-always">
               <div className="border-b-2 border-gray-600 pb-2 mb-4">
                 <h2 className="text-2xl font-bold text-gray-100">Items to Pack</h2>
-                <p className="text-gray-400">All items with pictures and their counts</p>
+                <p className="text-gray-400">
+                  Cakes and fountain cakes only — counts (photo when available)
+                </p>
               </div>
-              
+
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                {itemsWithPictures.map((item, index) => (
+                {itemsToPack.map((item, index) => (
                   <div
                     key={index}
                     className="border-2 border-gray-600 rounded-lg p-4 bg-gray-800 flex flex-col items-center"
                   >
-                    {/* Item Image */}
-                    <div className="mb-3">
-                      <img
-                        src={item.image}
-                        alt={item.name}
-                        className="w-20 h-20 object-cover rounded-lg border border-gray-600"
-                      />
-                    </div>
-                    
+                    {item.image ? (
+                      <div className="mb-3">
+                        <img
+                          src={item.image}
+                          alt={item.name}
+                          className="w-20 h-20 object-cover rounded-lg border border-gray-600"
+                        />
+                      </div>
+                    ) : null}
+
                     {/* Item Name */}
                     <h3 className="font-semibold text-gray-100 mb-1 text-center text-sm">
                       {item.name}

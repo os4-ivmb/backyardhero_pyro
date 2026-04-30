@@ -186,12 +186,18 @@ const Timeline = memo((props) => {
   };
   const stackedItems = calculateStack();
 
-  // Fetch firing profiles for CAKE_200G and CAKE_500G items
+  const cakeTypesWithFiringProfiles = (type) =>
+    type === "CAKE_200G" ||
+    type === "CAKE_350G" ||
+    type === "CAKE_500G" ||
+    type === "COMPOUND_CAKE";
+
+  // Fetch firing profiles for cakes that use shot profiles
   useEffect(() => {
     const fetchFiringProfiles = async () => {
       const profiles = {};
-      const cakeItems = items.filter(item => 
-        (item.type === 'CAKE_200G' || item.type === 'CAKE_500G') && item.itemId
+      const cakeItems = items.filter(
+        (item) => cakeTypesWithFiringProfiles(item.type) && item.itemId
       );
       
       const promises = cakeItems.map(async (item) => {
@@ -371,9 +377,10 @@ const Timeline = memo((props) => {
             const isSelected = selectedItems.some(selected => selected.id === item.id);
 
             // Get firing profile for this item if it's a cake
-            const firingProfile = (item.type === 'CAKE_200G' || item.type === 'CAKE_500G') && item.itemId
-              ? firingProfiles[item.itemId]
-              : null;
+            const firingProfile =
+              cakeTypesWithFiringProfiles(item.type) && item.itemId
+                ? firingProfiles[item.itemId]
+                : null;
             let shots = firingProfile?.shot_timestamps || [];
 
             // Calculate shot timings for fused lines

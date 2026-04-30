@@ -1,5 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
+import {
+  buildShellUsageCountsFromShowItems,
+  buildShellUsageCountsFromRacks,
+  mergeShellUsageCounts,
+  shellPackShellKey
+} from '../../utils/shellUsageCounts';
 
 export default function RackShellsSelector({ onSelect, onClose, items, inventory, showId }) {
   const [racks, setRacks] = useState([]);
@@ -8,6 +14,15 @@ export default function RackShellsSelector({ onSelect, onClose, items, inventory
   const [fireableItems, setFireableItems] = useState([]);
   const [selectedItem, setSelectedItem] = useState(null);
   const [usedCells, setUsedCells] = useState(new Set());
+
+  const shellUsageCounts = useMemo(
+    () =>
+      mergeShellUsageCounts(
+        buildShellUsageCountsFromShowItems(items),
+        buildShellUsageCountsFromRacks(racks)
+      ),
+    [items, racks]
+  );
 
   useEffect(() => {
     if (showId) {
@@ -231,7 +246,12 @@ export default function RackShellsSelector({ onSelect, onClose, items, inventory
                     const hasShell = cellData && cellData.shellId;
                     const shell = cellData ? getShellData(cellData.shellId) : null;
                     const colors = cellData ? getShellColors(cellData.shellId, cellData.shellNumber) : [];
-                    
+                    const usageKey =
+                      hasShell && cellData?.shellId != null
+                        ? shellPackShellKey(cellData.shellId, cellData.shellNumber)
+                        : null;
+                    const usedTotalCount = usageKey != null ? shellUsageCounts.get(usageKey) || 0 : 0;
+
                     return (
                       <div
                         key={key}
@@ -248,8 +268,24 @@ export default function RackShellsSelector({ onSelect, onClose, items, inventory
                           ${hasShell && !isUsed ? 'bg-gray-600' : 'bg-gray-800'}
                           ${!isUsed ? 'hover:border-gray-400' : ''}
                         `}
-                        title={isUsed ? 'Already used' : shell ? `${shell.name}${cellData.shellNumber ? ` #${cellData.shellNumber}` : ''}` : 'Empty'}
+                        title={
+                          isUsed
+                            ? 'Already used'
+                            : shell
+                              ? `${shell.name}${cellData.shellNumber ? ` #${cellData.shellNumber}` : ''}${
+                                  usedTotalCount > 0 ? ` — used ${usedTotalCount}× (racks + timeline)` : ''
+                                }`
+                              : 'Empty'
+                        }
                       >
+                        {hasShell && usedTotalCount > 0 && (
+                          <div
+                            className="absolute top-0 right-0 z-20 min-w-[14px] px-0.5 rounded-bl bg-amber-600 text-[9px] font-bold leading-none text-white text-center"
+                            title={`Placed on racks or scheduled ${usedTotalCount} time(s)`}
+                          >
+                            {usedTotalCount}
+                          </div>
+                        )}
                         {hasShell && !isUsed && shell && (
                           <>
                             <div className="absolute inset-0 flex flex-col items-center justify-center text-xs text-white px-1">

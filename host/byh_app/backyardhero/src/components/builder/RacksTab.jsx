@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import RackGrid from './RackGrid';
 
-export default function RacksTab({ inventory, showId }) {
+export default function RacksTab({ inventory, showId, showItems }) {
   const [racks, setRacks] = useState([]);
   const [showAddForm, setShowAddForm] = useState(false);
   const [editingRackId, setEditingRackId] = useState(null);
@@ -59,11 +59,13 @@ export default function RacksTab({ inventory, showId }) {
   };
 
   const handleUpdateRack = async (rackId, updatedRack) => {
+    setRacks((prev) => prev.map((r) => (r.id === rackId ? { ...updatedRack } : r)));
     try {
       await axios.patch(`/api/racks/${rackId}`, updatedRack);
       await fetchRacks();
     } catch (error) {
       console.error('Failed to update rack:', error);
+      await fetchRacks();
       alert('Failed to update rack');
     }
   };
@@ -286,8 +288,10 @@ export default function RacksTab({ inventory, showId }) {
             </div>
             <RackGrid
               rack={rack}
+              racks={racks}
               inventory={inventory}
               onUpdate={(updatedRack) => handleUpdateRack(rack.id, updatedRack)}
+              showItems={showItems}
             />
           </div>
         ))}
