@@ -86,6 +86,24 @@ class BYHProtocolHandler:
         self.load_initial_receiver_cfg()
         print(f"Initialized Protocol {self.protocol}")
         self.sync_tx_clock()
+        # With the ACK-payload protocol, receivers no longer self-announce;
+        # the dongle only learns about a receiver after we send it a command.
+        # Pre-register every receiver from config so the dongle's TDMA poller
+        # starts pinging them immediately, even before the first show traffic.
+        self._register_all_receivers_with_dongle()
+
+    def _register_all_receivers_with_dongle(self):
+        """Send a no-op sync to each configured nRF24 receiver so the dongle
+        adds it to its poll table. Skips 433MHz-only devices that don't use
+        the dongle's RF protocol. Spaced lightly to avoid bursting the queue."""
+        for rcv_ident, rcv_cfg in self.receivers.items():
+            if rcv_cfg.get("type") == "BILUSOCN_433_TX_ONLY":
+                continue
+            try:
+                self.parent.send_serial_command(f"sync {rcv_ident} 0 1")
+                time.sleep(0.03)
+            except Exception as e:
+                print(f"WARN: could not pre-register {rcv_ident}: {e}")
 
     #Just something that runs periodically to then invoke housekeeping things
     def bounce(self):
@@ -280,12 +298,35 @@ class BYHProtocolHandler:
         
         return None
 
-    def send_load_segment_to_dev(self, dev_id, st1, target1, st2, target2):
-        print(f"Loading segment to {dev_id}: {st1}, {target1}, {st2}, {target2}")
+    # Max cues per packed SHOW_LOADN frame (must match SHOW_LOADN_MAX_CUES on
+    # the dongle/receiver firmware). 6 cues fills the 32-byte nRF24 payload.
+    SHOW_LOADN_MAX_CUES = 6
 
-        # Send with repeat count of 2 - dongle will handle retries internally
-        # This prevents queue overflow while still ensuring reliability
+    def send_load_segment_to_dev(self, dev_id, st1, target1, st2, target2):
+        """Legacy 2-cue showload helper.
+
+        Kept for any callers still using the old API; new code should call
+        send_load_chunk_to_dev() with up to SHOW_LOADN_MAX_CUES cues.
+        """
+        print(f"Loading segment to {dev_id}: {st1}, {target1}, {st2}, {target2}")
         cmd = f"showload {dev_id} {int(st1)} {int(target1)} {int(st2)} {int(target2)} 2"
+        self.parent.send_serial_command(cmd)
+
+    def send_load_chunk_to_dev(self, dev_id, cues, repeat=2):
+        """Send up to SHOW_LOADN_MAX_CUES cues in a single RF frame.
+
+        cues is a list of (time_ms, position_zero_indexed) tuples.
+        """
+        if not cues:
+            return
+        cues = cues[: self.SHOW_LOADN_MAX_CUES]
+        # Wire format: showloadn IDENT COUNT t1 p1 t2 p2 ... [REPEAT]
+        parts = ["showloadn", dev_id, str(len(cues))]
+        for t, p in cues:
+            parts.append(str(int(t)))
+            parts.append(str(int(p)))
+        parts.append(str(int(repeat)))
+        cmd = " ".join(parts)
         self.parent.send_serial_command(cmd)
 
     def load_async_fire_targets(self, async_fire_targets, showId, setLoadTargets=True, skip_startload=False):
@@ -309,29 +350,23 @@ class BYHProtocolHandler:
             if should_send_startload:
                 expectedItemsCt = len(fire_targets)
                 self.parent.send_serial_command(f"startload {target_key} {expectedItemsCt} {showId}")
-                # Wait longer for startload to be processed (blocking queue needs time)
-                time.sleep(0.3)
-            # Process the list in chunks of 3
-            for i in range(0, len(fire_targets), 2):
-                # Get a chunk of up to 3 items
-                chunk = fire_targets[i:i+2]
-                
-                # Pad the chunk if it contains fewer than 3 items.
-                if len(chunk) < 2:
-                    # Append dummy entries to reach 3 items.
-                    for _ in range(2 - len(chunk)):
-                        chunk.append({"startTime": 0, "target": 0})
-                
-                # Extract startTime and target for each item in the chunk.
-                st1, t1 = chunk[0]["startTime"], chunk[0]["target"]
-                st2, t2 = chunk[1]["startTime"], chunk[1]["target"]
-                
-                # Call the method with the six parameters.
-                self.send_load_segment_to_dev(target_key, round(st1*1000), t1-1 , round(st2*1000), t2-1 )
-                # Wait longer between showload commands to allow queue to process
-                # With blocking approach, each command waits for response (~150-250ms)
-                # So we need to space out commands to prevent queue overflow
-                time.sleep(0.25)
+                # Brief settle: dongle just needs to enqueue + dispatch one cmd
+                # (~3-5ms with ACK-payload protocol). 50ms is plenty.
+                time.sleep(0.05)
+
+            # Pack cues SHOW_LOADN_MAX_CUES at a time into single RF frames.
+            # With 6 cues per frame, a 30-cue receiver loads in ~5 frames
+            # instead of 15 — roughly 3x fewer round-trips.
+            chunk_size = self.SHOW_LOADN_MAX_CUES
+            for i in range(0, len(fire_targets), chunk_size):
+                chunk = fire_targets[i:i + chunk_size]
+                # Convert to (time_ms, zero_indexed_pos) tuples.
+                packed = [(round(item["startTime"] * 1000), item["target"] - 1) for item in chunk]
+                self.send_load_chunk_to_dev(target_key, packed, repeat=2)
+                # Light spacing so we don't outrun the dongle's 128-deep queue
+                # when loading huge shows. Dongle dispatch is ~3-5ms/cmd, so
+                # 30ms per host send leaves ~6x headroom.
+                time.sleep(0.03)
 
     #Figure out which ones we need to preload (native) and which we fire via. daemon (433 Bilusocn).. or if we have zones+targets that we cant fire. Annotates firing array.
     def load_targets_to_devices(self, firing_array, showId):
@@ -398,9 +433,10 @@ class BYHProtocolHandler:
                 cmd = f"{cmdpre} {rcv}{cmdpost} {repeat}"
                 print(f"Sending cmd: {cmd} (repeat={repeat})")
                 self.parent.send_serial_command(cmd)
-                # Add delay between commands to prevent queue overflow with blocking approach
-                # Each command waits for response (~150-250ms), so space them out
-                time.sleep(0.25)
+                # Dongle now dispatches each cmd in ~3-5ms (down from ~30ms).
+                # 30ms host spacing keeps the dongle queue comfortably below
+                # its 128-deep limit even when broadcasting to 32 receivers.
+                time.sleep(0.03)
             else:
                 print(f"Not sendinf to {rcv} as not connected.")
         

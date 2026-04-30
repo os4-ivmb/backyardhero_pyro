@@ -67,7 +67,9 @@ class LEDHandler:
             "arm_state": 0,
             "led_brightness": 10,
             "receiver_timeout_ms": 30000,
-            "command_response_timeout_ms": 100,
+            # With ACK-payload protocol, a single dongle TX returns within
+            # ~3ms (success) to ~22ms (5 retries fail). 50ms is plenty.
+            "command_response_timeout_ms": 50,
             "clock_sync_interval_ms": 2000,
             "debug_mode": 0
         }
