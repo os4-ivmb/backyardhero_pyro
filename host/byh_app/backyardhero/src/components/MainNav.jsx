@@ -85,13 +85,25 @@ const MainNav = () => {
         </div>
         </nav>
         <div className="mb-12">
-            <div className={`${currTab==='main' ? '' : 'hidden'}`}><StatusPanel setCurrentTab={setCurrTab}/></div>
-            <div className={`${currTab==='inventory' ? '' : 'hidden'}`}><InventoryManager/></div>
-            <div className={`${currTab==='editor' ? '' : 'hidden'}`}><ShowBuilder/></div>
-            <div className={`${currTab==='receivers' ? '' : 'hidden'}`}><ReceiverDisplay setCurrentTab={setCurrTab}/></div>
-            <div className={`${currTab==='loadout' ? '' : 'hidden'}`}><ShowLoadout setCurrentTab={setCurrTab}/></div>
-            {currTab==='manual' ? (<ManualFiring/>) : ""}
-            {currTab==='setting' ? (<SettingsPanel/>) : ""}
+            {/*
+              Conditionally render each panel rather than hiding with CSS.
+              The previous implementation kept every panel mounted, which
+              meant their effects, intervals, fetch calls, and (in the
+              builder/loadout case) heavy derived data were always running
+              in the background regardless of which tab was active.
+
+              Trade-off: panel-local UI state (scroll position, expanded
+              accordions, modal flags) is reset on tab switch. Domain data
+              (stagedShow, inventory, shows, system config) lives in the
+              Zustand stores so it persists across remounts.
+            */}
+            {currTab==='main' && <StatusPanel setCurrentTab={setCurrTab}/>}
+            {currTab==='inventory' && <InventoryManager/>}
+            {currTab==='editor' && <ShowBuilder/>}
+            {currTab==='receivers' && <ReceiverDisplay setCurrentTab={setCurrTab}/>}
+            {currTab==='loadout' && <ShowLoadout setCurrentTab={setCurrTab}/>}
+            {currTab==='manual' && <ManualFiring/>}
+            {currTab==='setting' && <SettingsPanel/>}
         </div>
         <div className="absolute bottom-0 left-0 w-full border-t border-slate-700 px-3 bg-slate-900 bg-opacity-95 backdrop-blur-sm">
             <Status/>

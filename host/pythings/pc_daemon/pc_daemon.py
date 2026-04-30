@@ -184,6 +184,10 @@ class FireworkDaemon:
         self.waiting_for_client_start = False
         self.fire_check_failures = []
         self.tcp_buffer = ""
+        # Bytes carried over from the previous recv() that didn't end on a
+        # newline yet. Without this, splitlines() can hand us a partial line
+        # and we'll misinterpret it.
+        self.tcp_recv_buffer = bytearray()
         self.receiver_timeout_ms = 30000
         self.command_response_timeout_ms = 100
         self.clock_sync_interval_ms = 2000
@@ -282,13 +286,26 @@ class FireworkDaemon:
         while self.running:
             try:
                 if hasattr(self, 'tcp_socket') and self.tcp_socket:
-                    readable, _, _ = select.select([self.tcp_socket], [], [], 0.5)
+                    # Short select timeout keeps the loop responsive (better
+                    # error/state-change reactivity) without hot-spinning.
+                    readable, _, _ = select.select([self.tcp_socket], [], [], 0.05)
                     data = None
                     if readable:
                         data = self.tcp_socket.recv(4096)
                     if data:
-                        # Process each line like in listen_serial
-                        lines = data.decode('utf-8', errors='replace').splitlines()
+                        # Append to the carry-over buffer and only process
+                        # complete newline-terminated lines. Anything after
+                        # the last \n stays for the next read.
+                        self.tcp_recv_buffer.extend(data)
+                        last_nl = self.tcp_recv_buffer.rfind(b"\n")
+                        if last_nl < 0:
+                            # No complete line yet; wait for more bytes.
+                            continue
+                        complete = bytes(self.tcp_recv_buffer[: last_nl + 1])
+                        del self.tcp_recv_buffer[: last_nl + 1]
+
+                        # splitlines() now sees only complete lines.
+                        lines = complete.decode("utf-8", errors="replace").splitlines()
                         for line in lines:
                             if line:
                                 if DEBUG:
@@ -379,8 +396,10 @@ class FireworkDaemon:
     def monitor_switch(self):
         """Monitor the GPIO switches for state changes."""
 
-        while not self.protocol_handler:
-            pass
+        # Wait for protocol handler to be assigned. Poll instead of spinning so
+        # this thread doesn't peg a CPU core during the dongle handshake.
+        while self.running and not self.protocol_handler:
+            time.sleep(0.05)
 
         while self.running:
             try:
@@ -713,20 +732,36 @@ class FireworkDaemon:
 
 
     def process_display_payload(self, display_payload):
-        """Convert the display payload to the firing array used by the schedule."""
+        """Convert the display payload to the firing array used by the schedule.
+
+        Items missing ``startTime`` (or other required keys) are skipped and
+        logged rather than discarding the entire show, which used to silently
+        produce a no-op load if a single item was malformed.
+        """
         firing_array = []
+        skipped = []
 
         for item in display_payload:
-            if 'startTime' in item:
+            item_id = item.get('id', '<no-id>')
+            if 'startTime' not in item:
+                skipped.append((item_id, "missing startTime"))
+                continue
+            try:
                 firing_array.append({
                     'startTime': item['startTime'] - item['delay'],
                     'zone': item['zone'],
                     'target': item['target'],
-                    'id': item['id']
+                    'id': item['id'],
                 })
-            else:
-                print(f"WARN: item {item['id']} does not have a startTime key. This is dangerous. returning []")
-                return []
+            except KeyError as ke:
+                skipped.append((item_id, f"missing key {ke}"))
+                continue
+
+        if skipped:
+            for item_id, reason in skipped:
+                msg = f"Skipping show item {item_id}: {reason}"
+                print(f"WARN: {msg}")
+                self.write_error(msg)
 
         firing_array.sort(key=lambda x: x['startTime'])  # Ensure sorted by time
         return firing_array
@@ -759,7 +794,13 @@ class FireworkDaemon:
 
         print("Running show")
 
-        thread = threading.Thread(target=self.protocol_handler.run_show)
+        # Drop any threads that have already finished so the list doesn't
+        # grow without bound across runs.
+        self.command_timer_threads = [
+            t for t in self.command_timer_threads if t.is_alive()
+        ]
+
+        thread = threading.Thread(target=self.protocol_handler.run_show, daemon=True)
         thread.start()
         self.command_timer_threads.append(thread)
 
@@ -780,13 +821,24 @@ class FireworkDaemon:
         if(self.protocol_handler):
             self.protocol_handler.schedule_stop_event.set()  # Signal all schedules to stop
 
-        # Wait for all schedule threads to terminate
+        # Wait for all schedule threads to terminate, but never block the
+        # operator's stop indefinitely if a thread is wedged.
+        STOP_JOIN_TIMEOUT_SEC = 5.0
         for thread in self.command_timer_threads:
-            thread.join()
+            thread.join(timeout=STOP_JOIN_TIMEOUT_SEC)
+            if thread.is_alive():
+                print(
+                    f"WARN: schedule thread {thread.name} did not terminate within "
+                    f"{STOP_JOIN_TIMEOUT_SEC:.1f}s; abandoning."
+                )
         if(update_led):
             self.led_handler.update("show_run_state",RUN_STATE.STOPPED.value)
 
-        self.command_timer_threads = []  # Clear the list of threads
+        # Drop dead threads but keep any wedged ones around so we don't lose
+        # the reference (their daemon=True flag will let the process exit).
+        self.command_timer_threads = [
+            t for t in self.command_timer_threads if t.is_alive()
+        ]
         self.is_running = False
         print("All schedules stopped.")
 

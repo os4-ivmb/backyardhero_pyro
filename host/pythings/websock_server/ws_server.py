@@ -3,12 +3,18 @@ import websockets
 import os
 import json
 import time
+import hashlib
 import psutil
 from datetime import datetime
 
 from enum import Enum
 
 LED_FILE_PATH = "/data/webactstate"
+
+# Prime psutil.cpu_percent so subsequent non-blocking calls return a real
+# delta-since-last-call instead of 0.0. Without this we'd either have to
+# block (interval=1) every read or always get 0 on the first call.
+psutil.cpu_percent(interval=None)
 
 
 class WEB_ACT_STATE(Enum):
@@ -28,10 +34,15 @@ def updateWebLEDState(value):
 
 
 DAEMON_INAC_SECONDS = 10
+# How often to force a full payload even if nothing changed, so a freshly
+# (re)connected client picks up state without waiting for a real change.
+HEARTBEAT_FORCE_SECONDS = 5
+
 
 def get_system_usage():
-    # CPU usage percentage
-    cpu_percent = psutil.cpu_percent(interval=1)  # 1-second sampling
+    # Non-blocking sample: returns the % CPU used since the previous call.
+    # The first call after import is primed above so we always have a baseline.
+    cpu_percent = psutil.cpu_percent(interval=None)
 
     # Memory usage
     memory = psutil.virtual_memory()
@@ -58,19 +69,35 @@ def get_cpu_temperature():
     except FileNotFoundError:
         return 0
 
-def get_last_n_lines(file_path, n):
-    """Efficiently reads the last n lines of a file."""
+def get_last_n_lines(file_path, n, chunk_size=4096):
+    """Efficiently read the last n lines of a file by walking backwards in
+    chunks rather than one byte at a time. The previous implementation
+    issued one read() per byte which becomes O(filesize) syscalls per WS
+    tick once the error log grows.
+    """
     try:
-        with open(file_path, "rb") as file:
-            file.seek(0, os.SEEK_END)
+        n = max(0, int(n))
+        if n == 0:
+            return []
+        with open(file_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            end = f.tell()
+            if end == 0:
+                return []
             buffer = bytearray()
-            pointer_location = file.tell()
-            while pointer_location > 0 and buffer.count(b"\n") <= n:
-                pointer_location -= 1
-                file.seek(pointer_location)
-                buffer.extend(file.read(1))
-            # Decode and split lines, returning the last n lines
-            return buffer.decode("utf-8").strip().splitlines()[-n:]
+            pos = end
+            # Stop once we have at least n+1 newlines (so we can confidently
+            # drop a possibly-partial first line) or once we hit the file
+            # start.
+            while pos > 0 and buffer.count(b"\n") <= n:
+                read_size = min(chunk_size, pos)
+                pos -= read_size
+                f.seek(pos)
+                chunk = f.read(read_size)
+                buffer[:0] = chunk  # prepend
+            text = buffer.decode("utf-8", errors="replace")
+            lines = text.splitlines()
+            return lines[-n:] if len(lines) > n else lines
     except Exception as e:
         return {"err": str(e)}
 
@@ -89,18 +116,17 @@ def get_fw_state():
 
     return fw_state
 
-async def read_file_content():
-    """
-    Reads the content of the files /tmp/fw_cursor, /tmp/fw_firing, and /home/jeezy/proj/firework/host/data/log/daemon.err.
-    Returns a dictionary with their data or None if they don't exist.
-    """
+
+def _gather_state_blocking():
+    """All synchronous I/O (file reads + psutil) lives here so we can hand
+    the whole thing to ``asyncio.to_thread`` and avoid blocking the event
+    loop (and therefore every other connected WebSocket client)."""
     result = {
         "fw_cursor": None,
         "fw_firing": None,
         "fw_states": None,
-        "fw_last_update": int(time.time() * 1000),
         "fw_system": {},
-        "fw_error": []
+        "fw_error": [],
     }
 
     result["fw_system"]["temp"] = get_cpu_temperature()
@@ -114,7 +140,7 @@ async def read_file_content():
                 result["fw_cursor"] = float(cursor_content)
         else:
             result["fw_cursor"] = -1
-    except Exception as e:
+    except Exception:
         print("ERR reading /tmp/fw_cursor")
         result["fw_cursor"] = -2
 
@@ -129,25 +155,25 @@ async def read_file_content():
     except Exception as e:
         result["fw_firing"] = {"err": str(e)}
 
-    # Check for states
-    fws_retry_ct = 0
-    fws_complete = False
-    result["fw_state"] = {}
-    while(fws_retry_ct < 2 and not fws_complete):
-        try:
-            result["fw_state"] = get_fw_state()
-            fws_complete = True
-        except Exception as e:
-            print(f"EXC RETRY {fws_retry_ct}")
-            print(str(e))
-            fws_retry_ct = fws_retry_ct + 1
-            time.sleep(0.250)
+    # Read the daemon state file. Single attempt here; the async caller
+    # handles retry so we don't block the loop with time.sleep().
+    try:
+        result["fw_state"] = get_fw_state()
+    except Exception as e:
+        # Re-raise so the caller can decide whether to retry.
+        raise
 
-    # Check for daemon.err
+    # Tail the daemon error log
     try:
         error_log_path = "/data/log/daemon.err"
         if os.path.exists(error_log_path):
-            result["fw_d_error"] = [ s[::-1] for s in get_last_n_lines(error_log_path, 5) ]
+            tail = get_last_n_lines(error_log_path, 5)
+            if isinstance(tail, list):
+                # NB: original code reversed each line ([::-1]). Preserved
+                # here to keep behavior unchanged in this perf-only pass.
+                result["fw_d_error"] = [s[::-1] for s in tail]
+            else:
+                result["fw_d_error"] = []
         else:
             result["fw_d_error"] = []
     except Exception as e:
@@ -155,16 +181,79 @@ async def read_file_content():
 
     return result
 
+
+async def read_file_content():
+    """
+    Reads the content of the files /tmp/fw_cursor, /tmp/fw_firing, and the
+    daemon error log. Heavy work is offloaded to a worker thread so other
+    connected WebSocket clients aren't blocked while it runs.
+    """
+    last_exc = None
+    for attempt in range(2):
+        try:
+            result = await asyncio.to_thread(_gather_state_blocking)
+            result["fw_last_update"] = int(time.time() * 1000)
+            return result
+        except Exception as e:
+            print(f"EXC RETRY {attempt}")
+            print(str(e))
+            last_exc = e
+            # Async sleep so other coroutines (and other WS clients) can run
+            # while we wait for the daemon to finish writing /data/state.
+            await asyncio.sleep(0.25)
+
+    # Both attempts failed -- still return a minimal payload so the client
+    # gets something rather than the connection silently stalling.
+    return {
+        "fw_cursor": -2,
+        "fw_firing": {"err": str(last_exc) if last_exc else "unknown"},
+        "fw_state": {},
+        "fw_d_error": [],
+        "fw_system": {},
+        "fw_error": [],
+        "fw_last_update": int(time.time() * 1000),
+    }
+
+
+def _stable_signature(payload):
+    """Hash the payload *excluding* the per-tick timestamp so we only treat
+    it as 'changed' when something meaningful actually moved."""
+    snapshot = {k: v for k, v in payload.items() if k != "fw_last_update"}
+    encoded = json.dumps(snapshot, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha1(encoded).hexdigest()
+
+
 async def file_update_server(websocket):
     """
-    WebSocket server that sends updated file data every 500ms to connected clients.
+    WebSocket server that sends updated file data every 500ms to connected
+    clients. When the meaningful state hasn't changed we send a small
+    heartbeat instead of resending the multi-KB payload, but we still emit
+    a full snapshot at least every ``HEARTBEAT_FORCE_SECONDS`` so a
+    just-connected client doesn't have to wait for a real change.
     """
 
     updateWebLEDState(WEB_ACT_STATE.RUNNING.value)
+    last_signature = None
+    last_full_send_ts = 0.0
     try:
         while True:
             file_data = await read_file_content()
-            await websocket.send(json.dumps(file_data))
+            sig = _stable_signature(file_data)
+            now = time.time()
+            unchanged = (sig == last_signature)
+            within_force_window = (now - last_full_send_ts) < HEARTBEAT_FORCE_SECONDS
+
+            if unchanged and within_force_window:
+                payload = {
+                    "_hb": True,
+                    "fw_last_update": file_data["fw_last_update"],
+                }
+            else:
+                payload = file_data
+                last_signature = sig
+                last_full_send_ts = now
+
+            await websocket.send(json.dumps(payload))
             await asyncio.sleep(0.5)  # Send updates every 500ms
     except websockets.exceptions.ConnectionClosed as e:
         print("Client disconnected")

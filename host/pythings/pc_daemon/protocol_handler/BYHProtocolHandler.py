@@ -3,6 +3,7 @@ import time
 import serial
 import sqlite3
 import threading
+from collections import deque
 from datetime import datetime
 import json
 from enum import Enum
@@ -77,8 +78,10 @@ class BYHProtocolHandler:
         self.async_load_targets = {}
         self.show_start_time = 0
         
-        # Track latency samples for sliding average (max 20 samples per receiver)
-        self.latency_samples = {}  # Key: receiver ident, Value: list of latency values
+        # Track latency samples for sliding average (max 20 samples per receiver).
+        # deque(maxlen=20) gives us O(1) append + automatic eviction instead of
+        # O(n) list.pop(0).
+        self.latency_samples = {}  # Key: receiver ident, Value: deque of values
 
         self.load_initial_receiver_cfg()
         print(f"Initialized Protocol {self.protocol}")
@@ -177,24 +180,16 @@ class BYHProtocolHandler:
                         if(abbr_key == 't'):
                             full_receiver[full_key] = full_receiver[full_key] + lmtoffset
                         elif(abbr_key == 'x'):
-                            # Apply sliding average to latency
+                            # Sliding-average latency. Bounded deque drops the
+                            # oldest sample automatically once we hit maxlen.
                             latency_value = receiver[abbr_key]
-                            
-                            # Add to sliding window (initialize if needed)
-                            if receiver_ident not in self.latency_samples:
-                                self.latency_samples[receiver_ident] = []
-                            
-                            # Add new sample
-                            self.latency_samples[receiver_ident].append(latency_value)
-                            
-                            # Keep only last 20 samples
-                            if len(self.latency_samples[receiver_ident]) > 20:
-                                self.latency_samples[receiver_ident].pop(0)
-                            
-                            # Calculate average of available samples (up to 20)
-                            avg_latency = sum(self.latency_samples[receiver_ident]) / len(self.latency_samples[receiver_ident])
-                            
-                            # Round to whole number and set
+                            samples = self.latency_samples.get(receiver_ident)
+                            if samples is None:
+                                samples = deque(maxlen=20)
+                                self.latency_samples[receiver_ident] = samples
+                            samples.append(latency_value)
+
+                            avg_latency = sum(samples) / len(samples)
                             full_receiver[full_key] = round(avg_latency)
                 self.receivers[receiver['i']]['drift'] = lmtoffset
                 self.receivers[receiver['i']]['status'] = full_receiver
