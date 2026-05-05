@@ -17,7 +17,17 @@
 //   * MAX_RECEIVERS bumped to 32, command queue to 128
 //   * Packed SHOW_LOADN (up to 6 cues per RF frame)
 //   * Configurable rf_channel and rf_system_id at runtime
-#define FW_VERSION 4
+// v5: 2026-04-XX - Host-driven receiver registration:
+//   * `forget IDENT` serial command for host-controlled removal of a
+//     receiver from the poll table (host now owns the receiver list via
+//     SQLite Receivers table; daemon issues `sync` / `forget` to reconcile)
+// v6: 2026-05-XX - RF spectrum scan:
+//   * `scan [passes [chStart chEnd]]` serial command runs an RPD-based
+//     congestion sweep and emits a single `{"type":"scan_result", ...}`
+//     line that the host parses and persists.
+//   * Per-second status JSON now includes `ch` (current rfChannel) so the
+//     UI can show the active frequency without a separate query.
+#define FW_VERSION 6
 
 #define RF24_CE_PIN 37
 #define RF24_CSN_PIN 36
@@ -474,6 +484,24 @@ ReceiverInfo* getReceiverByNodeID(uint8_t nodeID) {
   return nullptr;
 }
 
+// Remove a receiver by ident. Used for the host-driven `forget IDENT` serial
+// command (host edited the Receivers DB table, told us this one is no longer
+// in scope). Returns true if the receiver was found and removed.
+bool removeReceiverByIdent(const String &ident) {
+  for (uint8_t i = 0; i < numReceivers; i++) {
+    if (receivers[i].ident == ident) {
+      // Shift the tail down to keep the array compact.
+      for (uint8_t j = i; j < numReceivers - 1; ++j) receivers[j] = receivers[j + 1];
+      numReceivers--;
+      // Reset the round-robin pointer to a safe slot — it might have pointed
+      // past the end after the shift.
+      if (nextPollReceiverIdx >= numReceivers) nextPollReceiverIdx = 0;
+      return true;
+    }
+  }
+  return false;
+}
+
 void pushCommandResult(ReceiverInfo* rinfo, bool success) {
   if (!rinfo) return;
   rinfo->successHistory[rinfo->successHead] = success;
@@ -568,6 +596,76 @@ void applyRfConfig() {
   radio.setChannel(rfChannel);
   radio.openReadingPipe(0, masterReadAddress());
   radio.startListening();
+}
+
+// Spectrum scan using the nRF24L01+'s RPD (Received Power Detector) register.
+// RPD latches if any signal stronger than ~-64 dBm appeared during the last
+// RX window — protocol-agnostic, so it sees Wi-Fi, BLE, microwaves, other
+// nRF systems, etc. A single channel sample takes ~180us (1us PRX entry +
+// ~130us settle + a small margin); a full 126-channel × 10-pass sweep is
+// ~230ms. We block the main loop for the duration — fine for an explicitly
+// host-initiated diagnostic, but the daemon must gate this behind
+// !show_loaded && !armed.
+//
+// Output is a single JSON line so the host can parse one read.
+void runRadioScan(uint16_t passes, uint8_t chStart, uint8_t chEnd) {
+  if (chEnd > 125) chEnd = 125;
+  if (chStart > chEnd) chStart = chEnd;
+  if (passes == 0) passes = 1;
+  if (passes > 50) passes = 50;  // hard cap to keep scan under ~1.2s
+
+  const uint16_t nCh = (chEnd - chStart + 1);
+  // Per-channel hit count buffer. 126 * uint16_t = 252B max — fine on stack.
+  uint16_t hits[126];
+  for (uint16_t i = 0; i < nCh; i++) hits[i] = 0;
+
+  uint64_t startMs = millis();
+
+  // Park the radio in a known state. Drain any pending TX/RX so leftover
+  // ACK payloads don't pollute the first-channel RPD reading.
+  radio.stopListening();
+  radio.flush_tx();
+  radio.flush_rx();
+
+  for (uint16_t p = 0; p < passes; p++) {
+    for (uint16_t i = 0; i < nCh; i++) {
+      uint8_t ch = chStart + i;
+      radio.setChannel(ch);
+      radio.startListening();
+      // Trx2rx is ~130us on nRF24L01+. 180us gives us the settle + a
+      // ~50us RPD latch window with margin.
+      delayMicroseconds(180);
+      if (radio.testRPD()) hits[i]++;
+      radio.stopListening();
+    }
+  }
+
+  uint64_t durMs = millis() - startMs;
+
+  // Restore the radio to live operation BEFORE we spend time serializing
+  // JSON, so polling resumes ASAP.
+  applyRfConfig();
+
+  // Emit a single JSON line. We size the doc generously: 126 channels × ~22B
+  // per entry = ~2.8KB, plus headroom for the wrapper.
+  DynamicJsonDocument doc(4096);
+  doc["type"]        = "scan_result";
+  doc["fw"]          = FW_VERSION;
+  doc["passes"]      = passes;
+  doc["ch_start"]    = chStart;
+  doc["ch_end"]      = chEnd;
+  doc["current_ch"]  = rfChannel;
+  doc["started_ms"]  = startMs;
+  doc["duration_ms"] = durMs;
+  JsonArray arr = doc.createNestedArray("results");
+  for (uint16_t i = 0; i < nCh; i++) {
+    JsonObject o = arr.createNestedObject();
+    o["ch"]   = chStart + i;
+    o["hits"] = hits[i];
+  }
+  String out;
+  serializeJson(doc, out);
+  Serial.println(out);
 }
 
 // Core send-and-collect-status routine. With ACK-payloads enabled, radio.write()
@@ -780,6 +878,10 @@ void processSerialCommand(String inStr) {
 
   if (inStr.startsWith("{")) { parseLedJSON(inStr); return; }
 
+  // Bare-word commands (no args) — handled before the space-required parser
+  // so manual serial testing of e.g. `scan` doesn't require a trailing arg.
+  if (inStr == "scan") { runRadioScan(10, 0, 125); return; }
+
   int firstSpace = inStr.indexOf(' ');
   if (firstSpace < 0) { Serial.println(F("C?NFS")); return; }
   String cmdStr = inStr.substring(0, firstSpace);
@@ -801,8 +903,42 @@ void processSerialCommand(String inStr) {
     return;
   }
 
+  // RF spectrum scan. No ident, optional whitespace-separated args:
+  //   scan                       → 10 passes, full 0..125
+  //   scan <passes>              → custom passes, full 0..125
+  //   scan <passes> <s> <e>      → custom passes + channel range
+  // Always emits a `scan_result` JSON line; the host parses + persists it.
+  if (cmdStr == "scan") {
+    uint16_t passes  = 10;
+    uint8_t  chStart = 0;
+    uint8_t  chEnd   = 125;
+    // `args` is everything after "scan ". When invoked as bare "scan", the
+    // outer parser already returned C?NFS at firstSpace<0, so here we
+    // always have at least one token.
+    int sp1 = args.indexOf(' ');
+    String t1 = (sp1 < 0) ? args : args.substring(0, sp1);
+    if (t1.length() > 0) {
+      long v = t1.toInt();
+      if (v > 0) passes = (uint16_t)v;
+    }
+    if (sp1 > 0) {
+      String rest = args.substring(sp1 + 1);
+      int sp2 = rest.indexOf(' ');
+      if (sp2 > 0) {
+        chStart = (uint8_t)constrain(rest.substring(0, sp2).toInt(), 0, 125);
+        chEnd   = (uint8_t)constrain(rest.substring(sp2 + 1).toInt(), 0, 125);
+      }
+    }
+    runRadioScan(passes, chStart, chEnd);
+    return;
+  }
+
   int secondSpace = args.indexOf(' ');
-  if (secondSpace < 0 && cmdStr != "msync") { Serial.println(F("C?NSS")); return; }
+  // `msync` and `forget` are the two single-arg commands. Everything else
+  // requires `IDENT <params...>`.
+  if (secondSpace < 0 && cmdStr != "msync" && cmdStr != "forget") {
+    Serial.println(F("C?NSS")); return;
+  }
 
   String ident = (secondSpace > 0) ? args.substring(0, secondSpace) : args;
   String paramsStr = (secondSpace > 0) ? args.substring(secondSpace + 1) : "";
@@ -811,6 +947,21 @@ void processSerialCommand(String inStr) {
     uint64_t ts = atoll(paramsStr.c_str());
     tsOffset = ts - millis();
     Serial.println(F("C+ msync"));
+    return;
+  }
+
+  // forget IDENT — host-driven removal of a receiver from the poll table.
+  // Used after the user disables/deletes the receiver in the DB-backed UI.
+  // We don't bounce the radio or the queue; if there's a pending command for
+  // this ident in the queue, dispatchOneCommand will simply not find the
+  // receiver and report no-route.
+  if (cmdStr == "forget") {
+    if (ident.length() == 0) { Serial.println(F("CV forget")); return; }
+    if (removeReceiverByIdent(ident)) {
+      Serial.print(F("C+ forget ")); Serial.println(ident);
+    } else {
+      Serial.print(F("CV forget RNF ")); Serial.println(ident);
+    }
     return;
   }
 
@@ -1134,6 +1285,7 @@ void loop() {
     doc["timestamp"] = now;
     doc["q"] = cmdQueueCount;
     doc["fw"] = FW_VERSION;
+    doc["ch"] = rfChannel;
 
     uint32_t totalLat = 0; int avgLat = 0;
     if (latencySampleCount > 0) {

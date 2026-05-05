@@ -1,6 +1,6 @@
 import useAppStore from "@/store/useAppStore"
 import useStateAppStore from "@/store/useStateAppStore";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { 
   MdBatteryFull, 
   MdBatteryAlert, 
@@ -9,7 +9,13 @@ import {
   MdSignalWifiOff, 
   MdPlayArrow,
   MdAccessTime,
-  MdAssignment
+  MdAssignment,
+  MdLock,
+  MdLockOpen,
+  MdRefresh,
+  MdWarning,
+  MdAdd,
+  MdClose
 } from 'react-icons/md';
 import { FaSpinner } from 'react-icons/fa';
 import ShowHealth from "../homepanel/ShowHealth";
@@ -19,9 +25,39 @@ import ShowHealth from "../homepanel/ShowHealth";
 // v1.1.0: Added health bar at top of receiver cards displaying successPercent (0-100% with red-to-green gradient)
 // v1.2.0: Increased connection timeout threshold from 5 seconds to 10 seconds
 // v1.3.0: Added latency scale bar (1s=100%/green, 10s=0%/red) with smooth animations, moved health bar to bottom with percentage text
-const FW_VERSION = "1.3.0";
+// v1.4.0: DB-backed receivers; lock-toggle edit mode (label, enable, cue count); per-receiver retry button; daemon reload on save
+const FW_VERSION = "1.4.0";
 
-function SingleReceiver({ rcv_name, receiver, showMapping, showId, receiverLabel }) {
+// Helper: derive the cue count from a receiver's cues_data map. With the
+// current "id-as-zone" convention each receiver has exactly one zone, so we
+// just take the length of its first array. This stays consistent with how
+// the edit UI writes back changes (1..N under the receiver's id zone).
+function cueCountFromCues(cuesObj) {
+  if (!cuesObj) return 0;
+  const firstZone = Object.keys(cuesObj)[0];
+  if (!firstZone) return 0;
+  const arr = cuesObj[firstZone];
+  return Array.isArray(arr) ? arr.length : 0;
+}
+
+function buildCuesData(ident, count) {
+  const safe = Math.max(0, Math.min(256, parseInt(count, 10) || 0));
+  return { [ident]: Array.from({ length: safe }, (_, i) => i + 1) };
+}
+
+function SingleReceiver({
+  rcv_name,
+  receiver,
+  showMapping,
+  showId,
+  receiverLabel,
+  // Edit-mode props (all optional)
+  editMode = false,
+  pendingEdit, // { label?, enabled?, cueCount? } | undefined
+  onPendingEditChange, // (id, patch) => void
+  onRetry, // (id) => void
+  retryBusy = false,
+}) {
   const [popup, setPopup] = useState(null);
   const receiverRef = useRef(null);
   const [smoothedLatency, setSmoothedLatency] = useState(0);
@@ -128,8 +164,27 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId, receiverLabel
         : MdBatteryAlert
       : MdBatteryUnknown;
 
-  const firstZone = Object.keys(receiver.cues)[0]
-  const bgColor = "bg-gray-800" + (isConnectionGood ? " opacity-100" : " opacity-50")
+  const firstZone = Object.keys(receiver.cues || {})[0]
+  // Disabled receivers (DB row enabled=false) render at lower opacity even if
+  // they happen to have stale status data; they're not being polled.
+  const isEnabled = receiver.enabled !== false;
+  const dimmed = !isEnabled || !isConnectionGood;
+  const bgColor = "bg-gray-800" + (dimmed ? " opacity-50" : " opacity-100")
+
+  // Pending edit values (fall back to current values on the row).
+  const editLabel = pendingEdit?.label !== undefined
+    ? pendingEdit.label
+    : (receiver.label || rcv_name);
+  const editEnabled = pendingEdit?.enabled !== undefined
+    ? pendingEdit.enabled
+    : isEnabled;
+  const editCueCount = pendingEdit?.cueCount !== undefined
+    ? pendingEdit.cueCount
+    : cueCountFromCues(receiver.cues);
+
+  // The retry button is visible whenever the receiver is enabled — it's the
+  // only way to recover a pruned receiver without restarting the daemon.
+  const showRetry = isEnabled && typeof onRetry === 'function';
 
   return (
     <div
@@ -188,10 +243,31 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId, receiverLabel
         </div>
         ):(
           <div className="text-red-400 text-sm flex items-center gap-2 ">
-            {receiver.type[0] == 'B' ? '' : 'Not Connected'}
+            {receiver.type && receiver.type[0] == 'B' ? '' : (isEnabled ? 'Not Connected' : 'Disabled')}
           </div>
         )}
       </div>
+
+      {/* Retry connection button. Always available when enabled (even when
+          edit mode is locked) so a pruned receiver can be re-added on the
+          fly. Hidden for one-way TX-only types — there's nothing to poll. */}
+      {showRetry && receiver.type !== 'BILUSOCN_433_TX_ONLY' && (
+        <div className="flex">
+          <button
+            type="button"
+            disabled={retryBusy}
+            onClick={() => onRetry(rcv_name)}
+            className={`ml-auto flex items-center gap-1 px-2 py-1 text-xs rounded
+              ${retryBusy
+                ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
+                : 'bg-gray-700 hover:bg-gray-600 text-gray-200'}`}
+            title="Retry connection (re-register with dongle)"
+          >
+            <MdRefresh className={retryBusy ? 'animate-spin' : ''} />
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Cues Section */}
       <b className="text-gray-300 mt-1 mb-1">Cues</b>
@@ -310,19 +386,102 @@ function SingleReceiver({ rcv_name, receiver, showMapping, showId, receiverLabel
           </div>
         </div>
       )}
+
+      {/* Edit panel — only rendered while the page is unlocked. All inputs
+          are uncontrolled-style: we forward changes up via onPendingEditChange
+          so the parent can stage them and surface the dirty indicator. */}
+      {editMode && (
+        <div className="mt-3 pt-3 border-t border-gray-600 flex flex-col gap-2 text-sm">
+          <label className="flex items-center gap-2 text-gray-200">
+            <input
+              type="checkbox"
+              checked={editEnabled}
+              onChange={(e) =>
+                onPendingEditChange?.(rcv_name, { enabled: e.target.checked })
+              }
+              className="h-4 w-4"
+            />
+            <span>Enabled (poll from dongle)</span>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-gray-400">Label</span>
+            <input
+              type="text"
+              value={editLabel}
+              onChange={(e) =>
+                onPendingEditChange?.(rcv_name, { label: e.target.value })
+              }
+              className="w-full px-2 py-1 rounded bg-gray-900 border border-gray-600 text-white"
+              placeholder={rcv_name}
+            />
+          </label>
+          <label className="flex items-center gap-2">
+            <span className="text-xs text-gray-400 whitespace-nowrap"># Cues</span>
+            <input
+              type="number"
+              min={0}
+              max={256}
+              value={editCueCount}
+              onChange={(e) =>
+                onPendingEditChange?.(rcv_name, {
+                  cueCount: Math.max(0, parseInt(e.target.value, 10) || 0),
+                })
+              }
+              className="w-20 px-2 py-1 rounded bg-gray-900 border border-gray-600 text-white"
+            />
+            <span className="text-xs text-gray-500">
+              writes 1..N under zone "{rcv_name}"
+            </span>
+          </label>
+        </div>
+      )}
     </div>
   );
 }
 
 export default function ReceiverDisplay({ setCurrentTab }) {
-    const { systemConfig, stagedShow } = useAppStore();
+    const {
+      stagedShow,
+      systemConfig,
+      receivers: dbReceivers,
+      fetchReceivers,
+      createReceiver,
+      updateReceiver,
+      reloadReceiversOnDaemon,
+      retryReceiver,
+    } = useAppStore();
     const { stateData } = useStateAppStore()
     const [ targetRcvMap, setTargetRcvMap ] = useState({});
     const [showUnusedReceivers, setShowUnusedReceivers] = useState(false);
+    const [showDisabledReceivers, setShowDisabledReceivers] = useState(false);
     const [receiverLabels, setReceiverLabels] = useState({});
 
-    const [receivers, setReceivers] = useState([]);
-    
+    // Edit-mode state
+    const [unlocked, setUnlocked] = useState(false);
+    // pendingEdits: { [rcvId]: { label?, enabled?, cueCount? } }
+    const [pendingEdits, setPendingEdits] = useState({});
+    const [savingEdits, setSavingEdits] = useState(false);
+    const [retryBusy, setRetryBusy] = useState({}); // { [rcvId]: true }
+
+    // Add-receiver form state. Controlled inputs live here so the form
+    // survives editing surrounding cards. The form is only rendered when the
+    // page is unlocked (see render below).
+    const [addFormOpen, setAddFormOpen] = useState(false);
+    const [addForm, setAddForm] = useState({
+      id: "",
+      label: "",
+      type: "",
+      cueCount: 8,
+    });
+    const [addBusy, setAddBusy] = useState(false);
+    const [addError, setAddError] = useState(null);
+
+    // Load receivers from DB on mount (and once whenever the page is
+    // mounted) so the edit UI always reflects the current persisted state.
+    useEffect(() => {
+      fetchReceivers().catch((e) => console.error('fetchReceivers failed:', e));
+    }, [fetchReceivers]);
+
     // Load receiver labels from show data
     useEffect(() => {
       if (stagedShow?.receiverLabels) {
@@ -339,64 +498,256 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       }
     }, [stagedShow]);
 
-    useEffect(() => {
-      let receiversTmp = systemConfig?.receivers || {};
-  
-      if (receiversTmp) {
-        // if(stateData.fw_state?.active_protocol){
-        //   receiversTmp= Object.fromEntries(
-        //     Object.entries(systemConfig?.receivers).filter(([key, val]) => val.protocol === stateData.fw_state?.active_protocol)
-        //   )
-        // }
-        if(stateData.fw_state?.receivers){
-          receiversTmp = stateData.fw_state?.receivers
-        }
+    // Merge DB receivers (definition: cues, label, type, enabled) with the
+    // live status payload from the daemon (battery, lmt, continuity, ...).
+    // The DB is iterated as the canonical list — fw_state status is overlaid
+    // when present.
+    const receivers = useMemo(() => {
+      const live = stateData.fw_state?.receivers || {};
+      const out = {};
+      for (const id of Object.keys(dbReceivers || {})) {
+        const def = dbReceivers[id];
+        const liveRow = live[id] || {};
+        out[id] = {
+          ...def,
+          // Status / drift come from the daemon's broadcast.
+          status: liveRow.status,
+          drift: liveRow.drift,
+          // Keep cues from the DB definition, not from the live row, so cue
+          // edits show immediately in edit mode without waiting for a daemon
+          // reload.
+          cues: def.cues,
+          // Pass the receiver's current `enabled` flag through (the
+          // SingleReceiver component dims when disabled).
+          enabled: def.enabled,
+        };
+      }
+      return out;
+    }, [dbReceivers, stateData.fw_state?.receivers]);
 
-        setReceivers(receiversTmp);
-  
-        // Build a lookup table for zones and targets to receivers
-        const lookupTable = {};
-        Object.keys(receiversTmp).forEach((receiverKey) => {
-          const receiver = receiversTmp[receiverKey];
-          Object.keys(receiver.cues).forEach((zoneKey) => {
-            receiver.cues[zoneKey].forEach((target) => {
-              lookupTable[`${zoneKey}:${target}`] = receiverKey; // Create a key for zone:target
-            });
+    useEffect(() => {
+      // Build a lookup table for zones and targets to receivers
+      const lookupTable = {};
+      Object.keys(receivers).forEach((receiverKey) => {
+        const receiver = receivers[receiverKey];
+        if (!receiver?.cues) return;
+        Object.keys(receiver.cues).forEach((zoneKey) => {
+          receiver.cues[zoneKey].forEach((target) => {
+            lookupTable[`${zoneKey}:${target}`] = receiverKey;
           });
         });
+      });
 
-  
-        // If stagedShow exists, process display_payload
-        if (stagedShow?.items) {
-          const map = {};
-          const parsedPayload = JSON.parse(stagedShow.display_payload);
-  
-          stagedShow.items.forEach((payloadItem) => {
-            const { itemId, zone, target } = payloadItem;
-  
-            const receiverKey = lookupTable[`${zone}:${target}`]; // Lookup receiver from table
-            if (receiverKey) {
-              // Initialize receiver in the map if it doesn't exist
-              if (!map[receiverKey]) {
-                map[receiverKey] = {};
-              }
-
-              // Initialize zone in the receiver if it doesn't exist
-              if (!map[receiverKey][zone]) {
-                map[receiverKey][zone] = {};
-              }
-
-              // Assign the item to the corresponding target within the zone
-              map[receiverKey][zone][target] = payloadItem;
-            }
-
-          });
-          setTargetRcvMap(map);
-        } else {
-          setTargetRcvMap({});
-        }
+      // If stagedShow exists, process display_payload
+      if (stagedShow?.items) {
+        const map = {};
+        stagedShow.items.forEach((payloadItem) => {
+          const { itemId, zone, target } = payloadItem;
+          const receiverKey = lookupTable[`${zone}:${target}`];
+          if (receiverKey) {
+            if (!map[receiverKey]) map[receiverKey] = {};
+            if (!map[receiverKey][zone]) map[receiverKey][zone] = {};
+            map[receiverKey][zone][target] = payloadItem;
+          }
+        });
+        setTargetRcvMap(map);
+      } else {
+        setTargetRcvMap({});
       }
-    }, [systemConfig.receivers, stagedShow, stateData.fw_state?.active_protocol, stateData.fw_state?.receivers]);
+    }, [receivers, stagedShow]);
+
+    // Edit-mode helpers ------------------------------------------------------
+    const isShowLoaded = !!stateData.fw_state?.show_loaded;
+    const hasPendingEdits = Object.keys(pendingEdits).length > 0;
+
+    const handlePendingEditChange = useCallback((id, patch) => {
+      setPendingEdits((prev) => {
+        const next = { ...prev };
+        const merged = { ...(next[id] || {}), ...patch };
+        // If the merged edit equals the current persisted state, drop the
+        // entry so the dirty indicator clears when the user reverts manually.
+        const def = dbReceivers?.[id];
+        if (def) {
+          const currentLabel = def.label || id;
+          const currentEnabled = def.enabled !== false;
+          const currentCueCount = cueCountFromCues(def.cues);
+          const noLabelChange = merged.label === undefined || merged.label === currentLabel;
+          const noEnabledChange = merged.enabled === undefined || merged.enabled === currentEnabled;
+          const noCueChange = merged.cueCount === undefined || merged.cueCount === currentCueCount;
+          if (noLabelChange && noEnabledChange && noCueChange) {
+            delete next[id];
+            return next;
+          }
+        }
+        next[id] = merged;
+        return next;
+      });
+    }, [dbReceivers]);
+
+    const handleRetry = useCallback(async (id) => {
+      setRetryBusy((prev) => ({ ...prev, [id]: true }));
+      try {
+        await retryReceiver(id);
+      } catch (e) {
+        console.error('Retry failed', e);
+      } finally {
+        // Brief debounce so the spinning icon is visible even on a fast queue.
+        setTimeout(() => {
+          setRetryBusy((prev) => {
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          });
+        }, 800);
+      }
+    }, [retryReceiver]);
+
+    const handleLockClick = useCallback(async () => {
+      if (!unlocked) {
+        // Unlocking: only allowed when no show is loaded.
+        if (isShowLoaded) return;
+        setUnlocked(true);
+        return;
+      }
+      // Locking: persist any pending edits, then ask the daemon to reload.
+      if (!hasPendingEdits) {
+        setUnlocked(false);
+        return;
+      }
+      setSavingEdits(true);
+      try {
+        const ids = Object.keys(pendingEdits);
+        for (const id of ids) {
+          const def = dbReceivers?.[id];
+          if (!def) continue;
+          const edit = pendingEdits[id];
+          const patch = {};
+          if (edit.label !== undefined && edit.label !== (def.label || id)) {
+            patch.label = edit.label;
+          }
+          if (edit.enabled !== undefined && edit.enabled !== (def.enabled !== false)) {
+            patch.enabled = edit.enabled;
+          }
+          if (
+            edit.cueCount !== undefined &&
+            edit.cueCount !== cueCountFromCues(def.cues)
+          ) {
+            patch.cues_data = buildCuesData(id, edit.cueCount);
+          }
+          if (Object.keys(patch).length === 0) continue;
+          await updateReceiver(id, patch);
+        }
+        // Tell the daemon (and ultimately the dongle) to reconcile its
+        // poll list with the new DB state.
+        await reloadReceiversOnDaemon();
+        setPendingEdits({});
+        setUnlocked(false);
+      } catch (e) {
+        console.error('Failed to save receiver edits:', e);
+        // Stay unlocked so the user can correct / retry.
+      } finally {
+        setSavingEdits(false);
+      }
+    }, [
+      unlocked,
+      isShowLoaded,
+      hasPendingEdits,
+      pendingEdits,
+      dbReceivers,
+      updateReceiver,
+      reloadReceiversOnDaemon,
+    ]);
+
+    const lockTitle = unlocked
+      ? (hasPendingEdits ? 'Save changes & reload dongle' : 'Lock (no changes)')
+      : (isShowLoaded
+        ? 'Cannot edit while a show is loaded — unload first'
+        : 'Unlock to edit receivers');
+
+    // ---- Add-receiver form -------------------------------------------------
+    // The list of selectable receiver types comes from systemcfg.json's
+    // `types` block (still the source of truth for hardware capabilities).
+    const availableTypes = useMemo(
+      () => Object.keys(systemConfig?.types || {}),
+      [systemConfig?.types]
+    );
+
+    const closeAddForm = useCallback(() => {
+      setAddFormOpen(false);
+      setAddError(null);
+      setAddForm({ id: "", label: "", type: "", cueCount: 8 });
+    }, []);
+
+    const openAddForm = useCallback(() => {
+      setAddError(null);
+      setAddForm((f) => ({
+        ...f,
+        // Pre-select the first available type so the form is submittable
+        // without an extra click on a single-type system.
+        type: f.type || availableTypes[0] || "",
+      }));
+      setAddFormOpen(true);
+    }, [availableTypes]);
+
+    const handleAddSubmit = useCallback(async (e) => {
+      e?.preventDefault?.();
+      setAddError(null);
+      const id = (addForm.id || "").trim();
+      const label = (addForm.label || "").trim() || id;
+      const type = addForm.type;
+      const cueCount = Math.max(0, Math.min(256, parseInt(addForm.cueCount, 10) || 0));
+
+      if (!id) { setAddError("ID is required."); return; }
+      if (dbReceivers && dbReceivers[id]) {
+        setAddError(`Receiver "${id}" already exists.`);
+        return;
+      }
+      if (!type) { setAddError("Type is required."); return; }
+      // The dongle parses node IDs out of "RX<digits>". We don't enforce it
+      // strictly (BILUSOCN_433_TX_ONLY doesn't go over the dongle), but we
+      // warn when it's clearly going to break addressing.
+      if (type === "BKYD_TS_24_1" && !/^RX\d+$/i.test(id)) {
+        setAddError(
+          'BKYD_TS_24_1 receivers must be named "RX<digits>" (e.g. RX163) — ' +
+          'the dongle parses the node ID out of the ident.'
+        );
+        return;
+      }
+
+      setAddBusy(true);
+      try {
+        await createReceiver({
+          id,
+          label,
+          type,
+          cues_data: buildCuesData(id, cueCount),
+          enabled: true,
+        });
+        // New rows count as a config change; surface the dirty indicator on
+        // the lock button so the user knows the daemon needs a reload. We
+        // model it as an empty pendingEdits entry that always diffs as a
+        // no-op against current — but we use a sentinel ident to mark dirty.
+        setPendingEdits((prev) => ({ ...prev, [id]: { _added: true } }));
+        closeAddForm();
+      } catch (err) {
+        const apiMsg = err?.response?.data?.error;
+        setAddError(apiMsg || err?.message || "Failed to create receiver.");
+      } finally {
+        setAddBusy(false);
+      }
+    }, [addForm, dbReceivers, createReceiver, closeAddForm]);
+
+    // When not in edit mode we hide disabled receivers in their own collapsed
+    // section at the bottom — a disabled receiver isn't being polled by the
+    // dongle, so it just clutters the live status grid. In edit mode every
+    // receiver is rendered inline so the user can re-enable them.
+    const isReceiverDisabled = (rcv) => rcv?.enabled === false;
+    const visibleReceiverKeys = unlocked
+      ? Object.keys(receivers)
+      : Object.keys(receivers).filter((k) => !isReceiverDisabled(receivers[k]));
+    const disabledReceiverKeys = unlocked
+      ? []
+      : Object.keys(receivers).filter((k) => isReceiverDisabled(receivers[k]));
 
     // Calculate system health metrics
     const calculateSystemHealth = () => {
@@ -592,61 +943,283 @@ export default function ReceiverDisplay({ setCurrentTab }) {
               </div>
             )}
 
-            {/* Header with Show Loadout button */}
+            {/* Header with Show Loadout button + edit lock */}
             <div className="flex justify-between items-center p-4 border-b border-gray-700">
                 <h1 className="text-2xl font-bold text-white">Receivers</h1>
-                {stagedShow && (
+                <div className="flex items-center gap-3">
+                    {stagedShow && (
+                        <button
+                            onClick={() => setCurrentTab('loadout')}
+                            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                        >
+                            <MdAssignment />
+                            View Show Loadout
+                        </button>
+                    )}
+                    {/* Add receiver — only available in edit mode. Toggles an
+                        inline form between the header and the receiver grid. */}
+                    {unlocked && (
+                        <button
+                            onClick={() => addFormOpen ? closeAddForm() : openAddForm()}
+                            disabled={savingEdits}
+                            title={addFormOpen ? 'Cancel add' : 'Add a new receiver'}
+                            className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-colors text-white ${
+                              addFormOpen
+                                ? 'bg-gray-600 hover:bg-gray-500'
+                                : 'bg-emerald-600 hover:bg-emerald-700'
+                            }`}
+                        >
+                            {addFormOpen ? <MdClose className="text-xl" /> : <MdAdd className="text-xl" />}
+                            <span className="text-sm">{addFormOpen ? 'Cancel' : 'Add Receiver'}</span>
+                        </button>
+                    )}
+                    {/* Lock toggle: gated on show-loaded state. While unlocked
+                        clicking it persists pending edits and asks the daemon
+                        to reload its receiver map. The "!" badge surfaces
+                        unsaved changes. */}
                     <button
-                        onClick={() => setCurrentTab('loadout')}
-                        className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                        onClick={handleLockClick}
+                        disabled={savingEdits || (!unlocked && isShowLoaded)}
+                        title={lockTitle}
+                        className={`relative flex items-center gap-2 px-3 py-2 rounded-lg transition-colors text-white
+                          ${savingEdits ? 'bg-gray-600 cursor-wait' :
+                            (!unlocked && isShowLoaded) ? 'bg-gray-700 opacity-50 cursor-not-allowed' :
+                            unlocked ? (hasPendingEdits ? 'bg-amber-600 hover:bg-amber-700' : 'bg-gray-700 hover:bg-gray-600')
+                                     : 'bg-gray-700 hover:bg-gray-600'}`}
                     >
-                        <MdAssignment />
-                        View Show Loadout
+                        {unlocked
+                          ? <MdLockOpen className="text-xl" />
+                          : <MdLock className="text-xl" />}
+                        <span className="text-sm">
+                          {savingEdits ? 'Saving…'
+                            : unlocked ? (hasPendingEdits ? 'Save & Lock' : 'Lock')
+                            : 'Edit'}
+                        </span>
+                        {hasPendingEdits && !savingEdits && (
+                          <span
+                            className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-red-500 flex items-center justify-center text-[10px] font-bold"
+                            title="Unsaved changes"
+                          >
+                            !
+                          </span>
+                        )}
                     </button>
-                )}
+                </div>
             </div>
-            
-            {/* Used Receivers */}
+
+            {unlocked && isShowLoaded && (
+              <div className="px-4 py-2 bg-amber-900/40 border-b border-amber-700 text-amber-200 text-sm flex items-center gap-2">
+                <MdWarning />
+                A show is currently loaded — unload it before editing receivers.
+              </div>
+            )}
+
+            {/* Add-receiver form. Visible only when the page is unlocked AND
+                the user has explicitly opened the form. The submit handler
+                creates the row in the DB; locking later triggers the daemon
+                reload that will register the new receiver with the dongle. */}
+            {unlocked && addFormOpen && (
+              <form
+                onSubmit={handleAddSubmit}
+                className="px-4 py-3 border-b border-gray-700 bg-gray-800/60"
+              >
+                <div className="flex flex-wrap items-end gap-3">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-gray-400">ID</span>
+                    <input
+                      type="text"
+                      value={addForm.id}
+                      onChange={(e) =>
+                        setAddForm((f) => ({ ...f, id: e.target.value }))
+                      }
+                      placeholder="RX163"
+                      className="bg-gray-900 text-white text-sm rounded border border-gray-600 px-2 py-1 w-32"
+                      autoFocus
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-gray-400">Label</span>
+                    <input
+                      type="text"
+                      value={addForm.label}
+                      onChange={(e) =>
+                        setAddForm((f) => ({ ...f, label: e.target.value }))
+                      }
+                      placeholder="(defaults to ID)"
+                      className="bg-gray-900 text-white text-sm rounded border border-gray-600 px-2 py-1 w-48"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-gray-400">Type</span>
+                    <select
+                      value={addForm.type}
+                      onChange={(e) =>
+                        setAddForm((f) => ({ ...f, type: e.target.value }))
+                      }
+                      className="bg-gray-900 text-white text-sm rounded border border-gray-600 px-2 py-1"
+                    >
+                      <option value="" disabled>
+                        Select type…
+                      </option>
+                      {availableTypes.map((t) => (
+                        <option key={t} value={t}>{t}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-gray-400"># Cues</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={256}
+                      value={addForm.cueCount}
+                      onChange={(e) =>
+                        setAddForm((f) => ({ ...f, cueCount: e.target.value }))
+                      }
+                      className="bg-gray-900 text-white text-sm rounded border border-gray-600 px-2 py-1 w-24"
+                    />
+                  </label>
+                  <button
+                    type="submit"
+                    disabled={addBusy}
+                    className={`px-4 py-1.5 rounded text-white text-sm ${
+                      addBusy
+                        ? 'bg-gray-600 cursor-wait'
+                        : 'bg-emerald-600 hover:bg-emerald-700'
+                    }`}
+                  >
+                    {addBusy ? 'Adding…' : 'Add'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={closeAddForm}
+                    disabled={addBusy}
+                    className="px-3 py-1.5 rounded text-gray-200 text-sm bg-gray-700 hover:bg-gray-600"
+                  >
+                    Cancel
+                  </button>
+                </div>
+                {addError && (
+                  <div className="mt-2 text-sm text-red-400 flex items-center gap-2">
+                    <MdWarning /> {addError}
+                  </div>
+                )}
+                <p className="mt-2 text-xs text-gray-500">
+                  After adding, click the lock to save and reload receivers on the dongle.
+                </p>
+              </form>
+            )}
+
+            {/* Used Receivers (filtered to enabled-only when locked) */}
             {stagedShow && Object.keys(targetRcvMap).length > 0 && (
                 <div className="flex flex-wrap gap-5 p-4 justify-center">
-                    {Object.keys(receivers)
+                    {visibleReceiverKeys
                         .filter(rcv_key => targetRcvMap[rcv_key])
                         .map((rcv_key, i) => (
-                            <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id} receiverLabel={receiverLabels[rcv_key]}/>
+                            <SingleReceiver
+                              key={i}
+                              rcv_name={rcv_key}
+                              receiver={receivers[rcv_key]}
+                              showMapping={targetRcvMap[rcv_key]}
+                              showId={stagedShow?.id}
+                              receiverLabel={receiverLabels[rcv_key]}
+                              editMode={unlocked}
+                              pendingEdit={pendingEdits[rcv_key]}
+                              onPendingEditChange={handlePendingEditChange}
+                              onRetry={handleRetry}
+                              retryBusy={!!retryBusy[rcv_key]}
+                            />
                         ))}
                 </div>
             )}
 
-            {/* Unused Receivers - Collapsible */}
-            {stagedShow && Object.keys(targetRcvMap).length > 0 && (
-                <div className="border-t border-gray-700">
-                    <button
-                        onClick={() => setShowUnusedReceivers(!showUnusedReceivers)}
-                        className="w-full px-4 py-2 text-left text-sm text-slate-400 hover:text-slate-300 hover:bg-slate-800 transition-colors flex items-center justify-between"
-                    >
-                        <span>
-                            Unused Receivers ({Object.keys(receivers).filter(rcv_key => !targetRcvMap[rcv_key]).length})
-                        </span>
-                        <span className="text-xs">{showUnusedReceivers ? '▼' : '▶'}</span>
-                    </button>
-                    {showUnusedReceivers && (
-                        <div className="flex flex-wrap gap-5 p-4 justify-center">
-                            {Object.keys(receivers)
-                                .filter(rcv_key => !targetRcvMap[rcv_key])
-                                .map((rcv_key, i) => (
-                                    <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id} receiverLabel={receiverLabels[rcv_key]}/>
+            {/* Unused Receivers - Collapsible (filtered to enabled-only when locked) */}
+            {stagedShow && Object.keys(targetRcvMap).length > 0 && (() => {
+                const unusedKeys = visibleReceiverKeys.filter(k => !targetRcvMap[k]);
+                if (unusedKeys.length === 0) return null;
+                return (
+                    <div className="border-t border-gray-700">
+                        <button
+                            onClick={() => setShowUnusedReceivers(!showUnusedReceivers)}
+                            className="w-full px-4 py-2 text-left text-sm text-slate-400 hover:text-slate-300 hover:bg-slate-800 transition-colors flex items-center justify-between"
+                        >
+                            <span>Unused Receivers ({unusedKeys.length})</span>
+                            <span className="text-xs">{showUnusedReceivers ? '▼' : '▶'}</span>
+                        </button>
+                        {showUnusedReceivers && (
+                            <div className="flex flex-wrap gap-5 p-4 justify-center">
+                                {unusedKeys.map((rcv_key, i) => (
+                                    <SingleReceiver
+                                      key={i}
+                                      rcv_name={rcv_key}
+                                      receiver={receivers[rcv_key]}
+                                      showMapping={targetRcvMap[rcv_key]}
+                                      showId={stagedShow?.id}
+                                      receiverLabel={receiverLabels[rcv_key]}
+                                      editMode={unlocked}
+                                      pendingEdit={pendingEdits[rcv_key]}
+                                      onPendingEditChange={handlePendingEditChange}
+                                      onRetry={handleRetry}
+                                      retryBusy={!!retryBusy[rcv_key]}
+                                    />
                                 ))}
-                        </div>
-                    )}
+                            </div>
+                        )}
+                    </div>
+                );
+            })()}
+
+            {/* All Receivers (when no show is staged; filtered to enabled-only when locked) */}
+            {(!stagedShow || Object.keys(targetRcvMap).length === 0) && (
+                <div className="flex flex-wrap gap-5 p-4 justify-center">
+                    {visibleReceiverKeys.map((rcv_key, i) => (
+                        <SingleReceiver
+                          key={i}
+                          rcv_name={rcv_key}
+                          receiver={receivers[rcv_key]}
+                          showMapping={targetRcvMap[rcv_key]}
+                          showId={stagedShow?.id}
+                          receiverLabel={receiverLabels[rcv_key]}
+                          editMode={unlocked}
+                          pendingEdit={pendingEdits[rcv_key]}
+                          onPendingEditChange={handlePendingEditChange}
+                          onRetry={handleRetry}
+                          retryBusy={!!retryBusy[rcv_key]}
+                        />
+                    ))}
                 </div>
             )}
 
-            {/* All Receivers (when no show is staged) */}
-            {(!stagedShow || Object.keys(targetRcvMap).length === 0) && (
-                <div className="flex flex-wrap gap-5 p-4 justify-center">
-                    {Object.keys(receivers).map((rcv_key, i) => (
-                        <SingleReceiver key={i} rcv_name={rcv_key} receiver={receivers[rcv_key]} showMapping={targetRcvMap[rcv_key]} showId={stagedShow?.id} receiverLabel={receiverLabels[rcv_key]}/>
-                    ))}
+            {/* Disabled Receivers - Collapsed by default; only rendered when
+                locked, since edit mode already shows all receivers inline. */}
+            {!unlocked && disabledReceiverKeys.length > 0 && (
+                <div className="border-t border-gray-700">
+                    <button
+                        onClick={() => setShowDisabledReceivers(!showDisabledReceivers)}
+                        className="w-full px-4 py-2 text-left text-sm text-slate-500 hover:text-slate-300 hover:bg-slate-800 transition-colors flex items-center justify-between"
+                    >
+                        <span>Disabled Receivers ({disabledReceiverKeys.length})</span>
+                        <span className="text-xs">{showDisabledReceivers ? '▼' : '▶'}</span>
+                    </button>
+                    {showDisabledReceivers && (
+                        <div className="flex flex-wrap gap-5 p-4 justify-center">
+                            {disabledReceiverKeys.map((rcv_key, i) => (
+                                <SingleReceiver
+                                  key={i}
+                                  rcv_name={rcv_key}
+                                  receiver={receivers[rcv_key]}
+                                  showMapping={targetRcvMap[rcv_key]}
+                                  showId={stagedShow?.id}
+                                  receiverLabel={receiverLabels[rcv_key]}
+                                  editMode={unlocked}
+                                  pendingEdit={pendingEdits[rcv_key]}
+                                  onPendingEditChange={handlePendingEditChange}
+                                  onRetry={handleRetry}
+                                  retryBusy={!!retryBusy[rcv_key]}
+                                />
+                            ))}
+                        </div>
+                    )}
                 </div>
             )}
         </div>

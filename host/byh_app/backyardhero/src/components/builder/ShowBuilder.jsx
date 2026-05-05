@@ -1325,9 +1325,16 @@ const ShowBuilder = (props) => {
         setReceiverLabels({});
       }
     } else {
-      // Clear editor when show is unstaged
+      // Clear editor when show is unstaged. Use a functional update so we
+      // don't clobber fields that the auto-select-protocol effect (declared
+      // earlier in this component) queued in the same commit batch — e.g.
+      // `protocol`, which would otherwise come back as undefined and leave
+      // the editor stuck on "Please select a protocol".
       setItems([]);
-      setShowMetadata({name: ""});
+      setShowMetadata((prev) => ({
+        name: "",
+        ...(prev?.protocol ? { protocol: prev.protocol } : {}),
+      }));
       setAudioFile(null);
       setReceiverLocations({});
       setReceiverLabels({});

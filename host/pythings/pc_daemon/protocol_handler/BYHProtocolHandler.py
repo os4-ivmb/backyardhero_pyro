@@ -1,4 +1,5 @@
 import os
+import tempfile
 import time
 import serial
 import sqlite3
@@ -9,6 +10,11 @@ import json
 from enum import Enum
 from led_control import *
 
+# Path for the full per-channel RF scan dump. Kept separate from
+# /data/state because it's bulky (~3KB JSON for 126 channels) and
+# infrequent (only updated on operator-initiated scans).
+LAST_SCAN_FILE_PATH = '/data/last_scan.json'
+
 DEBUG = False
 
 #T- to show start when signaled to start.
@@ -17,6 +23,10 @@ SHOW_START_TIME_SECONDS = 25
 ABORT_PRE_START_SECONDS = 10
 
 cfg_filepath = '/config/systemcfg.json'
+# The Receivers table in this DB is the source of truth for which receivers
+# the dongle should know about. systemcfg.json still owns protocols / types /
+# system block.
+db_filepath = '/data/backyardhero.db'
 
 LATENCY_TO_CONSIDER_ONLINE_MS = 8000
 ASYNC_LOAD_TIMEOUT_MS = 5000
@@ -92,18 +102,35 @@ class BYHProtocolHandler:
         # starts pinging them immediately, even before the first show traffic.
         self._register_all_receivers_with_dongle()
 
+    def _register_receiver_with_dongle(self, rcv_ident, rcv_cfg):
+        """Send a no-op sync to a single nRF24 receiver so the dongle adds it
+        to its poll table. Skips 433MHz-only devices that don't use the
+        dongle's RF protocol."""
+        if rcv_cfg.get("type") == "BILUSOCN_433_TX_ONLY":
+            return False
+        try:
+            self.parent.send_serial_command(f"sync {rcv_ident} 0 1")
+            return True
+        except Exception as e:
+            print(f"WARN: could not register {rcv_ident}: {e}")
+            return False
+
     def _register_all_receivers_with_dongle(self):
-        """Send a no-op sync to each configured nRF24 receiver so the dongle
-        adds it to its poll table. Skips 433MHz-only devices that don't use
-        the dongle's RF protocol. Spaced lightly to avoid bursting the queue."""
+        """Pre-register every (enabled) receiver from config so the dongle's
+        TDMA poller starts pinging them immediately, even before any show
+        traffic. Spaced lightly to avoid bursting the queue."""
         for rcv_ident, rcv_cfg in self.receivers.items():
-            if rcv_cfg.get("type") == "BILUSOCN_433_TX_ONLY":
-                continue
-            try:
-                self.parent.send_serial_command(f"sync {rcv_ident} 0 1")
+            if self._register_receiver_with_dongle(rcv_ident, rcv_cfg):
                 time.sleep(0.03)
-            except Exception as e:
-                print(f"WARN: could not pre-register {rcv_ident}: {e}")
+
+    def _forget_receiver_on_dongle(self, rcv_ident):
+        """Tell the dongle to drop a receiver from its poll table immediately,
+        regardless of whether it's "online". Paired with the dongle's
+        `forget IDENT` serial command."""
+        try:
+            self.parent.send_serial_command(f"forget {rcv_ident}")
+        except Exception as e:
+            print(f"WARN: could not forget {rcv_ident}: {e}")
 
     #Just something that runs periodically to then invoke housekeeping things
     def bounce(self):
@@ -114,21 +141,273 @@ class BYHProtocolHandler:
         print("Syncing tx host clock:", sync_message.strip())
         self.parent.send_serial_command(sync_message)
 
+    def _load_receivers_from_db(self):
+        """Read the Receivers table and project it into the legacy
+        `{ ident: { label, type, cues, enabled, metadata, configuration_version } }`
+        map shape that the rest of this handler (and the broadcast state file)
+        already speaks. Only `enabled=1` rows are returned — disabled ones
+        must not be in `self.receivers` because that map drives the dongle's
+        poll list."""
+        out = {}
+        try:
+            conn = sqlite3.connect(db_filepath)
+            try:
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT id, label, type, cues_data, enabled, metadata, "
+                    "configuration_version FROM Receivers"
+                )
+                for row in cur.fetchall():
+                    if int(row['enabled']) != 1:
+                        continue
+                    try:
+                        cues = json.loads(row['cues_data']) if row['cues_data'] else {}
+                    except json.JSONDecodeError:
+                        cues = {}
+                    try:
+                        meta = json.loads(row['metadata']) if row['metadata'] else {}
+                    except json.JSONDecodeError:
+                        meta = {}
+                    out[row['id']] = {
+                        'label': row['label'],
+                        'type': row['type'],
+                        'cues': cues,
+                        'enabled': True,
+                        'metadata': meta,
+                        'configuration_version': int(row['configuration_version']),
+                    }
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            print(f"ERROR: could not read Receivers from DB: {e}")
+        return out
+
     def load_initial_receiver_cfg(self):
+        # Receivers come from the SQL Receivers table (DB is source of truth).
+        # Protocols / types / system block still come from systemcfg.json.
+        self.receivers = self._load_receivers_from_db()
         try:
             with open(cfg_filepath, 'r') as file:
                 data = json.load(file)
-            self.receivers = data.get('receivers', {})
-            self.types = data.get('types',{})
-            self.config = data.get('protocols',{}).get(self.protocol).get('config')
-            if(not self.receivers):
-                self.parent.write_error("Config did not contain any receivers!")
-
+            self.types = data.get('types', {})
+            self.config = data.get('protocols', {}).get(self.protocol, {}).get('config', {}) or {}
         except FileNotFoundError:
             print(f"Error: The file '{cfg_filepath}' does not exist.")
+            self.types = {}
+            self.config = {}
         except json.JSONDecodeError as e:
             print(f"Error decoding JSON: {e}")
             self.parent.write_error(f"Error parsing BYH config file at {cfg_filepath}")
+            self.types = {}
+            self.config = {}
+
+        if not self.receivers:
+            self.parent.write_error(
+                "Receivers table is empty — no receivers will be polled."
+            )
+
+    def reload_receivers_from_db(self):
+        """Re-read the Receivers table and reconcile the dongle's poll list:
+          - newly-enabled / newly-added receivers get a `sync` (registration);
+          - rows that disappeared (deleted) or flipped to enabled=0 get a
+            `forget` so the dongle drops them immediately.
+
+        Existing `status` substructures are preserved across the reload so
+        the live state broadcast doesn't blink for unaffected receivers.
+        """
+        old_map = self.receivers or {}
+        new_map = self._load_receivers_from_db()
+
+        # Carry over live status / drift / latency for receivers that survive.
+        for ident, def_ in new_map.items():
+            prev = old_map.get(ident)
+            if prev:
+                if 'status' in prev:
+                    def_['status'] = prev['status']
+                if 'drift' in prev:
+                    def_['drift'] = prev['drift']
+
+        # Forget anyone that was previously registered but is no longer in
+        # the new map (deleted or disabled).
+        forgotten = []
+        for ident, prev in old_map.items():
+            if ident in new_map:
+                continue
+            if prev.get('type') == 'BILUSOCN_433_TX_ONLY':
+                continue
+            self._forget_receiver_on_dongle(ident)
+            forgotten.append(ident)
+            time.sleep(0.03)
+
+        # Register anyone new (or re-enabled). Always re-issuing sync for
+        # already-known receivers is harmless — the dongle's TDMA poller will
+        # absorb the no-op.
+        registered = []
+        for ident, def_ in new_map.items():
+            if ident not in old_map:
+                if self._register_receiver_with_dongle(ident, def_):
+                    registered.append(ident)
+                    time.sleep(0.03)
+
+        # Drop dropped latency sample buffers so memory doesn't grow forever
+        # across many enable/disable cycles.
+        for ident in list(self.latency_samples.keys()):
+            if ident not in new_map:
+                self.latency_samples.pop(ident, None)
+
+        self.receivers = new_map
+        print(
+            f"Reloaded receivers from DB: total={len(new_map)} "
+            f"registered={registered} forgotten={forgotten}"
+        )
+        return {'registered': registered, 'forgotten': forgotten,
+                'total': len(new_map)}
+
+    def retry_receiver(self, ident):
+        """Re-issue registration for a single receiver. Use this when a
+        receiver was pruned by the dongle (timeout) and needs to come back
+        without disturbing the others."""
+        rcv = self.receivers.get(ident)
+        if not rcv:
+            print(f"retry_receiver: unknown ident '{ident}' (not in DB-backed map)")
+            return False
+        if rcv.get('type') == 'BILUSOCN_433_TX_ONLY':
+            print(f"retry_receiver: '{ident}' is a one-way TX device; nothing to do.")
+            return False
+        ok = self._register_receiver_with_dongle(ident, rcv)
+        if ok:
+            print(f"retry_receiver: re-registered {ident}")
+        return ok
+
+    # ----- RF spectrum scan ---------------------------------------------
+    def start_rf_scan(self, passes=10, ch_start=0, ch_end=125):
+        """Issue the dongle's `scan` serial command. The dongle blocks
+        polling for ~passes * (ch_end-ch_start+1) * 0.18ms while it sweeps,
+        then emits a single `scan_result` JSON line that's picked up in
+        `process_serial_in -> _handle_scan_result`.
+        """
+        passes   = max(1, min(50, int(passes)))
+        ch_start = max(0, min(125, int(ch_start)))
+        ch_end   = max(ch_start, min(125, int(ch_end)))
+
+        # Mark the scan as pending so the UI can show a spinner. Cleared
+        # in _handle_scan_result. We also stamp this so a stuck scan can
+        # be detected (timeout in the UI / state file).
+        self.parent.rf_scan_pending_since_ms = int(time.time() * 1000)
+        try:
+            self.parent.update_state_file()
+        except Exception:
+            pass
+
+        cmd = f"scan {passes} {ch_start} {ch_end}"
+        print(f"start_rf_scan: sending '{cmd}'")
+        self.parent.send_serial_command(cmd)
+        return True
+
+    def _handle_scan_result(self, msg_obj):
+        """Persist the dongle's scan_result frame to LAST_SCAN_FILE_PATH and
+        publish a small summary on self.parent for inclusion in /data/state.
+        """
+        try:
+            results = msg_obj.get('results', []) or []
+            # Defensive normalization — drop entries missing keys.
+            cleaned = []
+            for r in results:
+                if 'ch' in r and 'hits' in r:
+                    cleaned.append({'ch': int(r['ch']), 'hits': int(r['hits'])})
+            if not cleaned:
+                print("scan_result: empty results list, ignoring")
+                return
+
+            current_ch = msg_obj.get('current_ch')
+            passes     = int(msg_obj.get('passes', 0))
+            duration   = int(msg_obj.get('duration_ms', 0))
+            host_ts_ms = int(time.time() * 1000)
+
+            # --- Recommended channel ----------------------------------
+            # Score = own hits + 0.5 * neighborhood hits within +-2.
+            # Lower is better. Among ties, prefer the higher channel
+            # number (above the 2.4 GHz Wi-Fi band tends to be steadier
+            # over time than the gaps between Wi-Fi channels).
+            by_ch = {r['ch']: r['hits'] for r in cleaned}
+            scored = []
+            for r in cleaned:
+                ch = r['ch']
+                neigh = 0
+                for d in (-2, -1, 1, 2):
+                    n = by_ch.get(ch + d)
+                    if n is not None:
+                        neigh += n
+                score = r['hits'] + 0.5 * neigh
+                scored.append((score, -ch, ch, r['hits']))
+            scored.sort()
+            recommended_ch = scored[0][2] if scored else None
+            top5 = [
+                {'ch': s[2], 'hits': s[3], 'score': round(s[0], 2)}
+                for s in scored[:5]
+            ]
+
+            full_payload = {
+                'host_ts_ms':   host_ts_ms,
+                'fw':           int(msg_obj.get('fw', 0)),
+                'passes':       passes,
+                'ch_start':     int(msg_obj.get('ch_start', 0)),
+                'ch_end':       int(msg_obj.get('ch_end', 125)),
+                'current_ch':   current_ch,
+                'duration_ms':  duration,
+                'recommended_ch': recommended_ch,
+                'top':          top5,
+                'results':      cleaned,
+            }
+
+            self._write_last_scan_atomic(full_payload)
+
+            # Compact summary for /data/state. Don't include the full
+            # 126-bin array here — clients who want the chart fetch
+            # /api/system/rf_scan.
+            self.parent.last_rf_scan_summary = {
+                'host_ts_ms':     host_ts_ms,
+                'passes':         passes,
+                'duration_ms':    duration,
+                'current_ch':     current_ch,
+                'recommended_ch': recommended_ch,
+                'top':            top5,
+            }
+            self.parent.rf_scan_pending_since_ms = None
+            try:
+                self.parent.update_state_file()
+            except Exception:
+                pass
+            print(
+                f"scan_result: {len(cleaned)} bins, "
+                f"current_ch={current_ch}, recommended_ch={recommended_ch}"
+            )
+        except Exception as e:
+            print(f"scan_result handling failed: {e}")
+            self.parent.rf_scan_pending_since_ms = None
+
+    @staticmethod
+    def _write_last_scan_atomic(payload):
+        """Atomic write to LAST_SCAN_FILE_PATH so HTTP readers never see a
+        truncated/partial file (same pattern as update_state_file)."""
+        d = os.path.dirname(LAST_SCAN_FILE_PATH) or "."
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            prefix=".last_scan.", suffix=".tmp", dir=d
+        )
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                json.dump(payload, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, LAST_SCAN_FILE_PATH)
+            tmp_path = None
+        finally:
+            if tmp_path is not None and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
     def updateRelevantStates(self):
         if self.load_waiting and self.show_id and not self.show_loaded:
@@ -226,7 +505,14 @@ class BYHProtocolHandler:
                 msg_type = msg_obj.get('type','status')
 
                 if(msg_type == 'status'):
+                    # Capture the active RF channel from each status frame.
+                    # The dongle started reporting `ch` in FW v6; older
+                    # firmware just won't include the key (None on parent).
+                    if 'ch' in msg_obj:
+                        self.parent.current_rf_channel = int(msg_obj['ch'])
                     self.process_status_msg(msg_obj)
+                elif(msg_type == 'scan_result'):
+                    self._handle_scan_result(msg_obj)
             except json.JSONDecodeError as e:
                 print("Bad JSON status")
 

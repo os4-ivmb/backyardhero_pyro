@@ -3,6 +3,7 @@ import time
 import serial
 import sqlite3
 import threading
+import tempfile
 from datetime import datetime
 import json
 from enum import Enum
@@ -21,6 +22,7 @@ SERIAL_PORT = "/dev/ttyACM0"
 BAUD_RATE = 115200
 DB_PATH = "/data/backyardhero.db"
 STATE_FILE_PATH = "/data/state"
+LAST_SCAN_FILE_PATH = "/data/last_scan.json"
 CONFIG_PATH = "/config/systemcfg.json"
 ERR_LOG_PATH = "/data/log/daemon.err"
 LED_DATA_PATH = "/data/leddata"  # Path for persisting LED states
@@ -194,6 +196,18 @@ class FireworkDaemon:
         self.command_response_timeout_ms = 100
         self.clock_sync_interval_ms = 2000
         self.debug_mode = 0
+
+        # RF spectrum diagnostics. `current_rf_channel` is updated from each
+        # dongle status broadcast (the dongle now includes `ch`).
+        # `last_rf_scan_summary` is a small dict (no per-channel bins —
+        # those go to LAST_SCAN_FILE_PATH) we publish in /data/state so the
+        # UI can show "last scanned X minutes ago, recommended ch Y" without
+        # a second fetch.
+        self.current_rf_channel = None
+        self.last_rf_scan_summary = None
+        # When set, /data/last_scan.json holds the full per-channel result
+        # from the most recent scan_result we've received from the dongle.
+        self.rf_scan_pending_since_ms = None
 
         self.led_handler = LEDHandler(self)
 
@@ -610,6 +624,75 @@ class FireworkDaemon:
                 if(repeat_ct==0):
                     repeat_ct=6
                 self.fire_repetition = repeat_ct
+            elif command['type'] == 'reload_receivers':
+                # UI dropped this after editing the Receivers DB table.
+                # Re-read from DB and reconcile the dongle's poll list.
+                if self.protocol_handler and hasattr(self.protocol_handler, 'reload_receivers_from_db'):
+                    if self.protocol_handler.show_loaded:
+                        # Refuse silently — the UI already gates the unlock
+                        # button on this, but a stray cmd file could still
+                        # land here. Don't trash a loaded show.
+                        print("Ignoring reload_receivers: a show is currently loaded.")
+                    else:
+                        try:
+                            self.protocol_handler.reload_receivers_from_db()
+                        except Exception as e:
+                            self.write_error(f"reload_receivers failed: {e}")
+                else:
+                    print("reload_receivers: protocol handler not ready.")
+            elif command['type'] == 'retry_receiver':
+                ident = command.get('ident')
+                if not ident:
+                    print("retry_receiver: missing 'ident'.")
+                elif self.protocol_handler and hasattr(self.protocol_handler, 'retry_receiver'):
+                    try:
+                        self.protocol_handler.retry_receiver(ident)
+                    except Exception as e:
+                        self.write_error(f"retry_receiver({ident}) failed: {e}")
+                else:
+                    print("retry_receiver: protocol handler not ready.")
+            elif command['type'] == 'set_rf_channel':
+                # Apply a new RF channel to the dongle. The dongle's
+                # parseLedJSON path accepts `rf_channel` and calls
+                # applyRfConfig() which hot-swaps without a reboot. We
+                # refuse if a show is loaded or the system is armed —
+                # mid-show channel changes would leave existing receivers
+                # deaf until they're reflashed (no auto-discovery yet).
+                try:
+                    new_ch = int(command.get('channel', -1))
+                except (TypeError, ValueError):
+                    new_ch = -1
+                if not (0 <= new_ch <= 125):
+                    self.write_error(f"set_rf_channel refused: channel must be 0..125 (got {command.get('channel')!r}).")
+                elif self.protocol_handler and self.protocol_handler.show_loaded:
+                    self.write_error("set_rf_channel refused: a show is currently loaded. Unload first.")
+                elif self.is_armed:
+                    self.write_error("set_rf_channel refused: system is armed. Disarm first.")
+                else:
+                    self.send_serial_command(json.dumps({"rf_channel": new_ch}))
+                    print(f"set_rf_channel: requested ch={new_ch}")
+            elif command['type'] == 'scan_radio':
+                # Operator-initiated RF spectrum scan. We refuse if a show
+                # is loaded or the system is armed because the dongle blocks
+                # all polling for ~250ms-1s during the sweep, and we don't
+                # want any ambiguity around radio silence vs. real-time
+                # firing reliability. The UI gates on the same flags.
+                if not (self.protocol_handler and hasattr(self.protocol_handler, 'start_rf_scan')):
+                    print("scan_radio: protocol handler not ready.")
+                elif self.protocol_handler.show_loaded:
+                    self.write_error("scan_radio refused: a show is currently loaded. Unload first.")
+                elif self.is_armed:
+                    self.write_error("scan_radio refused: system is armed. Disarm first.")
+                else:
+                    try:
+                        passes  = int(command.get('passes', 10))
+                        ch_start = int(command.get('ch_start', 0))
+                        ch_end   = int(command.get('ch_end', 125))
+                        self.protocol_handler.start_rf_scan(
+                            passes=passes, ch_start=ch_start, ch_end=ch_end
+                        )
+                    except Exception as e:
+                        self.write_error(f"scan_radio failed: {e}")
             else:
                 print(f"Unknown command type: {command['type']}")
         else:
@@ -876,15 +959,62 @@ class FireworkDaemon:
                 "debug_mode": self.led_handler.led_states.get("debug_mode", 0),
                 "rf": {
                     "addr": self.serial_addr,
-                    "baud": self.serial_baud
+                    "baud": self.serial_baud,
+                    # Live channel from the dongle's per-second status.
+                    # None until the first dongle status arrives.
+                    "current_channel": self.current_rf_channel,
+                    # Truthy while a scan is in flight (used for UI
+                    # spinner). Cleared by the scan_result handler.
+                    "scan_pending_since_ms": self.rf_scan_pending_since_ms,
+                    # Compact last-scan summary; the full per-channel
+                    # bins live in /data/last_scan.json.
+                    "last_scan": self.last_rf_scan_summary,
                 }
             }
         }
+        # Atomic write: serialize to a sibling tempfile in the same directory,
+        # then os.replace() it over the real path. POSIX rename(2) is atomic,
+        # so any reader (WS server, UI HTTP handlers, ...) sees either the
+        # previous complete file or the new one — never the empty/partial
+        # intermediate state that `open(path, "w")` produces between truncate
+        # and write.
+        #
+        # We use mkstemp() to get a UNIQUE tmp path because two threads call
+        # this method (monitor_switch every 100ms + poll_command_dir after
+        # each command). A shared tmp path causes the loser of the
+        # truncate-then-replace race to see ENOENT on os.replace(). Per-call
+        # unique tmp files let both writers finish independently; whichever
+        # replace() runs last just wins as the published snapshot, which is
+        # exactly what we want.
+        state_dir = os.path.dirname(STATE_FILE_PATH) or "."
+        tmp_fd = None
+        tmp_path = None
         try:
-            with open(STATE_FILE_PATH, "w") as state_file:
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                prefix=".state.", suffix=".tmp", dir=state_dir
+            )
+            with os.fdopen(tmp_fd, "w") as state_file:
+                tmp_fd = None  # ownership passed to the file object
                 json.dump(state, state_file, indent=4)
+                state_file.flush()
+                os.fsync(state_file.fileno())
+            os.replace(tmp_path, STATE_FILE_PATH)
+            tmp_path = None  # successfully published, nothing to clean up
         except Exception as e:
             print(f"Error updating state file: {e}")
+        finally:
+            # If anything went wrong before/after the replace, make sure we
+            # don't leak the tempfile.
+            if tmp_fd is not None:
+                try:
+                    os.close(tmp_fd)
+                except Exception:
+                    pass
+            if tmp_path is not None and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
     def stop(self):
         """Stop the daemon."""

@@ -1,7 +1,10 @@
 import Database from 'better-sqlite3';
 const path = require('path');
+const fs = require('fs');
 
 const db = new Database('/data/backyardhero.db', { verbose: console.log });
+
+const SYSTEM_CFG_PATH = '/config/systemcfg.json';
 
 /**
  * Legacy DBs used CHECK(type IN ('CAKE_FOUNTAIN', ...)) which blocks new types.
@@ -117,6 +120,25 @@ function initializeDatabase() {
     );
   `;
 
+  // Receivers: source of truth for the dongle's poll list. The daemon reads
+  // from this table on startup and on reload_receivers commands. The id is
+  // the receiver ident (e.g. "RX163"); cues_data and metadata are JSON blobs;
+  // configuration_version is bumped on every UPDATE so other components can
+  // trivially detect changes.
+  const createReceiversTable = `
+    CREATE TABLE IF NOT EXISTS Receivers (
+      id TEXT PRIMARY KEY NOT NULL,
+      label TEXT NOT NULL,
+      type TEXT NOT NULL,
+      cues_data TEXT NOT NULL DEFAULT '{}', -- JSON: { "<zoneName>": [1,2,3,...] }
+      enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+      metadata TEXT NOT NULL DEFAULT '{}', -- JSON: any extra fields
+      configuration_version INTEGER NOT NULL DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+    );
+  `;
+
   try {
     db.exec(createShowTable);
     console.log("Checked/created Show table.");
@@ -188,8 +210,66 @@ function initializeDatabase() {
         console.error("Error adding show_id column:", err.message);
       }
     }
+
+    db.exec(createReceiversTable);
+    console.log("Checked/created Receivers table.");
+    seedReceiversFromSystemCfgIfEmpty();
   } catch (err) {
     console.error("Error initializing database tables:", err.message);
+  }
+}
+
+/**
+ * Legacy-install migration: when the Receivers table is brand-new (empty)
+ * AND systemcfg.json still has a `receivers` block (pre-DB schema), copy
+ * each entry into the table so older deployments upgrade transparently.
+ *
+ * For new installs systemcfg.json no longer contains a `receivers` block,
+ * so this function silently no-ops on a fresh DB. The Receivers SQL table
+ * is the only source of truth going forward.
+ */
+function seedReceiversFromSystemCfgIfEmpty() {
+  try {
+    const { count } = db.prepare(`SELECT COUNT(*) AS count FROM Receivers`).get();
+    if (count > 0) return;
+
+    if (!fs.existsSync(SYSTEM_CFG_PATH)) {
+      console.log(`No ${SYSTEM_CFG_PATH} to seed Receivers from; starting empty.`);
+      return;
+    }
+
+    const raw = fs.readFileSync(SYSTEM_CFG_PATH, 'utf-8');
+    const cfg = JSON.parse(raw);
+    const legacy = cfg && cfg.receivers ? cfg.receivers : {};
+    const idents = Object.keys(legacy);
+    if (idents.length === 0) {
+      console.log("systemcfg.json has no receivers to seed.");
+      return;
+    }
+
+    const insert = db.prepare(`
+      INSERT INTO Receivers (id, label, type, cues_data, enabled, metadata, configuration_version)
+      VALUES (?, ?, ?, ?, 1, ?, 1)
+    `);
+    const seedTx = db.transaction((items) => {
+      for (const [ident, def] of items) {
+        const label = (def && def.label) ? String(def.label) : ident;
+        const type = (def && def.type) ? String(def.type) : 'BKYD_TS_24_1';
+        const cues = (def && def.cues) ? def.cues : { [ident]: [] };
+        // metadata = anything in the legacy entry that isn't one of the first-class columns
+        const meta = {};
+        if (def) {
+          for (const k of Object.keys(def)) {
+            if (k !== 'label' && k !== 'type' && k !== 'cues') meta[k] = def[k];
+          }
+        }
+        insert.run(ident, label, type, JSON.stringify(cues), JSON.stringify(meta));
+      }
+    });
+    seedTx(Object.entries(legacy));
+    console.log(`Seeded ${idents.length} receiver(s) from systemcfg.json into the Receivers table.`);
+  } catch (err) {
+    console.error("Failed to seed Receivers from systemcfg.json:", err.message);
   }
 }
 
@@ -228,4 +308,84 @@ export const rackQueries = {
   getById: db.prepare(`SELECT * FROM racks WHERE id = ?`),
   update: db.prepare(`UPDATE racks SET name = ?, x_rows = ?, x_spacing = ?, y_rows = ?, y_spacing = ?, cells = ?, fuses = ? WHERE id = ?`),
   delete: db.prepare(`DELETE FROM racks WHERE id = ?`),
+};
+
+/** RECEIVERS TABLE OPERATIONS
+ *
+ * The Receivers table is the single source of truth for which receivers the
+ * dongle should know about. A row's `enabled` flag controls whether the
+ * daemon pushes it to the dongle's poll list. `configuration_version` is
+ * bumped on every update so the daemon (or any client) can detect changes
+ * cheaply.
+ *
+ * Helper accessors below return rows with `cues_data` and `metadata` parsed
+ * to JS objects so callers don't have to remember.
+ */
+const _receiverStmts = {
+  getAll: db.prepare(`SELECT * FROM Receivers ORDER BY id`),
+  getById: db.prepare(`SELECT * FROM Receivers WHERE id = ?`),
+  insert: db.prepare(`
+    INSERT INTO Receivers (id, label, type, cues_data, enabled, metadata, configuration_version)
+    VALUES (?, ?, ?, ?, ?, ?, 1)
+  `),
+  // The COALESCE-with-current-row pattern lets callers PATCH any subset of
+  // columns without clobbering the others. configuration_version bumps on
+  // every update.
+  update: db.prepare(`
+    UPDATE Receivers SET
+      label = COALESCE(?, label),
+      type = COALESCE(?, type),
+      cues_data = COALESCE(?, cues_data),
+      enabled = COALESCE(?, enabled),
+      metadata = COALESCE(?, metadata),
+      configuration_version = configuration_version + 1,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `),
+  delete: db.prepare(`DELETE FROM Receivers WHERE id = ?`),
+};
+
+function _hydrateReceiverRow(row) {
+  if (!row) return null;
+  let cues = {};
+  let metadata = {};
+  try { cues = row.cues_data ? JSON.parse(row.cues_data) : {}; } catch { cues = {}; }
+  try { metadata = row.metadata ? JSON.parse(row.metadata) : {}; } catch { metadata = {}; }
+  return {
+    ...row,
+    enabled: row.enabled === 1,
+    cues_data: cues,
+    metadata,
+  };
+}
+
+export const receiverQueries = {
+  getAll: () => _receiverStmts.getAll.all().map(_hydrateReceiverRow),
+  getById: (id) => _hydrateReceiverRow(_receiverStmts.getById.get(id)),
+  insert: ({ id, label, type, cues_data = {}, enabled = true, metadata = {} }) => {
+    return _receiverStmts.insert.run(
+      id,
+      label || id,
+      type,
+      JSON.stringify(cues_data),
+      enabled ? 1 : 0,
+      JSON.stringify(metadata),
+    );
+  },
+  /**
+   * Patch-style update. Pass only the fields you want to change; pass
+   * undefined for any field to leave it alone. Returns the run() result
+   * (with `.changes`).
+   */
+  update: (id, { label, type, cues_data, enabled, metadata } = {}) => {
+    return _receiverStmts.update.run(
+      label === undefined ? null : label,
+      type === undefined ? null : type,
+      cues_data === undefined ? null : JSON.stringify(cues_data),
+      enabled === undefined ? null : (enabled ? 1 : 0),
+      metadata === undefined ? null : JSON.stringify(metadata),
+      id,
+    );
+  },
+  delete: (id) => _receiverStmts.delete.run(id),
 };

@@ -182,6 +182,12 @@ const useAppStore = create((set, get) => ({
     try {
       const { data } = await axios.get('/api/system/config');
       set({ systemConfig: data });
+      // Mirror the receivers block (already overlaid from DB by the API) into
+      // the dedicated `receivers` slice so the receivers admin UI doesn't
+      // need a second round-trip.
+      if (data && data.receivers) {
+        set({ receivers: data.receivers });
+      }
     } catch (error) {
       console.error('Failed to fetch system Config:', error);
     }
@@ -200,6 +206,119 @@ const useAppStore = create((set, get) => ({
 
   setSystemConfig: (Config) => {
     set({ systemConfig: Config });
+  },
+
+  // ---------------------------------------------------------------------------
+  // Receivers (DB-backed). The Receivers SQL table is the source of truth.
+  // `receivers` is keyed by ident (e.g. "RX163") for fast lookup and to match
+  // the legacy systemConfig.receivers shape.
+  // ---------------------------------------------------------------------------
+  receivers: {},
+
+  fetchReceivers: async () => {
+    try {
+      const { data } = await axios.get('/api/receivers');
+      const byId = {};
+      for (const row of data) {
+        byId[row.id] = {
+          label: row.label,
+          type: row.type,
+          cues: row.cues_data || {},
+          enabled: !!row.enabled,
+          metadata: row.metadata || {},
+          configuration_version: row.configuration_version,
+        };
+      }
+      set({ receivers: byId });
+      return byId;
+    } catch (error) {
+      console.error('Failed to fetch receivers:', error);
+      return {};
+    }
+  },
+
+  /**
+   * Create a new receiver row. `data` must include at least { id, type }; the
+   * label defaults to the id, cues_data to a sensible single-zone shape, and
+   * enabled to true. Returns the inserted row on success and throws on
+   * conflict / validation errors so the UI can surface them.
+   */
+  createReceiver: async (data) => {
+    try {
+      const { data: row } = await axios.post('/api/receivers', data);
+      set((state) => ({
+        receivers: {
+          ...state.receivers,
+          [row.id]: {
+            label: row.label,
+            type: row.type,
+            cues: row.cues_data || {},
+            enabled: !!row.enabled,
+            metadata: row.metadata || {},
+            configuration_version: row.configuration_version,
+          },
+        },
+      }));
+      return row;
+    } catch (error) {
+      console.error('Failed to create receiver:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * PATCH a single receiver. `patch` may include any of: label, type,
+   * cues_data, enabled, metadata. Updates local state on success.
+   */
+  updateReceiver: async (id, patch) => {
+    try {
+      const { data } = await axios.patch(`/api/receivers/${id}`, patch);
+      set((state) => ({
+        receivers: {
+          ...state.receivers,
+          [id]: {
+            label: data.label,
+            type: data.type,
+            cues: data.cues_data || {},
+            enabled: !!data.enabled,
+            metadata: data.metadata || {},
+            configuration_version: data.configuration_version,
+          },
+        },
+      }));
+      return data;
+    } catch (error) {
+      console.error(`Failed to update receiver ${id}:`, error);
+      throw error;
+    }
+  },
+
+  /**
+   * Tell the daemon (and ultimately the dongle) to re-read the Receivers
+   * table and reconcile its in-memory poll list. Call this after one or more
+   * updateReceiver() calls.
+   */
+  reloadReceiversOnDaemon: async () => {
+    try {
+      await axios.post('/api/receivers/reload');
+    } catch (error) {
+      console.error('Failed to send reload_receivers command:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Force the daemon to re-issue registration for a single receiver. Use this
+   * when a receiver was pruned by the dongle (timeout) and needs to come back
+   * without disturbing the others.
+   */
+  retryReceiver: async (id) => {
+    try {
+      await axios.post(`/api/receivers/${id}/retry`);
+    } catch (error) {
+      console.error(`Failed to send retry_receiver(${id}):`, error);
+      throw error;
+    }
   },
 }));
 

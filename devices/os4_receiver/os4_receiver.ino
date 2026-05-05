@@ -20,8 +20,8 @@
 //   * SHOW_LOADN handler (packed multi-cue load)
 #define BOARD_VERISON 9
 #define FW_VERSION 9
-#define NODE_ID 161
-const char RECEIVER_IDENT[] = "RX161";
+#define NODE_ID 157
+const char RECEIVER_IDENT[] = "RX157";
 
 const bool RECEIVER_USES_V1_CUES = false;
 
@@ -158,6 +158,13 @@ struct ReceiverStatusMessage {
   uint64_t cont64_1;
 } __attribute__((packed));
 
+// Non-blocking show-time LED animation state machine. Declared near the top
+// of the file so Arduino's auto-prototype generator sees the enum before it
+// emits prototypes for functions that reference it.
+enum AnimType { ANIM_NONE = 0, ANIM_PULSING_YELLOW, ANIM_FLASHING_PURPLE, ANIM_SMOOTH_WAVE, ANIM_SMOOTHER_SWEEP };
+AnimType currentAnim = ANIM_NONE;
+uint32_t animStartMs = 0;
+
 RF24 radio(RF24_CE_PIN, RF24_CSN_PIN);
 
 // Must match the dongle scheme. With rfSystemId == 0 (default) the addresses
@@ -199,14 +206,12 @@ uint64_t timePaused = 0;
 uint64_t syncFlashStartTime = 0;
 bool fireChanged = false;
 
-// Non-blocking show-time LED animation state machine. The boot-time animations
-// (testLEDStrip*) are still blocking — that's fine, they only run once at
-// power-up. The runtime ones used to block 1–2 seconds inside the radio loop;
-// now they're frame-driven by updateNonBlockingAnim() which the main loop
-// calls every iteration.
-enum AnimType { ANIM_NONE = 0, ANIM_PULSING_YELLOW, ANIM_FLASHING_PURPLE, ANIM_SMOOTH_WAVE, ANIM_SMOOTHER_SWEEP };
-AnimType currentAnim = ANIM_NONE;
-uint32_t animStartMs = 0;
+// (AnimType enum + state declared near the top of the file so Arduino's
+// auto-prototype generator sees it. The boot-time animations testLEDStrip*
+// are still blocking — that's fine, they only run once at power-up. The
+// runtime ones used to block 1–2 seconds inside the radio loop; now they're
+// frame-driven by updateNonBlockingAnim() which the main loop calls every
+// iteration.)
 
 void zeroTargets() {
   memset(targetTimes, 0, sizeof(targetTimes));
