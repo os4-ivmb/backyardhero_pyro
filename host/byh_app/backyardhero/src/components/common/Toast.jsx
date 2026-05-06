@@ -1,47 +1,45 @@
-import { useEffect, useState } from 'react';
-import { FaX } from 'react-icons/fa6';
+import { useEffect, useState } from "react";
+import { FaX } from "react-icons/fa6";
+import { cn } from "@/design";
 
 const Toast = ({ message, onDismiss, duration = 30000 }) => {
-  const [isVisible, setIsVisible] = useState(true);
+  const [visible, setVisible] = useState(true);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setIsVisible(false);
-      setTimeout(() => onDismiss(), 300); // Wait for fade out animation
+    const t = setTimeout(() => {
+      setVisible(false);
+      setTimeout(() => onDismiss(), 300);
     }, duration);
-
-    return () => clearTimeout(timer);
+    return () => clearTimeout(t);
   }, [duration, onDismiss]);
 
   const handleDismiss = () => {
-    setIsVisible(false);
+    setVisible(false);
     setTimeout(() => onDismiss(), 300);
   };
 
-  if (!isVisible) return null;
+  if (!visible) return null;
 
   return (
     <div
-      className={`bg-red-900 border border-red-500 text-red-100 px-4 py-3 rounded-lg shadow-lg mb-2 flex items-center justify-between min-w-[300px] max-w-[500px] transition-opacity duration-300 ${
-        isVisible ? 'opacity-100' : 'opacity-0'
-      }`}
-      style={{ zIndex: 9999 }}
+      role="status"
+      className={cn(
+        "bg-danger-bg border border-danger/60 text-danger-fg",
+        "px-3 py-2 rounded-md shadow-e3 flex items-start gap-3",
+        "min-w-[280px] max-w-[480px] transition-opacity duration-300",
+        visible ? "opacity-100" : "opacity-0"
+      )}
     >
-      <span className="flex-1 text-sm">{message}</span>
+      <span className="flex-1 text-sm leading-snug break-words">{message}</span>
       <button
         onClick={handleDismiss}
-        className="ml-4 text-red-300 hover:text-red-100 transition-colors"
+        className="text-fg-muted hover:text-fg-primary transition-colors shrink-0 mt-0.5"
         aria-label="Dismiss"
       >
-        <FaX size={14} />
+        <FaX size={12} aria-hidden />
       </button>
     </div>
   );
 };
 
 export default Toast;
-
-
-
-
-

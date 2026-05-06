@@ -48,5 +48,5 @@ ENV LED_STATE_FILE=/data/ledstate
 ENV NODE_ENV=production
 ENV PORT=1776
 
-# Start Supervisor to manage all processes
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+# Truncate persisted app logs on each container process start, then hand off to Supervisor.
+CMD ["sh", "-c", "mkdir -p /data/log && : > /data/log/command.log && : > /data/log/firing_profiles.log && : > /data/log/daemon.err && exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf"]

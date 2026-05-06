@@ -1,4 +1,16 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+
+import {
+  Modal,
+  Button,
+  Field,
+  inputClass,
+  selectClass,
+  Card,
+  Badge,
+  cn,
+} from "@/design";
+
 import FusedLineBuilderModal from "./FusedLineBuilderModal";
 
 // Inventory item types that can be a step in a FUSED_LINE.
@@ -23,9 +35,7 @@ const MULTIPLE_FIRE_TYPES = new Set([
   "AERIAL_SHELL",
 ]);
 
-// Compute the visual duration of a single step. For inventory-backed items
-// the duration field is the bar length; for FUSED_SHELL_LINE the inline
-// builder already produces its own duration.
+// Compute the visual duration of a single step.
 const stepDuration = (step) => {
   if (!step) return 0;
   return Number.isFinite(step.duration) ? step.duration : 0;
@@ -38,11 +48,10 @@ const emptyStep = () => ({
   duration: 0,
   fuseDelay: 0,
   multiple: 1,
-  fusedShellLine: null, // Holds the inline-built FUSED_SHELL_LINE if step type is that
+  fusedShellLine: null,
   unit_cost: null,
 });
 
-// Builds a step object out of a selected inventory item.
 const stepFromInventoryItem = (item, prev) => ({
   ...prev,
   type: item.type,
@@ -50,31 +59,40 @@ const stepFromInventoryItem = (item, prev) => ({
   name: item.name,
   duration: item.duration || 0,
   unit_cost: item.unit_cost ?? null,
-  // Carry over the inventory item's delay metadata so cost/firing math can
-  // see the same fields that the standalone add-item flow stores.
   fuse_delay: item.fuse_delay ?? null,
   lift_delay: item.lift_delay ?? null,
   fusedShellLine: null,
 });
 
-// Builds a step out of a finished inline FUSED_SHELL_LINE.
 const stepFromFusedShellLine = (fl, prev) => ({
   ...prev,
   type: "FUSED_SHELL_LINE",
   itemId: null,
   name: fl.name,
   duration: fl.duration || 0,
-  unit_cost: null, // Cost is summed from fl.shells in the cost util.
+  unit_cost: null,
   fusedShellLine: fl,
 });
 
-const FusedItemLineBuilderModal = ({ isOpen, onClose, onAdd, inventory, initialLine }) => {
-  const [steps, setSteps] = useState(() => (initialLine?.steps?.length ? initialLine.steps : [emptyStep()]));
+const supportsMultipleStep = (step) => MULTIPLE_FIRE_TYPES.has(step?.type);
+
+const FusedItemLineBuilderModal = ({
+  isOpen,
+  onClose,
+  onAdd,
+  inventory,
+  initialLine,
+  layer = 1,
+}) => {
+  const [steps, setSteps] = useState(() =>
+    initialLine?.steps?.length ? initialLine.steps : [emptyStep()]
+  );
   const [activeIdx, setActiveIdx] = useState(0);
-  const [draft, setDraft] = useState(() => (initialLine?.steps?.[0] || emptyStep()));
+  const [draft, setDraft] = useState(
+    () => initialLine?.steps?.[0] || emptyStep()
+  );
   const [isShellLineBuilderOpen, setShellLineBuilderOpen] = useState(false);
 
-  // Reset whenever the modal is reopened.
   useEffect(() => {
     if (isOpen) {
       const init = initialLine?.steps?.length ? initialLine.steps : [emptyStep()];
@@ -95,13 +113,12 @@ const FusedItemLineBuilderModal = ({ isOpen, onClose, onAdd, inventory, initialL
 
   const supportsMultiple = MULTIPLE_FIRE_TYPES.has(draft.type);
   const isShellLineStep = draft.type === "FUSED_SHELL_LINE";
-  const hasSelection = isShellLineStep ? !!draft.fusedShellLine : !!draft.itemId;
+  const hasSelection = isShellLineStep
+    ? !!draft.fusedShellLine
+    : !!draft.itemId;
 
-  // Compute next steps array with the current draft folded into the active slot.
-  // Done outside of any setter so we can safely apply multiple state updates
-  // off the same fresh snapshot (avoids the StrictMode double-invocation hazard
-  // that arises from calling setters inside a setSteps updater).
-  const stepsWithDraft = () => steps.map((s, i) => (i === activeIdx ? { ...draft } : s));
+  const stepsWithDraft = () =>
+    steps.map((s, i) => (i === activeIdx ? { ...draft } : s));
 
   const switchToStep = (idx) => {
     if (idx < 0 || idx >= steps.length || idx === activeIdx) return;
@@ -151,30 +168,37 @@ const FusedItemLineBuilderModal = ({ isOpen, onClose, onAdd, inventory, initialL
   };
 
   const handleShellLineCancel = () => {
-    // Just close. The step keeps `type === "FUSED_SHELL_LINE"` and the user
-    // either re-opens the inline builder via the visible "Build" button or
-    // changes the dropdown to a different type.
     setShellLineBuilderOpen(false);
   };
 
-  // Build the final FUSED_LINE payload and pass back up.
+  // Project the live state of the line for display (right-rail + total).
+  const projectedSteps = stepsWithDraft();
+  const projectedTotal = projectedSteps.reduce((sum, s, i) => {
+    const inter = i === 0 ? 0 : Math.max(0, Number(s.fuseDelay) || 0);
+    return sum + inter + stepDuration(s);
+  }, 0);
+  const validProjected = projectedSteps.filter((s) =>
+    s.type === "FUSED_SHELL_LINE" ? s.fusedShellLine : s.itemId
+  );
+  const canFinalize = validProjected.length > 0 && hasSelection;
+
   const handleFinalize = () => {
-    const finalSteps = steps.map((s, i) => (i === activeIdx ? { ...draft } : s));
-    // Drop any trailing/empty unselected steps so we don't ship a dangling row.
-    const validSteps = finalSteps.filter(
-      (s) => (s.type === "FUSED_SHELL_LINE" ? s.fusedShellLine : s.itemId)
+    const finalSteps = projectedSteps;
+    const validSteps = finalSteps.filter((s) =>
+      s.type === "FUSED_SHELL_LINE" ? s.fusedShellLine : s.itemId
     );
     if (!validSteps.length) return;
 
-    // Total duration = sum of each step's bar duration plus the inter-step
-    // fuse delays (the first step's fuseDelay rolls into the parent's `delay`).
     const totalDuration = validSteps.reduce((sum, s, i) => {
       const inter = i === 0 ? 0 : Math.max(0, Number(s.fuseDelay) || 0);
       return sum + inter + stepDuration(s);
     }, 0);
 
-    // Default name = comma-separated step names, capped to keep it short.
-    const defaultName = validSteps.map((s) => s.name).filter(Boolean).join(" + ").slice(0, 80);
+    const defaultName = validSteps
+      .map((s) => s.name)
+      .filter(Boolean)
+      .join(" + ")
+      .slice(0, 80);
 
     onAdd({
       type: "FUSED_LINE",
@@ -185,56 +209,68 @@ const FusedItemLineBuilderModal = ({ isOpen, onClose, onAdd, inventory, initialL
         name: s.name,
         duration: stepDuration(s),
         fuseDelay: Math.max(0, Number(s.fuseDelay) || 0),
-        multiple: supportsMultipleStep(s) ? Math.max(1, Math.floor(s.multiple) || 1) : 1,
+        multiple: supportsMultipleStep(s)
+          ? Math.max(1, Math.floor(s.multiple) || 1)
+          : 1,
         fuse_delay: s.fuse_delay ?? null,
         lift_delay: s.lift_delay ?? null,
         unit_cost: s.unit_cost ?? null,
         fusedShellLine: s.fusedShellLine || null,
       })),
       duration: totalDuration,
-      // The first step's fuseDelay is the wire delay from the cue to the
-      // first item's ignition; the parent's `delay` mirrors how AddItemModal
-      // composes the firing-system delay (metaDelaySec is added there).
-      firstStepFuseDelay: Math.max(0, Number(validSteps[0].fuseDelay) || 0),
+      firstStepFuseDelay: Math.max(
+        0,
+        Number(validSteps[0].fuseDelay) || 0
+      ),
     });
   };
 
   if (!isOpen) return null;
 
-  const prevStep = activeIdx > 0 ? steps[activeIdx - 1] : null;
   const stepCount = steps.length;
-
-  // Render "x{N}" badge text only for steps that fire >1 physical units. The
-  // active row reads from `draft` so the badge updates live as the user edits.
   const multipleLabel = (step, isActive) => {
     const n = isActive ? draft.multiple : step?.multiple;
-    return Number.isFinite(n) && n > 1 ? ` x${n}` : "";
+    return Number.isFinite(n) && n > 1 ? `×${n}` : null;
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-      <div className="bg-gray-800 text-white p-6 rounded shadow-lg w-[640px] relative z-50">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl">
-            Fused Line Builder — Step {activeIdx + 1} of {stepCount}
-          </h2>
-          {prevStep && (
-            <button
-              className="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded text-sm"
-              onClick={() => switchToStep(activeIdx - 1)}
-              title="Go back to previous step"
+    <>
+      <Modal
+        isOpen={isOpen}
+        onClose={() => onClose(true)}
+        title="Fused line builder"
+        eyebrow={`Step ${activeIdx + 1} of ${stepCount} · Total ${projectedTotal.toFixed(2)}s`}
+        size="3xl"
+        layer={layer}
+        bodyClassName="px-5 py-4"
+        footerStart={
+          activeIdx > 0 ? (
+            <Button variant="danger" size="sm" onClick={handleDeleteStep}>
+              Delete step
+            </Button>
+          ) : null
+        }
+        footer={
+          <>
+            <Button variant="outline" onClick={() => onClose(true)}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              onClick={handleFinalize}
+              disabled={!canFinalize}
             >
-              ← {prevStep.name || `Step ${activeIdx}`}{multipleLabel(prevStep, false)}
-            </button>
-          )}
-        </div>
-
-        <div className="grid grid-cols-3 gap-4">
-          <div className="col-span-2 space-y-4">
-            <div>
-              <label className="block mb-1 text-sm">Type:</label>
+              Accept line
+            </Button>
+          </>
+        }
+      >
+        <div className="grid grid-cols-3 gap-5">
+          {/* Left: editor for the active step */}
+          <div className="col-span-2 flex flex-col gap-4">
+            <Field label="Step type">
               <select
-                className="w-full p-2 bg-gray-700 rounded"
+                className={selectClass}
                 value={draft.type}
                 onChange={(e) => handleTypeChange(e.target.value)}
               >
@@ -244,174 +280,226 @@ const FusedItemLineBuilderModal = ({ isOpen, onClose, onAdd, inventory, initialL
                   </option>
                 ))}
               </select>
-            </div>
+            </Field>
 
             {!isShellLineStep && (
-              <div>
-                <label className="block mb-1 text-sm">Item:</label>
-                <ul className="h-32 overflow-y-auto bg-gray-700 p-2 rounded">
-                  {filteredInventory.length === 0 && (
-                    <li className="text-gray-400 text-sm p-2">No inventory of this type.</li>
-                  )}
-                  {filteredInventory.map((item) => (
-                    <li
-                      key={item.id}
-                      className={`p-2 rounded cursor-pointer ${
-                        draft.itemId === item.id ? "bg-blue-500" : "hover:bg-gray-600"
-                      }`}
-                      onClick={() => handleItemSelected(item)}
-                    >
-                      {item.name} ({item.duration} sec)
-                    </li>
-                  ))}
-                </ul>
-              </div>
+              <Field
+                label="Item"
+                hint={
+                  filteredInventory.length === 0
+                    ? "No inventory of this type."
+                    : `${filteredInventory.length} matching item${filteredInventory.length === 1 ? "" : "s"}`
+                }
+              >
+                <Card tone="inset" padding="none">
+                  <ul className="max-h-44 overflow-y-auto py-1">
+                    {filteredInventory.length === 0 && (
+                      <li className="px-3 py-2 text-sm text-fg-muted">
+                        Add some in the Inventory page first.
+                      </li>
+                    )}
+                    {filteredInventory.map((item) => {
+                      const selected = draft.itemId === item.id;
+                      return (
+                        <li
+                          key={item.id}
+                          className={cn(
+                            "px-3 py-1.5 cursor-pointer text-sm flex items-center justify-between gap-3",
+                            "transition-colors",
+                            selected
+                              ? "bg-accent-muted text-accent-fg"
+                              : "hover:bg-surface-3 text-fg-primary"
+                          )}
+                          onClick={() => handleItemSelected(item)}
+                        >
+                          <span className="truncate">{item.name}</span>
+                          <span className="num text-2xs text-fg-muted shrink-0">
+                            {Number(item.duration || 0).toFixed(1)}s
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </Card>
+              </Field>
             )}
 
             {isShellLineStep && (
-              <div className="p-3 bg-gray-700 rounded">
+              <Card tone="inset" padding="md">
                 {draft.fusedShellLine ? (
-                  <div>
-                    <p className="text-sm">
-                      <strong>Fused Shell Line:</strong> {draft.fusedShellLine.name}
-                    </p>
-                    <p className="text-xs text-gray-300">
-                      {draft.fusedShellLine.shells?.length || 0} shells · {draft.fusedShellLine.duration?.toFixed(2)}s
-                    </p>
-                    <button
-                      className="mt-2 bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-xs"
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="eyebrow mb-1">Fused shell line</div>
+                      <div className="text-sm font-medium text-fg-primary truncate">
+                        {draft.fusedShellLine.name}
+                      </div>
+                      <div className="text-2xs text-fg-muted mt-0.5 num">
+                        {draft.fusedShellLine.shells?.length || 0} shells ·{" "}
+                        {draft.fusedShellLine.duration?.toFixed(2)}s
+                      </div>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
                       onClick={() => setShellLineBuilderOpen(true)}
                     >
-                      Edit Fused Shell Line
-                    </button>
+                      Edit
+                    </Button>
                   </div>
                 ) : (
-                  <button
-                    className="bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-sm"
-                    onClick={() => setShellLineBuilderOpen(true)}
-                  >
-                    Build Fused Shell Line
-                  </button>
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm text-fg-secondary">
+                      Build the fused shell line for this step.
+                    </p>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      onClick={() => setShellLineBuilderOpen(true)}
+                    >
+                      Build
+                    </Button>
+                  </div>
                 )}
-              </div>
+              </Card>
             )}
 
             {supportsMultiple && hasSelection && (
-              <div>
-                <label className="flex items-center space-x-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={(draft.multiple || 1) > 1}
-                    onChange={(e) =>
-                      setDraft((d) => ({
-                        ...d,
-                        multiple: e.target.checked ? Math.max(2, d.multiple || 2) : 1,
-                      }))
-                    }
-                  />
-                  <span>Fire Multiple</span>
-                </label>
-                {(draft.multiple || 1) > 1 && (
-                  <input
-                    type="number"
-                    min={2}
-                    step={1}
-                    className="mt-2 w-full p-2 bg-gray-700 rounded text-white"
-                    value={draft.multiple}
-                    onChange={(e) => {
-                      const v = parseInt(e.target.value, 10);
-                      setDraft((d) => ({ ...d, multiple: Number.isFinite(v) && v >= 2 ? v : 2 }));
-                    }}
-                  />
-                )}
-              </div>
+              <Field
+                label="Fire multiple"
+                hint="How many physical units fire together on this step."
+              >
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-2 text-sm text-fg-secondary cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={(draft.multiple || 1) > 1}
+                      onChange={(e) =>
+                        setDraft((d) => ({
+                          ...d,
+                          multiple: e.target.checked
+                            ? Math.max(2, d.multiple || 2)
+                            : 1,
+                        }))
+                      }
+                    />
+                    <span>Multiple per step</span>
+                  </label>
+                  {(draft.multiple || 1) > 1 && (
+                    <input
+                      type="number"
+                      min={2}
+                      step={1}
+                      className={inputClass + " w-24"}
+                      value={draft.multiple}
+                      onChange={(e) => {
+                        const v = parseInt(e.target.value, 10);
+                        setDraft((d) => ({
+                          ...d,
+                          multiple: Number.isFinite(v) && v >= 2 ? v : 2,
+                        }));
+                      }}
+                    />
+                  )}
+                </div>
+              </Field>
             )}
 
-            <div>
-              <label className="block mb-1 text-sm">
-                {activeIdx === 0
-                  ? "Fuse Delay from Cue (sec):"
-                  : "Fuse Delay from End of Previous (sec):"}
-              </label>
+            <Field
+              label={
+                activeIdx === 0
+                  ? "Fuse delay from cue (sec)"
+                  : "Fuse delay from end of previous (sec)"
+              }
+              hint={
+                activeIdx === 0
+                  ? "Time for the lead-in fuse to reach the first item."
+                  : "Time for the inter-step fuse to ignite this step after the previous step ends."
+              }
+            >
               <input
                 type="number"
                 min="0"
                 step="0.01"
-                className="w-full p-2 bg-gray-700 rounded text-white"
+                className={inputClass}
                 value={draft.fuseDelay}
                 onChange={(e) =>
-                  setDraft((d) => ({ ...d, fuseDelay: Math.max(0, parseFloat(e.target.value) || 0) }))
+                  setDraft((d) => ({
+                    ...d,
+                    fuseDelay: Math.max(0, parseFloat(e.target.value) || 0),
+                  }))
                 }
               />
-            </div>
+            </Field>
           </div>
 
-          {/* Right rail: step list + Add Another */}
-          <div className="space-y-3">
-            <div className="bg-gray-900 rounded p-2 text-xs">
-              <div className="font-bold mb-1 text-gray-300">Line</div>
-              <ol className="space-y-1">
+          {/* Right rail: step list + add another */}
+          <aside className="flex flex-col gap-3">
+            <div className="eyebrow">Line</div>
+            <Card tone="inset" padding="none">
+              <ol className="flex flex-col py-1">
                 {steps.map((s, i) => {
                   const isActive = i === activeIdx;
                   const label = isActive ? draft.name : s.name;
                   const dur = isActive ? stepDuration(draft) : stepDuration(s);
+                  const mult = multipleLabel(s, isActive);
                   return (
                     <li
                       key={i}
-                      className={`flex items-center justify-between p-1 rounded cursor-pointer ${
-                        isActive ? "bg-blue-700" : "hover:bg-gray-700"
-                      }`}
+                      className={cn(
+                        "flex items-center justify-between gap-2 px-3 py-1.5 cursor-pointer text-sm transition-colors",
+                        isActive
+                          ? "bg-accent-muted text-accent-fg"
+                          : "text-fg-secondary hover:bg-surface-3"
+                      )}
                       onClick={() => switchToStep(i)}
                     >
-                      <span className="truncate">
-                        {i + 1}. {label || "(unselected)"}{multipleLabel(s, isActive)}
+                      <span className="flex items-center gap-2 min-w-0">
+                        <Badge
+                          tone={isActive ? "accent" : "neutral"}
+                          size="xs"
+                        >
+                          {i + 1}
+                        </Badge>
+                        <span className="truncate">
+                          {label || (
+                            <span className="italic text-fg-muted">
+                              unselected
+                            </span>
+                          )}
+                        </span>
+                        {mult ? (
+                          <span className="num text-2xs text-fg-muted">
+                            {mult}
+                          </span>
+                        ) : null}
                       </span>
-                      <span className="text-gray-400 ml-2">{dur.toFixed(1)}s</span>
+                      <span className="num text-2xs text-fg-muted shrink-0">
+                        {dur.toFixed(1)}s
+                      </span>
                     </li>
                   );
                 })}
               </ol>
-            </div>
-            <button
-              className={`w-full px-3 py-2 rounded ${
-                hasSelection ? "bg-green-600 hover:bg-green-700" : "bg-gray-600 cursor-not-allowed"
-              }`}
+            </Card>
+            <Button
+              variant="subtle"
               onClick={handleAddAnother}
               disabled={!hasSelection}
+              title={
+                hasSelection
+                  ? "Append another step after this one"
+                  : "Pick an item for this step first"
+              }
             >
-              Add another after
-            </button>
-          </div>
+              + Add another after
+            </Button>
+            <div className="text-2xs text-fg-muted leading-snug">
+              Click any step to edit it. The line fires top-to-bottom; each
+              row's delay starts when the previous row ends.
+            </div>
+          </aside>
         </div>
-
-        {/* Bottom action row */}
-        <div className="flex justify-between items-center mt-6">
-          <div>
-            {activeIdx > 0 && (
-              <button
-                className="bg-red-700 hover:bg-red-800 px-3 py-2 rounded text-sm"
-                onClick={handleDeleteStep}
-              >
-                Delete Step
-              </button>
-            )}
-          </div>
-          <div className="flex gap-2">
-            <button className="bg-gray-600 hover:bg-gray-700 px-4 py-2 rounded" onClick={() => onClose(true)}>
-              Cancel
-            </button>
-            <button
-              className={`px-4 py-2 rounded ${
-                hasSelection ? "bg-blue-600 hover:bg-blue-700" : "bg-gray-600 cursor-not-allowed"
-              }`}
-              onClick={handleFinalize}
-              disabled={!hasSelection}
-            >
-              Accept Line
-            </button>
-          </div>
-        </div>
-      </div>
+      </Modal>
 
       {/* Inline FUSED_SHELL_LINE builder for FUSED_SHELL_LINE-typed steps */}
       {isShellLineBuilderOpen && (
@@ -420,13 +508,12 @@ const FusedItemLineBuilderModal = ({ isOpen, onClose, onAdd, inventory, initialL
           onClose={handleShellLineCancel}
           onAdd={handleShellLineAdd}
           inventory={inventory}
+          layer={layer + 1}
         />
       )}
-    </div>
+    </>
   );
 };
-
-const supportsMultipleStep = (step) => MULTIPLE_FIRE_TYPES.has(step?.type);
 
 export default FusedItemLineBuilderModal;
 export { FUSED_LINE_STEP_TYPES, MULTIPLE_FIRE_TYPES as FUSED_LINE_MULTIPLE_TYPES };

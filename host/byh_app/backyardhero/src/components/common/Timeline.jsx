@@ -1,7 +1,9 @@
 import { INV_COLOR_CODE } from "@/constants";
 import React, { useState, useRef, memo, useEffect } from "react";
 import { FaTrash } from "react-icons/fa6";
+import { FiZoomIn, FiZoomOut } from "react-icons/fi";
 import axios from "axios";
+import { cn } from "@/design";
 
 const Timeline = memo((props) => {
   const [zoom, setZoom] = useState(40); // Zoom level
@@ -271,7 +273,17 @@ const Timeline = memo((props) => {
     }
   }, [items, inventory.length]);
 
-  const tickInterval = zoom >= 3 ? (zoom >= 40 ? (zoom >= 200 ? 0.5 : 1) : 10) : 60; // Use 10-second ticks at high zoom, 1-minute ticks at low zoom
+  // Major/minor tick hierarchy. The previous implementation drew a single
+  // dense grid which created the "visual vibration" called out in the brief.
+  // Now we render minor ticks faintly (or not at all at low zooms) and
+  // major ticks slightly stronger with labels.
+  const tickConfig = (() => {
+    if (zoom >= 200) return { minor: 0.5, major: 5  };
+    if (zoom >= 40)  return { minor: 1,   major: 10 };
+    if (zoom >= 3)   return { minor: 10,  major: 60 };
+    return                  { minor: 60,  major: 300 };
+  })();
+  const tickInterval = tickConfig.minor;
 
   const handleItemClick = (e, item) => {
     if (isReadOnly) return;
@@ -308,120 +320,142 @@ const Timeline = memo((props) => {
     }
   };
 
+  // Minor ticks are drawn very faintly; major ticks are slightly stronger
+  // with labels. The first major label always renders, subsequent labels
+  // only render at multiples of `tickConfig.major` so we don't have label
+  // pile-ups at low zoom.
+  const tickCount = Math.ceil(maxTime / tickInterval) + 1;
   return (
-    <div className="w-full container">
-      {/* Zoom Controls */}
-      <div className="flex items-center mb-2 gap-2">
-        <button
-          className="bg-gray-700 text-white px-2 py-1 rounded hover:bg-gray-600"
-          onClick={handleZoomOut}
-          title="Zoom Out"
-        >
-          -
-        </button>
-        <span className="text-xs text-gray-300">Zoom: {zoom.toFixed(1)}x</span>
-        <button
-          className="bg-gray-700 text-white px-2 py-1 rounded hover:bg-gray-600"
-          onClick={handleZoomIn}
-          title="Zoom In"
-        >
-          +
-        </button>
-      </div>
-      {/* Ticks container */}
-      { isReadOnly ? '' : (
-        <div 
-          className="m-1 p-2 flex" 
-          onDragEnter={(e)=>{e.preventDefault()}} 
-          onDragOver={(e)=>{e.preventDefault()}} 
-          onDrop={handleRemoveEl}
+    <div className="w-full">
+      {/* Zoom controls -- compact, consistent with the rest of the chrome. */}
+      <div className="flex items-center justify-between gap-3 px-3 h-9 bg-surface-1 border-b border-border-subtle">
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={handleZoomOut}
+            title="Zoom out"
+            className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-fg-secondary hover:text-fg-primary hover:bg-surface-3"
           >
-            <FaTrash/>
-            <p className="text-sm ml-2">Drag items here to remove</p>
-
+            <FiZoomOut aria-hidden />
+          </button>
+          <span className="eyebrow w-12 text-center num">
+            {zoom.toFixed(1)}×
+          </span>
+          <button
+            type="button"
+            onClick={handleZoomIn}
+            title="Zoom in"
+            className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-fg-secondary hover:text-fg-primary hover:bg-surface-3"
+          >
+            <FiZoomIn aria-hidden />
+          </button>
         </div>
-      )}
+        {!isReadOnly && (
+          <div
+            onDragEnter={(e) => e.preventDefault()}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={handleRemoveEl}
+            className="flex items-center gap-2 text-xs text-fg-muted hover:text-danger hover:bg-danger/10 px-2 h-7 rounded-sm border border-dashed border-border-subtle"
+          >
+            <FaTrash aria-hidden />
+            <span>Drag items here to remove</span>
+          </div>
+        )}
+      </div>
+
+      {/* Ruler -- thin, single-line, only major-tick labels. */}
       <div
         ref={ticksRef}
-        className="relative w-full h-8 overflow-hidden bg-gray-900"
+        className="relative w-full h-7 overflow-hidden bg-surface-inset border-b border-border-subtle"
       >
-        <div
-          className="relative h-full"
-          style={{
-            width: `${100 * zoom}%`, // Dynamically adjust width based on zoom
-          }}
-        >
-          {Array.from(
-            { length: Math.ceil(maxTime / tickInterval) + 1 },
-            (_, i) => (
+        <div className="relative h-full" style={{ width: `${100 * zoom}%` }}>
+          {Array.from({ length: tickCount }, (_, i) => {
+            const t = i * tickInterval;
+            const isMajor = (t % tickConfig.major) === 0;
+            return (
               <div
                 key={i}
-                className="absolute h-full border-l border-gray-600"
-                style={{
-                  left: `${(i * tickInterval) / maxTime * 100}%`,
-                }}
+                className="absolute top-0 bottom-0"
+                style={{ left: `${(t / maxTime) * 100}%` }}
               >
-                <span className="text-xs text-gray-400 absolute top-1 left-0">
-                  {formatTime(i * tickInterval)}
-                </span>
+                <div
+                  className={cn(
+                    "w-px h-full",
+                    isMajor ? "bg-border" : "bg-border-subtle/60"
+                  )}
+                />
+                {isMajor ? (
+                  <span className="absolute top-1 left-1 text-[10px] text-fg-muted num font-mono whitespace-nowrap">
+                    {formatTime(t)}
+                  </span>
+                ) : null}
               </div>
-            )
-          )}
+            );
+          })}
         </div>
       </div>
 
-      {/* Timeline container */}
+      {/* Timeline body -- low-contrast grid; cursor is a thin accent line. */}
       <div
         ref={timelineRef}
-        className={`relative w-full h-64 overflow-x-scroll border bg-gray-900 ${
-          props.copyMode
-            ? "border-emerald-500"
-            : "border-gray-700"
-        }`}
+        className={cn(
+          "relative w-full h-64 overflow-x-scroll bg-surface-inset",
+          props.copyMode && "ring-1 ring-inset ring-accent"
+        )}
         style={{
           cursor:
             props.copyMode === "select-position"
               ? "crosshair"
               : props.copyMode === "select-source"
-                ? "copy"
-                : undefined,
+              ? "copy"
+              : undefined,
         }}
         onWheel={handleWheel}
-        onDragOver={isReadOnly ? (()=>{}) : handleDragOver}
-        onDrop={isReadOnly ? (()=>{}) : handleDrop}
+        onDragOver={isReadOnly ? () => {} : handleDragOver}
+        onDrop={isReadOnly ? () => {} : handleDrop}
         onScroll={handleScroll}
-        onDoubleClick={isReadOnly ? (()=>{}) : handleDoubleClick}
+        onDoubleClick={isReadOnly ? () => {} : handleDoubleClick}
         onClick={handleTimelineClick}
       >
-        {/* Timeline background */}
-        <div
-          className="relative h-full"
-          style={{
-            width: `${100 * zoom}%`, // Dynamically adjust width based on zoom
-          }}
-        >
-          {/* Time markers (extend lines into the timeline) */}
-          {Array.from(
-            { length: Math.ceil(maxTime / tickInterval) + 1 },
-            (_, i) => (
+        <div className="relative h-full" style={{ width: `${100 * zoom}%` }}>
+          {/* Major/minor grid behind items. Drawn as 1-px columns so they
+              don't overlap into a "wall" the way border-left did. */}
+          {Array.from({ length: tickCount }, (_, i) => {
+            const t = i * tickInterval;
+            const isMajor = (t % tickConfig.major) === 0;
+            // At very low zoom we'd otherwise get hundreds of minor ticks
+            // packed into 1px each which produces moire. Skip non-majors
+            // when zoom is < 1.5.
+            if (!isMajor && zoom < 1.5) return null;
+            return (
               <div
                 key={i}
-                className="absolute top-0 h-full border-l border-gray-600"
-                style={{
-                  left: `${(i * tickInterval) / maxTime * 100}%`,
-                }}
-              ></div>
-            )
-          )}
+                className={cn(
+                  "absolute top-0 bottom-0 w-px pointer-events-none",
+                  isMajor ? "bg-border-subtle/80" : "bg-border-subtle/30"
+                )}
+                style={{ left: `${(t / maxTime) * 100}%` }}
+              />
+            );
+          })}
 
           {props.timeCursor ? (
             <div
-              className="absolute top-0 h-full border-l border-green-300"
+              className="absolute top-0 h-full pointer-events-none"
               style={{
-                left: `${props.timeCursor / maxTime * 100}%`,
+                left: `${(props.timeCursor / maxTime) * 100}%`,
+                width: "0px",
+                borderLeft: "1px solid rgb(var(--accent))",
+                boxShadow: "0 0 6px rgb(var(--accent) / 0.5)",
+                zIndex: 5,
               }}
-            ></div>
-          ) : ''}
+            >
+              <span
+                className="absolute top-0 -translate-x-1/2 w-2 h-2 rotate-45 bg-accent"
+                aria-hidden
+              />
+            </div>
+          ) : null}
 
           {/* Items */}
           {stackedItems.flat().map((item) => {
@@ -430,6 +464,9 @@ const Timeline = memo((props) => {
             const top = stackedItems.findIndex((stack) =>
               stack.includes(item)
             );
+            // If the bar is too narrow to hold text, float the label just
+            // outside the bar so short shell/rack cues remain identifiable.
+            const isShortDurationItem = item.duration * zoom < 80;
 
             // Check if item is selected
             const selectedItems = props.selectedItems || [];
@@ -595,32 +632,59 @@ const Timeline = memo((props) => {
 
             return (
               <React.Fragment key={item.id}>
-                {/* Main bar */}
+                {/* Main bar -- calmer; lower-contrast colour fill, label
+                    only when the bar is wide enough to fit it. */}
                 <div
-                  className={`absolute text-white text-xs rounded px-2 py-1 cursor-move drop-shadow-xs ${
-                    isSelected ? 'ring-2 ring-blue-400 ring-opacity-75' : ''
-                  }`}
+                  className={cn(
+                    "absolute h-6 cursor-move overflow-hidden rounded-sm transition-shadow",
+                    isSelected
+                      ? "ring-2 ring-accent ring-offset-1 ring-offset-surface-inset"
+                      : "shadow-e2"
+                  )}
                   style={{
                     left: `${start}%`,
                     width: `${width}%`,
-                    top: `${top * 40 + 20}px`, // Add padding above items
-                    transform: `scaleX(1)`, // Adjust width scaling with zoom
-                    transformOrigin: "left center",
-                    backgroundColor: (INV_COLOR_CODE[item.type] || '#888888')+"CC",
-                    textShadow: "0px 0px 3px black",
-                    border: isSelected ? '2px solid #60A5FA' : 'none'
+                    top: `${top * 40 + 20}px`,
+                    backgroundColor: (INV_COLOR_CODE[item.type] || "#5a6470") + "B3",
+                    borderLeft: `2px solid ${INV_COLOR_CODE[item.type] || "#5a6470"}`,
                   }}
                   draggable
-                  onDragStart={(e) => (isReadOnly ? (()=>{}) : handleDragStart(e, item.id))}
+                  onDragStart={(e) => (isReadOnly ? (() => {}) : handleDragStart(e, item.id))}
                   onClick={(e) => handleItemClick(e, item)}
+                  title={`${item.name} @ ${props.receiverLabels?.[item.zone] || item.zone}:${item.target}`}
+                />
+
+                {/* Label layer sits above shot overlays so cue metadata stays readable. */}
+                <div
+                  className={cn(
+                    "absolute pointer-events-none flex items-center gap-1.5 text-xs",
+                    isShortDurationItem
+                      ? "px-2 rounded-sm bg-surface-base/90 border border-border-subtle shadow-e2"
+                      : "px-2 overflow-hidden"
+                  )}
+                  style={{
+                    left: isShortDurationItem
+                      ? `calc(${start + width}% + 4px)`
+                      : `${start}%`,
+                    width: isShortDurationItem ? "max-content" : `${width}%`,
+                    maxWidth: isShortDurationItem ? "220px" : undefined,
+                    top: `${top * 40 + 20}px`,
+                    height: "24px",
+                    zIndex: 4,
+                  }}
                 >
-                  {item.name} @ {props.receiverLabels?.[item.zone] || item.zone}:{item.target}
+                  <span
+                    className="truncate text-white"
+                    style={{ textShadow: "0 1px 1px rgb(0 0 0 / 0.65)" }}
+                  >
+                    {item.name}
+                  </span>
+                  <span className="shrink-0 rounded-xs bg-white/80 border border-white/40 px-1 py-px text-[10px] font-semibold leading-none text-black shadow-e2">
+                    {props.receiverLabels?.[item.zone] || item.zone}:{item.target}
+                  </span>
                   {Number.isFinite(item.multiple) && item.multiple > 1 && (
-                    <span
-                      className="absolute top-0 right-0 px-1 text-[10px] font-bold leading-none bg-black/40 rounded-bl"
-                      style={{ textShadow: "0px 0px 2px black" }}
-                    >
-                      x{item.multiple}
+                    <span className="ml-auto shrink-0 px-1 text-[10px] font-mono leading-tight bg-surface-base/85 text-fg-primary rounded-sm">
+                      ×{item.multiple}
                     </span>
                   )}
                 </div>

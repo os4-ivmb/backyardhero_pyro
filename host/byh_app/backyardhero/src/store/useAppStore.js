@@ -1,8 +1,15 @@
 // stores/useAppStore.js
 import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
 import axios from 'axios';
 
-const useAppStore = create((set, get) => ({
+// We persist only a tiny subset (the staged show ID) to localStorage. The
+// rich `stagedShow` object — items merged with inventory metadata, parsed
+// audioFile, etc. — is *re-derived* from the canonical shows/inventory
+// data on rehydration. That avoids the classic persistence trap where an
+// inventory or show edit silently goes stale because a snapshot of it was
+// frozen in localStorage.
+const useAppStore = create(persist((set, get) => ({
   // Shows state
   shows: [],
   showById: {}, // Lookup dictionary for shows
@@ -77,6 +84,9 @@ const useAppStore = create((set, get) => ({
           if (key !== id.toString()) acc[key] = state.showById[key];
           return acc;
         }, {}),
+        // If the just-deleted show was staged, clear the staging slot
+        // (and its persisted id) so the console flips back to the picker.
+        ...(state.stagedShowId === id ? { stagedShow: {}, stagedShowId: null } : {}),
       }));
     } catch (error) {
       console.error("Failed to delete show:", error);
@@ -98,9 +108,60 @@ const useAppStore = create((set, get) => ({
     }
   },
 
+  // ---------------------------------------------------------------------
+  // Staged show.
+  //
+  // `stagedShow` is the rich, in-memory object (with items / audio / etc.).
+  // `stagedShowId` is a tiny mirror that we persist to localStorage so a
+  // page reload can re-stage the same show from the canonical data sources.
+  //
+  // The pair is kept in sync via setStagedShow(); callers should never
+  // touch stagedShowId directly.
+  // ---------------------------------------------------------------------
   stagedShow: {},
+  stagedShowId: null,
   setStagedShow: (show) => {
-    set({ stagedShow: show });
+    const id = show && typeof show === 'object' && show.id != null ? show.id : null;
+    set({ stagedShow: show || {}, stagedShowId: id });
+  },
+
+  /**
+   * Re-derive the rich `stagedShow` object from `stagedShowId` once
+   * `shows` and `inventoryById` are both populated. Idempotent: bails out
+   * if there's no persisted id, the show isn't in the list, or stagedShow
+   * is already correctly populated. Safe to call on every store update.
+   */
+  hydrateStagedShowFromId: () => {
+    const { stagedShow, stagedShowId, shows, inventoryById } = get();
+    if (!stagedShowId) return;
+    if (stagedShow?.id === stagedShowId && Array.isArray(stagedShow.items)) return;
+    if (!Array.isArray(shows) || shows.length === 0) return;
+    const found = shows.find((s) => s.id === stagedShowId);
+    if (!found) {
+      // Persisted id no longer matches any show (e.g. the show was deleted
+      // from another tab / page). Clear it (and any stale rich object) so
+      // we don't keep retrying.
+      set({ stagedShowId: null, stagedShow: {} });
+      return;
+    }
+    let items = [];
+    try {
+      items = JSON.parse(found.display_payload || '[]').map((pi) => ({
+        ...inventoryById[pi.itemId],
+        ...pi,
+      }));
+    } catch (e) {
+      console.error('Failed to parse display_payload for staged show:', e);
+    }
+    let audioFile = null;
+    if (found.audio_file) {
+      try {
+        audioFile = JSON.parse(found.audio_file);
+      } catch (e) {
+        console.error('Failed to parse audio_file for staged show:', e);
+      }
+    }
+    set({ stagedShow: { ...found, items, audioFile } });
   },
 
   loadedShow: {},
@@ -320,6 +381,17 @@ const useAppStore = create((set, get) => ({
       throw error;
     }
   },
+}), {
+  name: 'byh-app-store',
+  storage: createJSONStorage(() => (typeof window !== 'undefined' ? window.localStorage : undefined)),
+  // Persist only the staged show ID. Everything else is server-owned
+  // (shows, inventory, system config, receivers) and gets re-fetched on
+  // mount. Heavy in-memory shapes (`stagedShow`) are re-derived from the
+  // persisted id once those server fetches complete.
+  partialize: (state) => ({ stagedShowId: state.stagedShowId }),
+  // Skip rehydration when there's no window (SSR pass) so Next.js
+  // pre-renders don't trip on localStorage.
+  skipHydration: false,
 }));
 
 export default useAppStore;

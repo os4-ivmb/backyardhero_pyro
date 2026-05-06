@@ -1,134 +1,106 @@
-import React, { useState, useEffect } from "react";
-import axios from "axios";
+import React, { useEffect, useMemo } from "react";
 import useAppStore from "@/store/useAppStore";
+import { Field, Toggle, inputClass, Badge } from "@/design";
+import useDraft from "@/hooks/useDraft";
+import SaveBar from "./SaveBar";
 
-const ProtocolConfig = () => {
+// Per-protocol firing-handler safety knobs. Today there's a single
+// protocol (BKYD_TS_HYBRID); when more land they'll fall out of the
+// `systemConfig.protocols` map without UI changes.
+
+export default function ProtocolConfig() {
   const { systemConfig, fetchSystemConfig, saveSystemConfig } = useAppStore();
-  
-  // Get the first protocol (or default to BKYD_TS_HYBRID)
-  const protocolKey = systemConfig?.protocols ? Object.keys(systemConfig.protocols)[0] : "BKYD_TS_HYBRID";
+
+  const protocolKey = useMemo(
+    () => (systemConfig?.protocols ? Object.keys(systemConfig.protocols)[0] : "BKYD_TS_HYBRID"),
+    [systemConfig?.protocols],
+  );
   const protocol = systemConfig?.protocols?.[protocolKey];
-  const currentConfig = protocol?.config || {};
+  const cfg = protocol?.config || {};
 
-  const [minBattery, setMinBattery] = useState(
-    currentConfig.min_battery_to_fire_pct || 30
-  );
-  const [requireContinuity, setRequireContinuity] = useState(
-    currentConfig.require_continuity || false
-  );
-  const [isSaving, setIsSaving] = useState(false);
+  const upstream = {
+    min_battery_to_fire_pct: Number.isFinite(cfg.min_battery_to_fire_pct)
+      ? cfg.min_battery_to_fire_pct
+      : 30,
+    require_continuity: !!cfg.require_continuity,
+  };
+  const draft = useDraft(upstream);
 
-  // Update local state when systemConfig changes
-  useEffect(() => {
-    if (protocol?.config) {
-      setMinBattery(protocol.config.min_battery_to_fire_pct || 30);
-      setRequireContinuity(protocol.config.require_continuity || false);
-    }
-  }, [systemConfig, protocol]);
-
-  // Fetch config on mount
   useEffect(() => {
     if (!systemConfig || !systemConfig.protocols) {
       fetchSystemConfig();
     }
   }, [fetchSystemConfig, systemConfig]);
 
-  const handleSave = async () => {
-    setIsSaving(true);
-    try {
-      // Create updated config
-      const updatedConfig = {
+  if (!protocol) {
+    return (
+      <p className="text-sm text-fg-muted">Loading protocol configuration…</p>
+    );
+  }
+
+  const onSave = () =>
+    draft.save(async (s) => {
+      const updated = {
         ...systemConfig,
         protocols: {
           ...systemConfig.protocols,
           [protocolKey]: {
             ...systemConfig.protocols[protocolKey],
             config: {
-              min_battery_to_fire_pct: parseInt(minBattery),
-              require_continuity: requireContinuity,
+              min_battery_to_fire_pct: parseInt(s.min_battery_to_fire_pct, 10),
+              require_continuity: !!s.require_continuity,
             },
           },
         },
       };
-
-      // Save to API
-      await saveSystemConfig(updatedConfig);
-      
-      console.log("Protocol config updated successfully");
-      alert("Protocol configuration saved successfully!");
-    } catch (error) {
-      console.error("Error saving protocol config:", error);
-      alert("Failed to save protocol configuration. Please try again.");
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  if (!protocol) {
-    return (
-      <div className="flex flex-col gap-4">
-        <h2 className="text-lg font-bold text-white">Protocol Configuration</h2>
-        <p className="text-gray-400">Loading protocol configuration...</p>
-      </div>
-    );
-  }
+      await saveSystemConfig(updated);
+    });
 
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="text-lg font-bold text-white">Protocol Configuration</h2>
-      <p className="text-gray-400 text-sm">
-        Protocol: <span className="font-semibold text-white">{protocol.label || protocolKey}</span>
-      </p>
-
-      <div className="flex flex-col gap-1">
-        <label className="block text-gray-200 text-sm font-bold" htmlFor="min_battery">
-          Minimum Battery to Fire (%)
-        </label>
-        <input
-          id="min_battery"
-          type="number"
-          min="0"
-          max="100"
-          value={minBattery}
-          onChange={(e) => setMinBattery(e.target.value)}
-          className="shadow appearance-none border rounded w-full py-2 px-3 text-white leading-tight focus:outline-none focus:shadow-outline bg-gray-700 border-gray-600 placeholder-gray-400"
-        />
-        <p className="text-gray-400 text-xs italic">
-          Receivers must have at least this battery percentage to fire. Default: 30%
-        </p>
+      <div className="flex items-center gap-2 text-xs">
+        <span className="text-fg-muted">Protocol</span>
+        <Badge tone="neutral">{protocol.label || protocolKey}</Badge>
       </div>
 
-      <div className="flex flex-col gap-1">
-        <label className="block text-gray-200 text-sm font-bold" htmlFor="require_continuity">
-          Require Continuity Check
-        </label>
-        <div className="flex items-center gap-2">
+      <Field
+        label="Minimum battery to fire"
+        htmlFor="min-battery"
+        hint="Receivers below this percentage will refuse to fire. Default 30%."
+      >
+        <div className="relative w-32">
           <input
-            id="require_continuity"
-            type="checkbox"
-            checked={requireContinuity}
-            onChange={(e) => setRequireContinuity(e.target.checked)}
-            className="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500"
+            id="min-battery"
+            type="number"
+            min={0}
+            max={100}
+            value={draft.state.min_battery_to_fire_pct ?? ""}
+            onChange={(e) => draft.set("min_battery_to_fire_pct", e.target.value)}
+            className={inputClass + " num tabular-nums pr-7"}
           />
-          <span className="text-gray-300 text-sm">
-            {requireContinuity ? "Enabled" : "Disabled"}
+          <span className="pointer-events-none absolute inset-y-0 right-2.5 flex items-center text-2xs text-fg-muted">
+            %
           </span>
         </div>
-        <p className="text-gray-400 text-xs italic">
-          When enabled, receivers must report continuity before firing. Default: Disabled
-        </p>
-      </div>
+      </Field>
 
-      <button 
-        onClick={handleSave}
-        disabled={isSaving}
-        className="bg-slate-900 border border-blue-500 text-blue-300 hover:border-blue-400 hover:shadow-[0_0_8px_rgba(59,130,246,0.3)] font-bold py-2 px-4 rounded-sm transition-all duration-200 self-start disabled:opacity-50 disabled:cursor-not-allowed"
-      >
-        {isSaving ? "Saving..." : "Save Configuration"}
-      </button>
+      <Toggle
+        id="require-continuity"
+        checked={!!draft.state.require_continuity}
+        onChange={(next) => draft.set("require_continuity", next)}
+        tone="armed"
+        label="Require continuity check"
+        description="Only fire cues that report continuity at start time. Off by default."
+      />
+
+      <SaveBar
+        dirty={draft.dirty}
+        saving={draft.saving}
+        error={draft.error}
+        savedAt={draft.savedAt}
+        onSave={onSave}
+        onReset={draft.reset}
+      />
     </div>
   );
-};
-
-export default ProtocolConfig;
-
+}

@@ -1,437 +1,318 @@
-import React, { useCallback, useEffect, useState } from "react"
+import React, { useCallback, useEffect, useState } from "react";
 import { MdClose } from "react-icons/md";
 
-import useAppStore from '@/store/useAppStore';
+import useAppStore from "@/store/useAppStore";
+import { Section, Button, IconButton, Card } from "@/design";
+
 import InventoryList from "./InventoryList";
 import { INV_TYPES } from "@/constants";
 import { normalizeYouTubeUrl } from "@/util/youtube";
 import { parseOptionalUnitCost } from "@/util/inventoryUnitCost";
 
 const DEFAULT_DATA = {
-    id: "",
-    name: "",
-    type: "FUSE",
-    duration: "",
-    fuse_delay: "",
-    lift_delay: "",
-    burn_rate: "",
-    color: "",
-    available_ct: "",
-    unit_cost: "",
-    youtube_link: "",
-    youtube_link_start_sec: "",
-    image: ""
+  id: "", name: "", type: "FUSE",
+  duration: "", fuse_delay: "", lift_delay: "", burn_rate: "", color: "",
+  available_ct: "", unit_cost: "",
+  youtube_link: "", youtube_link_start_sec: "",
+  image: "",
+};
+
+// Calm reusable input helpers. Keep field semantics identical to the
+// previous form -- only the chrome (border / spacing / focus) changed.
+const labelClass = "block text-fg-secondary text-xs uppercase tracking-wider font-semibold mb-1";
+const inputClass = "h-9 w-full rounded-sm bg-surface-1 border border-border px-2.5 text-sm text-fg-primary placeholder:text-fg-muted focus:border-accent transition-colors";
+const helpClass  = "text-fg-muted text-xs italic mt-1";
+
+function Field({ label, hint, children }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <label className={labelClass}>{label}</label>
+      {children}
+      {hint ? <p className={helpClass}>{hint}</p> : null}
+    </div>
+  );
 }
 
-
-export function CakeFields(props){
-  console.log(props)
-    return (
-        <div className="mb-6">
-            <label className="block text-gray-200 text-sm font-bold mb-2" htmlFor="password">
-                Duration (seconds)
-            </label>
-            <input  value={props.formObject.duration} onChange={props.handleInputChange}  className="shadow appearance-none border rounded w-full py-2 px-3 text-white mb-3 leading-tight focus:outline-none focus:shadow-outline" name="duration" type="number"/>
-            <label className="block text-gray-200 text-sm font-bold mb-2" htmlFor="password">
-                Fuse Delay (seconds)
-            </label>
-            <input value={props.formObject.fuse_delay} onChange={props.handleInputChange}  className="shadow appearance-none border rounded w-full py-2 px-3 text-white mb-3 leading-tight focus:outline-none focus:shadow-outline" name="fuse_delay" type="number"/>
-            <p className="text-gray-400 text-xs italic">Seconds delay from when charge is fired to the first shot of the cake.</p>
-            <label className="block text-gray-200 text-sm font-bold mb-2" htmlFor="name">
-                Youtube Link
-            </label>
-            <input value={props.formObject.youtube_link || ""} onChange={props.handleInputChange} onBlur={props.handleYouTubeLinkBlur} className="shadow appearance-none border rounded w-full py-2 px-3 mb-2 text-white leading-tight focus:outline-none focus:shadow-outline" name="youtube_link" type="text" placeholder="https://youtube.com/watch?v=... or https://youtu.be/..."/>
-            <label className="block text-gray-200 text-sm font-bold mb-2" htmlFor="name">
-                Youtube Link Start Seconds
-            </label>
-            <input value={props.formObject.youtube_link_start_sec|| 0} onChange={props.handleInputChange} className="shadow appearance-none border rounded w-full py-2 px-3 mb-2 text-white leading-tight focus:outline-none focus:shadow-outline" name="youtube_link_start_sec" type="text"/>
-        </div>
-    )
+export function CakeFields({ formObject, handleInputChange, handleYouTubeLinkBlur }) {
+  return (
+    <div className="space-y-3">
+      <Field label="Duration (seconds)">
+        <input
+          value={formObject.duration} onChange={handleInputChange}
+          name="duration" type="number" className={inputClass}
+        />
+      </Field>
+      <Field label="Fuse delay (seconds)" hint="Seconds delay from when the charge is fired to the first shot of the cake.">
+        <input
+          value={formObject.fuse_delay} onChange={handleInputChange}
+          name="fuse_delay" type="number" className={inputClass}
+        />
+      </Field>
+      <Field label="YouTube link">
+        <input
+          value={formObject.youtube_link || ""} onChange={handleInputChange}
+          onBlur={handleYouTubeLinkBlur} name="youtube_link" type="text"
+          placeholder="https://youtube.com/watch?v=…"
+          className={inputClass}
+        />
+      </Field>
+      <Field label="YouTube start (seconds)">
+        <input
+          value={formObject.youtube_link_start_sec || 0}
+          onChange={handleInputChange} name="youtube_link_start_sec"
+          type="text" className={inputClass}
+        />
+      </Field>
+    </div>
+  );
 }
 
-export function ShellFields(props){
-    return (
-        <div className="mb-6">
-            <label className="block text-gray-200 text-sm font-bold mb-2" htmlFor="password">
-                Lift Delay (seconds)
-            </label>
-            <input value={props.formObject.lift_delay} onChange={props.handleInputChange} className="shadow appearance-none border rounded w-full py-2 px-3 text-white mb-3 leading-tight focus:outline-none focus:shadow-outline" name="lift_delay" type="number"/>
-            <p className="text-gray-400 text-xs italic">Seconds delay from when lift charge is fired to the break.</p>
-            <label className="block text-gray-200 text-sm font-bold mb-2" htmlFor="password">
-                Fuse Delay (seconds)
-            </label>
-            <input value={props.formObject.fuse_delay} onChange={props.handleInputChange} className="shadow appearance-none border rounded w-full py-2 px-3 text-white mb-3 leading-tight focus:outline-none focus:shadow-outline" name="fuse_delay" type="number"/>
-            <p className="text-gray-400 text-xs italic">Seconds delay from when charge is fired to the life charge.</p>
-            <label className="block text-gray-200 text-sm font-bold mb-2" htmlFor="name">
-                Youtube Link
-            </label>
-            <input value={props.formObject.youtube_link || ""} onChange={props.handleInputChange} onBlur={props.handleYouTubeLinkBlur} className="shadow appearance-none border rounded w-full py-2 px-3 mb-2 text-white leading-tight focus:outline-none focus:shadow-outline" name="youtube_link" type="text" placeholder="https://youtube.com/watch?v=... or https://youtu.be/..."/>
-            <label className="block text-gray-200 text-sm font-bold mb-2" htmlFor="name">
-                Youtube Link Start Seconds
-            </label>
-            <input value={props.formObject.youtube_link_start_sec} onChange={props.handleInputChange} className="shadow appearance-none border rounded w-full py-2 px-3 mb-2 text-white leading-tight focus:outline-none focus:shadow-outline" name="youtube_link_start_sec" type="text"/>
-        </div>
-    )
+export function ShellFields({ formObject, handleInputChange, handleYouTubeLinkBlur }) {
+  return (
+    <div className="space-y-3">
+      <Field label="Lift delay (seconds)" hint="Seconds delay from lift charge to break.">
+        <input value={formObject.lift_delay} onChange={handleInputChange}
+          name="lift_delay" type="number" className={inputClass} />
+      </Field>
+      <Field label="Fuse delay (seconds)" hint="Seconds delay from when charge is fired to lift charge.">
+        <input value={formObject.fuse_delay} onChange={handleInputChange}
+          name="fuse_delay" type="number" className={inputClass} />
+      </Field>
+      <Field label="YouTube link">
+        <input
+          value={formObject.youtube_link || ""} onChange={handleInputChange}
+          onBlur={handleYouTubeLinkBlur} name="youtube_link" type="text"
+          placeholder="https://youtube.com/watch?v=…" className={inputClass}
+        />
+      </Field>
+      <Field label="YouTube start (seconds)">
+        <input value={formObject.youtube_link_start_sec} onChange={handleInputChange}
+          name="youtube_link_start_sec" type="text" className={inputClass} />
+      </Field>
+    </div>
+  );
 }
 
-export function FuseFields(props){
-    return (
-        <div className="mb-6">
-            <label className="block text-gray-200 text-sm font-bold mb-2" htmlFor="burn_rate">
-                Burn Rate (sec/ft)
-            </label>
-            <input value={props.formObject.burn_rate} onChange={props.handleInputChange} className="shadow appearance-none border rounded w-full py-2 px-3 text-white mb-3 leading-tight focus:outline-none focus:shadow-outline" name="burn_rate" type="number"/>
-            <label className="block text-gray-200 text-sm font-bold mb-2" htmlFor="color">
-                Color
-            </label>
-            <input value={props.formObject.color} onChange={props.handleInputChange}  className="shadow appearance-none w-full leading-tight focus:outline-none focus:shadow-outline" name="color" type="color"/>
-        </div>
-    )
+export function FuseFields({ formObject, handleInputChange }) {
+  return (
+    <div className="space-y-3">
+      <Field label="Burn rate (sec/ft)">
+        <input value={formObject.burn_rate} onChange={handleInputChange}
+          name="burn_rate" type="number" className={inputClass} />
+      </Field>
+      <Field label="Color">
+        <input
+          value={formObject.color} onChange={handleInputChange}
+          name="color" type="color"
+          className="h-9 w-full rounded-sm border border-border bg-surface-1 cursor-pointer"
+        />
+      </Field>
+    </div>
+  );
 }
 
 const AddInventoryForm = (props) => {
-    const [formObject, setFormObject] = useState(props.activeItem || DEFAULT_DATA);
-    const [isNewItem, setIsNewItem] = useState(props.activeItem || DEFAULT_DATA);
-  
-    const commitObject = async () => {
-      try {
-        await props.addItemFnc(formObject);
-      } catch (err) {
-        console.error(err);
-        alert(err.response?.data?.error || err.message || "Failed to save inventory item.");
-      }
-    };
+  const [formObject, setFormObject] = useState(props.activeItem || DEFAULT_DATA);
+  const [isNewItem, setIsNewItem] = useState(props.activeItem || DEFAULT_DATA);
 
-    const handleDismiss = () => {
-      props.onDismiss?.();
-    };
-
-    const handleDeleteItem = async () => {
-      if (!formObject.id || !props.deleteInventoryItem) return;
-      if (!window.confirm(`Delete "${formObject.name}"? This cannot be undone.`)) return;
-      try {
-        await props.deleteInventoryItem(formObject.id);
-        props.onItemDeleted?.(formObject.id);
-        props.onDismiss?.();
-        setFormObject(DEFAULT_DATA);
-      } catch (error) {
-        console.error("Error deleting inventory item:", error);
-        alert(error.response?.data?.error || "Failed to delete inventory item.");
-      }
-    };
-  
-    const handleInputChange = (e) => {
-      const { name, value } = e.target;
-      if (name === "type") {
-        setFormObject({ ...DEFAULT_DATA, [name]: value, id: formObject.id });
-      } else {
-        setFormObject({ ...formObject, [name]: value });
-      }
-    };
-
-    const handleYouTubeLinkBlur = (e) => {
-      const { value } = e.target;
-      if (value && value.trim() !== '') {
-        const normalizedUrl = normalizeYouTubeUrl(value);
-        if (normalizedUrl && normalizedUrl !== value) {
-          // Update the form with normalized URL so user can see it
-          setFormObject({ ...formObject, youtube_link: normalizedUrl });
-        }
-      }
-    };
-  
-    useEffect(() => {
-      if (props.showNewItem !== isNewItem) {
-        if (props.showNewItem) {
-          setFormObject(DEFAULT_DATA);
-        }
-      }
-    }, [props.showNewItem]);
-  
-    useEffect(() => {
-      if (props.activeItem?.id) {
-        // Preserve metadata when loading item into form
-        setFormObject({
-          ...props.activeItem,
-          // Ensure metadata is preserved (might be parsed object or string)
-          metadata: props.activeItem.metadata || null
-        });
-      }
-    }, [props.activeItem]);
-
-    const shouldShow = Boolean(
-      props.showNewItem || (props.activeItem && props.activeItem.id)
-    );
-
-    useEffect(() => {
-      if (!shouldShow) return undefined;
-      const onKey = (e) => {
-        if (e.key === "Escape") props.onDismiss?.();
-      };
-      window.addEventListener("keydown", onKey);
-      const prevOverflow = document.body.style.overflow;
-      document.body.style.overflow = "hidden";
-      return () => {
-        window.removeEventListener("keydown", onKey);
-        document.body.style.overflow = prevOverflow;
-      };
-    }, [shouldShow, props.onDismiss]);
-
-    const FieldsComponent =
-      formObject.type === "FUSE"
-        ? FuseFields
-        : formObject.type === "AERIAL_SHELL"
-        ? ShellFields
-        : CakeFields;
-  
-    if (!shouldShow) {
-      return null;
+  const commitObject = async () => {
+    try { await props.addItemFnc(formObject); }
+    catch (err) {
+      console.error(err);
+      window.alert(err.response?.data?.error || err.message || "Failed to save item.");
     }
+  };
 
-    return (
+  const handleDismiss = () => props.onDismiss?.();
+
+  const handleDeleteItem = async () => {
+    if (!formObject.id || !props.deleteInventoryItem) return;
+    if (!window.confirm(`Delete "${formObject.name}"? This cannot be undone.`)) return;
+    try {
+      await props.deleteInventoryItem(formObject.id);
+      props.onItemDeleted?.(formObject.id);
+      props.onDismiss?.();
+      setFormObject(DEFAULT_DATA);
+    } catch (e) {
+      window.alert(e.response?.data?.error || "Failed to delete item.");
+    }
+  };
+
+  const handleInputChange = (e) => {
+    const { name, value } = e.target;
+    if (name === "type") setFormObject({ ...DEFAULT_DATA, [name]: value, id: formObject.id });
+    else setFormObject({ ...formObject, [name]: value });
+  };
+
+  const handleYouTubeLinkBlur = (e) => {
+    const v = e.target.value;
+    if (v && v.trim() !== "") {
+      const norm = normalizeYouTubeUrl(v);
+      if (norm && norm !== v) setFormObject({ ...formObject, youtube_link: norm });
+    }
+  };
+
+  useEffect(() => {
+    if (props.showNewItem !== isNewItem) {
+      if (props.showNewItem) setFormObject(DEFAULT_DATA);
+    }
+  }, [props.showNewItem]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (props.activeItem?.id) {
+      setFormObject({ ...props.activeItem, metadata: props.activeItem.metadata || null });
+    }
+  }, [props.activeItem]);
+
+  const shouldShow = Boolean(props.showNewItem || (props.activeItem && props.activeItem.id));
+
+  useEffect(() => {
+    if (!shouldShow) return undefined;
+    const onKey = (e) => { if (e.key === "Escape") props.onDismiss?.(); };
+    window.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [shouldShow, props.onDismiss]);
+
+  if (!shouldShow) return null;
+
+  const Fields =
+    formObject.type === "FUSE" ? FuseFields :
+    formObject.type === "AERIAL_SHELL" ? ShellFields :
+    CakeFields;
+
+  return (
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6"
+      role="dialog" aria-modal="true" aria-labelledby="inventory-editor-title"
+    >
       <div
-        className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="inventory-editor-title"
+        className="absolute inset-0 bg-surface-base/70 backdrop-blur-sm"
+        onClick={handleDismiss} role="presentation"
+      />
+      <div
+        id="editForm"
+        className="relative z-[101] w-full max-w-md max-h-[min(90dvh,720px)] overflow-y-auto overscroll-contain rounded-md border border-border bg-surface-1 shadow-e3"
+        onClick={(e) => e.stopPropagation()}
       >
-        <div
-          className="absolute inset-0 bg-black/60"
-          onClick={handleDismiss}
-          role="presentation"
-        />
-        <div
-          id="editForm"
-          className="relative z-[101] w-full max-w-md max-h-[min(90dvh,720px)] overflow-y-auto overscroll-contain rounded-lg border border-gray-600 bg-gray-900 shadow-2xl"
-          onClick={(e) => e.stopPropagation()}
-        >
-        <form className="bg-gray-800 px-6 sm:px-8 pt-6 pb-8 rounded-lg">
-          <div className="flex items-center justify-between gap-2 mb-4 pb-3 border-b border-gray-600">
-            <h3 id="inventory-editor-title" className="text-base font-semibold text-gray-100">
-              {props.activeItem?.id ? "Edit item" : "Add item"}
-            </h3>
-            <button
-              type="button"
-              onClick={handleDismiss}
-              className="shrink-0 p-1.5 rounded-md text-gray-400 hover:text-white hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-cyan-500"
-              title="Close"
-              aria-label="Close editor"
-            >
-              <MdClose className="w-5 h-5" />
-            </button>
-          </div>
-          {/* Form Fields */}
-          <div className="mb-4">
-            <label
-              className="block text-gray-200 text-sm font-bold mb-2"
-              htmlFor="type"
-            >
-              Type
-            </label>
-            <select
-              value={formObject.type}
-              onChange={handleInputChange}
-              name="type"
-              className="block appearance-none w-full border border-gray-400 hover:border-gray-500 px-4 py-2 pr-8 rounded shadow leading-tight focus:outline-none focus:shadow-outline"
-            >
-              {Object.keys(INV_TYPES).map((k, i) => (
-                <option key={i} value={k}>
-                  {INV_TYPES[k]}
-                </option>
+        <div className="flex items-center justify-between gap-2 px-5 h-12 border-b border-border-subtle">
+          <h3 id="inventory-editor-title" className="text-base font-semibold text-fg-primary">
+            {props.activeItem?.id ? "Edit item" : "Add item"}
+          </h3>
+          <IconButton label="Close editor" onClick={handleDismiss}>
+            <MdClose className="w-5 h-5" />
+          </IconButton>
+        </div>
+
+        <form className="p-5 space-y-4" onSubmit={(e) => e.preventDefault()}>
+          <Field label="Type">
+            <select value={formObject.type} onChange={handleInputChange}
+              name="type" className={inputClass}>
+              {Object.keys(INV_TYPES).map((k) => (
+                <option key={k} value={k}>{INV_TYPES[k]}</option>
               ))}
             </select>
-  
-            <label
-              className="block text-gray-200 text-sm font-bold mb-2"
-              htmlFor="name"
-            >
-              Name
-            </label>
-            <input value={formObject.id} id="idx" type="hidden" />
+          </Field>
+          <Field label="Name">
+            <input value={formObject.name} onChange={handleInputChange}
+              name="name" type="text" className={inputClass} />
+          </Field>
+          <Field label="Quantity available" hint="The amount you have on hand.">
+            <input value={formObject.available_ct} onChange={handleInputChange}
+              name="available_ct" type="number" className={inputClass} />
+          </Field>
+          <Field label="Unit cost (optional)" hint="Cost per unit in dollars. Blank if unknown.">
             <input
-              value={formObject.name}
+              value={formObject.unit_cost ?? ""}
               onChange={handleInputChange}
-              className="shadow appearance-none border rounded w-full py-2 px-3 mb-2 text-white leading-tight focus:outline-none focus:shadow-outline"
-              name="name"
-              type="text"
+              name="unit_cost" type="number" min="0" step="0.01"
+              placeholder="0.00" className={inputClass}
             />
-  
-            <label
-              className="block text-gray-200 text-sm font-bold mb-2"
-              htmlFor="available_ct"
-            >
-              Quantity Available
-            </label>
-            <input
-              value={formObject.available_ct}
-              onChange={handleInputChange}
-              className="shadow appearance-none border rounded w-full py-2 px-3 text-white mb-3 leading-tight focus:outline-none focus:shadow-outline"
-              name="available_ct"
-              type="number"
-            />
-            <p className="text-gray-400 text-xs italic">
-              The Amount you have on you.
-            </p>
+          </Field>
+          <Field label="Image URL">
+            <input value={formObject.image || ""} onChange={handleInputChange}
+              name="image" type="text" className={inputClass} />
+          </Field>
 
-            <label
-              className="block text-gray-200 text-sm font-bold mb-2"
-              htmlFor="unit_cost"
-            >
-              Unit cost (optional)
-            </label>
-            <input
-              value={formObject.unit_cost === null || formObject.unit_cost === undefined ? "" : formObject.unit_cost}
-              onChange={handleInputChange}
-              className="shadow appearance-none border rounded w-full py-2 px-3 text-white mb-3 leading-tight focus:outline-none focus:shadow-outline"
-              name="unit_cost"
-              type="number"
-              min="0"
-              step="0.01"
-              placeholder="0.00"
+          <div className="border-t border-border-subtle pt-4">
+            <Fields
+              formObject={formObject}
+              handleInputChange={handleInputChange}
+              handleYouTubeLinkBlur={handleYouTubeLinkBlur}
             />
-            <p className="text-gray-400 text-xs italic">
-              Cost per unit (2 decimal places). Leave blank if unknown.
-            </p>
-  
-            <label
-              className="block text-gray-200 text-sm font-bold mb-2"
-              htmlFor="image"
-            >
-              Image URL
-            </label>
-            <input
-              value={formObject.image || ""}
-              onChange={handleInputChange}
-              className="shadow appearance-none border rounded w-full py-2 px-3 text-white mb-3 leading-tight focus:outline-none focus:shadow-outline"
-              name="image"
-              type="text"
-            />
-            <p className="text-gray-400 text-xs italic">An image to use.</p>
           </div>
-  
-          <FieldsComponent
-            handleInputChange={handleInputChange}
-            handleYouTubeLinkBlur={handleYouTubeLinkBlur}
-            formObject={formObject}
-          />
-  
-          <div className="flex items-center justify-between gap-3 pt-2 border-t border-gray-700">
-            <button
-              onClick={commitObject}
-              className="bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline"
-              type="button"
-            >
-              {props.activeItem ? "Update" : "Add"}
-            </button>
+
+          <div className="flex items-center justify-between pt-2 border-t border-border-subtle">
+            <Button variant="primary" onClick={commitObject}>
+              {props.activeItem ? "Save changes" : "Add item"}
+            </Button>
             {props.activeItem?.id && props.deleteInventoryItem ? (
-              <button
-                type="button"
-                onClick={handleDeleteItem}
-                className="text-xs text-gray-500 hover:text-red-400 focus:outline-none focus:underline"
-                title="Permanently delete this item"
-              >
+              <Button variant="ghost" size="sm" onClick={handleDeleteItem}
+                className="text-fg-muted hover:text-danger">
                 Delete
-              </button>
+              </Button>
             ) : null}
           </div>
         </form>
-        </div>
       </div>
-    );
+    </div>
+  );
+};
+
+export default function InventoryManager() {
+  const { inventory, createInventoryItem, updateInventoryItem, fetchInventory, deleteInventoryItem } = useAppStore();
+  const [activeItem, setActiveItem] = useState(false);
+  const [newItem, setNewItem] = useState(false);
+
+  const setEditorActive = (it) => { setActiveItem(it); setNewItem(false); };
+  const startNewItem = () => { setActiveItem(false); setNewItem(true); };
+  const dismissEditor = useCallback(() => { setActiveItem(false); setNewItem(false); }, []);
+  const handleItemDeleted = (id) => {
+    if (activeItem && activeItem.id === id) setActiveItem(false);
   };
 
-export default function InventoryManager(props){
-    const { inventory, createInventoryItem, updateInventoryItem, fetchInventory, deleteInventoryItem } = useAppStore();
-    const [activeItem, setActiveItem] = useState(false);
-    const [newItem, setNewItem] = useState(false);
-
-    const setEditorActive = (inv_item) => {
-        setActiveItem({});
-        setActiveItem(inv_item);
-        setNewItem(false)
+  const addOrCreateItem = async (item) => {
+    let normalized = { ...item, unit_cost: parseOptionalUnitCost(item.unit_cost) };
+    if (item.youtube_link && item.youtube_link.trim() !== "") {
+      const norm = normalizeYouTubeUrl(item.youtube_link);
+      normalized.youtube_link = norm || "";
     }
-
-    const startNewItem = () => {
-        setActiveItem(false)
-        setNewItem(true)
+    if (normalized.id) {
+      const existing = inventory.find((i) => i.id === normalized.id);
+      let metadata = normalized.metadata !== undefined ? normalized.metadata : existing?.metadata;
+      if (metadata && typeof metadata === "object") metadata = JSON.stringify(metadata);
+      await updateInventoryItem(normalized.id, { ...normalized, metadata });
+    } else {
+      await createInventoryItem(normalized);
     }
+    dismissEditor();
+  };
 
-    const dismissEditor = useCallback(() => {
-        setActiveItem(false);
-        setNewItem(false);
-    }, []);
-
-    const handleItemDeleted = (id) => {
-        if (activeItem && activeItem.id === id) {
-            setActiveItem(false);
-        }
-    };
-
-    const addOrCreateItem = async (inv_item) => {
-        // Normalize YouTube URL before saving
-        let normalizedItem = { ...inv_item, unit_cost: parseOptionalUnitCost(inv_item.unit_cost) };
-        if (inv_item.youtube_link && inv_item.youtube_link.trim() !== '') {
-            const normalizedUrl = normalizeYouTubeUrl(inv_item.youtube_link);
-            if (normalizedUrl) {
-                normalizedItem.youtube_link = normalizedUrl;
-            } else {
-                // If URL is invalid, clear it or keep as-is (user might want to fix later)
-                // For now, we'll clear invalid URLs
-                normalizedItem.youtube_link = '';
-            }
-        }
-
-        if (normalizedItem.id) {
-            // Preserve existing metadata if not provided in the update
-            const existingItem = inventory.find(item => item.id === normalizedItem.id);
-            let metadataToSave = null;
-            
-            // If metadata is explicitly in the form object, use it
-            if (normalizedItem.metadata !== undefined) {
-                metadataToSave = normalizedItem.metadata;
-            } else if (existingItem?.metadata) {
-                // Otherwise, preserve existing metadata
-                metadataToSave = existingItem.metadata;
-            }
-            
-            // If metadata is an object (parsed), stringify it for the API
-            if (metadataToSave && typeof metadataToSave === 'object') {
-                metadataToSave = JSON.stringify(metadataToSave);
-            }
-            
-            const updateData = {
-                ...normalizedItem,
-                metadata: metadataToSave
-            };
-            
-            await updateInventoryItem(normalizedItem.id, updateData);
-        } else {
-            await createInventoryItem(normalizedItem);
-        }
-        dismissEditor();
-    };
-
-    return (
-        <div className="w-full max-w-7xl mx-auto px-4 sm:px-6 pb-8">
-            <header className="flex flex-wrap items-center justify-between gap-3 mb-5 pt-2">
-                <h2 className="text-2xl font-semibold text-gray-100 shrink-0">Inventory List</h2>
-                <button onClick={()=>startNewItem()} className="shrink-0 bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline" type="button">
-                    Add New
-                </button>
-            </header>
-            <InventoryList
-                inventory={inventory}
-                setActiveItem={setEditorActive}
-                refreshInventory={fetchInventory}
-            />
-            <AddInventoryForm
-                activeItem={activeItem}
-                showNewItem={newItem}
-                addItemFnc={addOrCreateItem}
-                deleteInventoryItem={deleteInventoryItem}
-                onItemDeleted={handleItemDeleted}
-                onDismiss={dismissEditor}
-            />
-        </div>
-    )
+  return (
+    <div className="w-full max-w-7xl mx-auto px-4 sm:px-6 py-6">
+      <Section
+        title="Inventory"
+        description="Catalogue of fireables. Cakes, aerial shells and fuses live here."
+        actions={<Button variant="primary" onClick={startNewItem}>Add item</Button>}
+      >
+        <InventoryList
+          inventory={inventory}
+          setActiveItem={setEditorActive}
+          refreshInventory={fetchInventory}
+        />
+      </Section>
+      <AddInventoryForm
+        activeItem={activeItem}
+        showNewItem={newItem}
+        addItemFnc={addOrCreateItem}
+        deleteInventoryItem={deleteInventoryItem}
+        onItemDeleted={handleItemDeleted}
+        onDismiss={dismissEditor}
+      />
+    </div>
+  );
 }

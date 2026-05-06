@@ -1,173 +1,124 @@
-import React, { useState, useEffect } from "react";
+import React from "react";
 import axios from "axios";
 import useStateAppStore from "@/store/useStateAppStore";
+import { Field, inputClass } from "@/design";
+import useDraft from "@/hooks/useDraft";
+import SaveBar from "./SaveBar";
 
-const DaemonSettings = () => {
+// Daemon timing knobs. Each field maps to its own daemon command, but
+// the panel has a single Save button so the operator commits everything
+// at once -- we diff baseline → draft and POST only the commands whose
+// values actually changed.
+
+const FIELDS = [
+  {
+    key: "receiver_timeout_ms",
+    cmd: "set_receiver_timeout",
+    payloadKey: "timeout_ms",
+    label: "Receiver timeout",
+    hint: "Drop receivers we haven't heard from in this many milliseconds.",
+    suffix: "ms",
+    min: 1000,
+  },
+  {
+    key: "command_response_timeout_ms",
+    cmd: "set_command_response_timeout",
+    payloadKey: "timeout_ms",
+    label: "Command response timeout",
+    hint: "Wait this long for a receiver ack before retrying.",
+    suffix: "ms",
+    min: 25,
+  },
+  {
+    key: "clock_sync_interval_ms",
+    cmd: "set_clock_sync_interval",
+    payloadKey: "interval_ms",
+    label: "Clock sync interval",
+    hint: "How often the dongle re-syncs the network clock.",
+    suffix: "ms",
+    min: 100,
+  },
+];
+
+export default function DaemonSettings() {
   const { stateData, setStateData } = useStateAppStore();
+  const settings = stateData?.fw_state?.settings || {};
 
-  // Initialize local state with values from global store or defaults from user's last diff
-  const [currentReceiverTimeout, setCurrentReceiverTimeout] = useState(
-    stateData?.fw_state?.settings?.receiver_timeout_ms || 30000
-  );
-  const [currentCommandResponseTimeout, setCurrentCommandResponseTimeout] = useState(
-    stateData?.fw_state?.settings?.command_response_timeout_ms || 100
-  );
-  const [currentClockSyncInterval, setCurrentClockSyncInterval] = useState(
-    stateData?.fw_state?.settings?.clock_sync_interval_ms || 200 // Default from user's diff
-  );
-  const [currentDebugMode, setCurrentDebugMode] = useState(
-    stateData?.fw_state?.settings?.debug_mode || 0
-  );
+  const upstream = {
+    receiver_timeout_ms: settings.receiver_timeout_ms ?? 30000,
+    command_response_timeout_ms: settings.command_response_timeout_ms ?? 100,
+    clock_sync_interval_ms: settings.clock_sync_interval_ms ?? 200,
+  };
+  const draft = useDraft(upstream);
 
-  useEffect(() => {
-    // The following lines are removed/commented out to prevent overwriting user edits
-    // if (stateData && stateData.fw_state?.settings) {
-    //   setCurrentReceiverTimeout(stateData.fw_state.settings.receiver_timeout_ms || 30000);
-    //   setCurrentCommandResponseTimeout(stateData.fw_state.settings.command_response_timeout_ms || 100);
-    //   setCurrentClockSyncInterval(stateData.fw_state.settings.clock_sync_interval_ms || 2000); // Original default was 2000 here
-    //   setCurrentDebugMode(stateData.fw_state.settings.debug_mode || 0);
-    // }
-    // This useEffect can be used for other reactions to stateData if needed in the future.
-  }, [stateData]);
+  const onSave = () =>
+    draft.save(async (s) => {
+      const calls = [];
+      for (const f of FIELDS) {
+        const next = parseInt(s[f.key], 10);
+        if (Number.isFinite(next) && next !== upstream[f.key]) {
+          calls.push(
+            axios.post(
+              "/api/system/cmd_daemon",
+              { type: f.cmd, [f.payloadKey]: next },
+              { headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+      }
+      await Promise.all(calls);
 
-  const handleSubmit = async (settingType, value) => {
-    let commandType = "";
-    let payload = {};
-    let settingKey = "";
-
-    switch (settingType) {
-      case "receiver_timeout":
-        commandType = "set_receiver_timeout";
-        payload = { timeout_ms: parseInt(value) };
-        settingKey = "receiver_timeout_ms";
-        break;
-      case "command_response_timeout":
-        commandType = "set_command_response_timeout";
-        payload = { timeout_ms: parseInt(value) };
-        settingKey = "command_response_timeout_ms";
-        break;
-      case "clock_sync_interval":
-        commandType = "set_clock_sync_interval";
-        payload = { interval_ms: parseInt(value) };
-        settingKey = "clock_sync_interval_ms";
-        break;
-      case "debug_mode":
-        commandType = "set_debug_mode";
-        payload = { debug_mode: parseInt(value) };
-        settingKey = "debug_mode";
-        break;
-      default:
-        console.error("Invalid setting type.");
-        return;
-    }
-
-    try {
-      await axios.post("/api/system/cmd_daemon", { type: commandType, ...payload }, {
-        headers: { "Content-Type": "application/json" },
-      });
-      console.log(`${settingType.replace("_", " ")} updated successfully.`);
-      
-      // Update global app store after successful API call, using the correct fw_state path
-      const newStateData = {
+      // Optimistically rebase the local mirror so the rest of the UI
+      // sees the new values immediately, before the WS pushes them.
+      setStateData({
         ...stateData,
         fw_state: {
-          ...(stateData.fw_state || {}), // Preserve other fw_state properties
+          ...(stateData.fw_state || {}),
           settings: {
-            ...(stateData.fw_state?.settings || {}), // Preserve other settings
-            [settingKey]: parseInt(value),
+            ...(stateData.fw_state?.settings || {}),
+            receiver_timeout_ms: parseInt(s.receiver_timeout_ms, 10),
+            command_response_timeout_ms: parseInt(s.command_response_timeout_ms, 10),
+            clock_sync_interval_ms: parseInt(s.clock_sync_interval_ms, 10),
           },
         },
-      };
-      setStateData(newStateData);
-
-    } catch (error) {
-      console.error("Error updating setting", error.response?.data?.message || error.message);
-    }
-  };
+      });
+    });
 
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="text-lg font-bold text-white">Daemon Configuration</h2>
-
-      <div className="flex flex-col gap-1">
-        <label className="block text-gray-200 text-sm font-bold" htmlFor="receiver_timeout">
-          Receiver Timeout (ms)
-        </label>
-        <input
-          id="receiver_timeout"
-          type="number"
-          value={currentReceiverTimeout}
-          onChange={(e) => setCurrentReceiverTimeout(e.target.value)}
-          className="shadow appearance-none border rounded w-full py-2 px-3 text-white leading-tight focus:outline-none focus:shadow-outline bg-gray-700 border-gray-600 placeholder-gray-400"
-        />
-        <button 
-          onClick={() => handleSubmit("receiver_timeout", currentReceiverTimeout)}
-          className="bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline mt-1 self-start"
-        >
-          Update
-        </button>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {FIELDS.map((f) => (
+          <Field
+            key={f.key}
+            label={f.label}
+            htmlFor={f.key}
+            hint={f.hint}
+          >
+            <div className="relative">
+              <input
+                id={f.key}
+                type="number"
+                min={f.min}
+                value={draft.state[f.key] ?? ""}
+                onChange={(e) => draft.set(f.key, e.target.value)}
+                className={inputClass + " num tabular-nums pr-9"}
+              />
+              <span className="pointer-events-none absolute inset-y-0 right-2.5 flex items-center text-2xs text-fg-muted">
+                {f.suffix}
+              </span>
+            </div>
+          </Field>
+        ))}
       </div>
 
-      <div className="flex flex-col gap-1">
-        <label className="block text-gray-200 text-sm font-bold" htmlFor="command_response_timeout">
-          Command Response Timeout (ms)
-        </label>
-        <input
-          id="command_response_timeout"
-          type="number"
-          value={currentCommandResponseTimeout}
-          onChange={(e) => setCurrentCommandResponseTimeout(e.target.value)}
-          className="shadow appearance-none border rounded w-full py-2 px-3 text-white leading-tight focus:outline-none focus:shadow-outline bg-gray-700 border-gray-600 placeholder-gray-400"
-        />
-        <button 
-          onClick={() => handleSubmit("command_response_timeout", currentCommandResponseTimeout)}
-          className="bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline mt-1 self-start"
-        >
-          Update
-        </button>
-      </div>
-
-      <div className="flex flex-col gap-1">
-        <label className="block text-gray-200 text-sm font-bold" htmlFor="clock_sync_interval">
-          Clock Sync Interval (ms)
-        </label>
-        <input
-          id="clock_sync_interval"
-          type="number"
-          value={currentClockSyncInterval}
-          onChange={(e) => setCurrentClockSyncInterval(e.target.value)}
-          className="shadow appearance-none border rounded w-full py-2 px-3 text-white leading-tight focus:outline-none focus:shadow-outline bg-gray-700 border-gray-600 placeholder-gray-400"
-        />
-        <button 
-          onClick={() => handleSubmit("clock_sync_interval", currentClockSyncInterval)}
-          className="bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline mt-1 self-start"
-        >
-          Update
-        </button>
-      </div>
-
-      <div className="flex flex-col gap-1">
-        <label className="block text-gray-200 text-sm font-bold" htmlFor="debug_mode">
-          Debug Mode (0 or 1)
-        </label>
-        <input
-          id="debug_mode"
-          type="number"
-          value={currentDebugMode}
-          onChange={(e) => setCurrentDebugMode(e.target.value)}
-          min={0}
-          max={1}
-          className="shadow appearance-none border rounded w-full py-2 px-3 text-white leading-tight focus:outline-none focus:shadow-outline bg-gray-700 border-gray-600 placeholder-gray-400"
-        />
-        <button 
-          onClick={() => handleSubmit("debug_mode", currentDebugMode)}
-          className="bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline mt-1 self-start"
-        >
-          Update
-        </button>
-      </div>
+      <SaveBar
+        dirty={draft.dirty}
+        saving={draft.saving}
+        error={draft.error}
+        savedAt={draft.savedAt}
+        onSave={onSave}
+        onReset={draft.reset}
+      />
     </div>
   );
-};
-
-export default DaemonSettings; 
+}

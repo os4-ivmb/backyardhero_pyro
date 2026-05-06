@@ -1,15 +1,9 @@
-import Status from "../homepanel/Status";
 import ManualFirePanel from "./ManualFirePanel";
 
-
-
-export default function ManualFiring(props){
-
-    return (
-        <div className="justify-center items-center gap-2 my-6">
-            <div className="flex flex-row w-full">
-                <ManualFirePanel/>
-            </div>
-        </div>
-    )
+export default function ManualFiring() {
+  return (
+    <div className="w-full max-w-5xl mx-auto px-4 sm:px-6 py-6">
+      <ManualFirePanel />
+    </div>
+  );
 }

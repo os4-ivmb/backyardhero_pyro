@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { MdClose, MdRadar, MdWarning } from "react-icons/md";
 import useStateAppStore from "@/store/useStateAppStore";
+import { Button, Card, IconButton, Badge, inputClass, cn } from "@/design";
 
 // Wi-Fi 2.4 GHz channel centers in MHz (US chs 1-11, EU adds 12-13).
 // Each Wi-Fi channel is ~22 MHz wide → ±11 from center hits nRF channels.
@@ -127,33 +128,34 @@ export default function RFScanPanel() {
   }, [scan]);
 
   return (
-    <div className="">
-      <h2 className="text-lg text-white">RF Spectrum Scan</h2>
-      <p className="text-gray-400 text-xs italic mt-1">
+    <div className="flex flex-col gap-3">
+      <p className="text-xs text-fg-muted leading-snug">
         Sample every nRF24 channel using the dongle's RPD register to find
         the least congested band. Picks up Wi-Fi, BLE, microwaves — anything
         radiating &gt; -64 dBm during the sweep.
       </p>
 
-      <div className="flex items-center gap-3 mt-3 text-sm text-gray-200">
-        <span>
-          Current channel:{" "}
-          <strong className="text-white">
+      <div className="flex items-center gap-3 text-sm">
+        <div className="flex flex-col">
+          <span className="eyebrow">Current channel</span>
+          <span className="num tabular-nums text-base text-fg-primary">
             {currentChannel != null ? currentChannel : "—"}
-          </strong>
-          {currentChannel != null && (
-            <span className="text-gray-400 ml-1">
-              ({(NRF_BASE_MHZ + currentChannel) / 1000} GHz)
-            </span>
-          )}
-        </span>
-        <button
+            {currentChannel != null && (
+              <span className="text-fg-muted ml-1.5 text-xs">
+                · {(NRF_BASE_MHZ + currentChannel) / 1000} GHz
+              </span>
+            )}
+          </span>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
           onClick={() => setOpen(true)}
-          className="ml-auto inline-flex items-center gap-2 bg-blue-900 hover:bg-blue-700 text-white text-sm font-bold py-2 px-3 rounded"
-          type="button"
+          leading={<MdRadar />}
+          className="ml-auto"
         >
-          <MdRadar /> Open Scanner
-        </button>
+          Open scanner
+        </Button>
       </div>
 
       {open && (
@@ -195,61 +197,60 @@ function ScanModal({
   const recommended = scan?.recommended_ch;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-      <div className="bg-gray-900 border border-gray-700 rounded-lg shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col">
-        <div className="flex items-center justify-between p-4 border-b border-gray-700">
-          <div className="flex items-center gap-2 text-white">
-            <MdRadar className="text-xl" />
-            <h3 className="text-lg font-bold">RF Spectrum Scan</h3>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+      <Card
+        padding="none"
+        tone="raised"
+        className="w-full max-w-3xl max-h-[90vh] flex flex-col"
+      >
+        <div className="flex items-center justify-between px-4 h-12 border-b border-border-subtle">
+          <div className="flex items-center gap-2 text-fg-primary">
+            <MdRadar className="text-xl text-accent" />
+            <h3 className="text-base font-semibold">RF spectrum scan</h3>
           </div>
-          <button
-            onClick={onClose}
-            className="text-gray-400 hover:text-white p-1"
-            title="Close"
-          >
-            <MdClose className="text-xl" />
-          </button>
+          <IconButton label="Close" variant="ghost" size="sm" onClick={onClose}>
+            <MdClose />
+          </IconButton>
         </div>
 
         <div className="p-4 flex flex-col gap-3 overflow-y-auto">
           {blockedReason && (
-            <div className="flex items-center gap-2 px-3 py-2 bg-amber-900/40 border border-amber-700 text-amber-200 text-sm rounded">
+            <div className="flex items-center gap-2 px-3 py-2 bg-warn-bg/60 border border-warn/40 text-warn-fg text-sm rounded-sm">
               <MdWarning /> {blockedReason}
             </div>
           )}
 
           {error && (
-            <div className="flex items-center gap-2 px-3 py-2 bg-red-900/40 border border-red-700 text-red-200 text-sm rounded">
+            <div className="flex items-center gap-2 px-3 py-2 bg-danger-bg/60 border border-danger/40 text-danger-fg text-sm rounded-sm">
               <MdWarning /> {error}
             </div>
           )}
 
           <div className="flex flex-wrap items-end gap-3">
-            <label className="flex flex-col gap-1 text-sm text-gray-200">
-              <span className="text-xs text-gray-400">Passes</span>
+            <label className="flex flex-col gap-1">
+              <span className="eyebrow">Passes</span>
               <input
                 type="number"
                 min={1}
                 max={50}
                 value={passes}
                 onChange={(e) => setPasses(parseInt(e.target.value, 10) || 1)}
-                className="w-24 bg-gray-800 text-white text-sm rounded border border-gray-600 px-2 py-1"
+                className={cn(inputClass, "w-24 num tabular-nums")}
                 disabled={scanning}
               />
             </label>
-            <button
+            <Button
+              variant="primary"
+              size="md"
               onClick={triggerScan}
               disabled={scanning || !!blockedReason}
-              className={`px-4 py-2 rounded text-white text-sm font-bold ${
-                scanning || blockedReason
-                  ? "bg-gray-600 cursor-not-allowed"
-                  : "bg-emerald-600 hover:bg-emerald-700"
-              }`}
+              loading={scanning}
+              leading={<MdRadar />}
             >
-              {scanning ? "Scanning…" : "Run Scan"}
-            </button>
+              {scanning ? "Scanning…" : "Run scan"}
+            </Button>
 
-            <div className="ml-auto text-xs text-gray-400">
+            <div className="ml-auto text-xs text-fg-muted">
               {scan?.host_ts_ms ? (
                 <>Last scan: {new Date(scan.host_ts_ms).toLocaleString()}</>
               ) : loading ? (
@@ -261,61 +262,55 @@ function ScanModal({
           </div>
 
           {scan && (
-            <div className="grid grid-cols-2 gap-3 text-sm">
-              <div className="bg-gray-800/60 border border-gray-700 rounded p-3">
-                <div className="text-xs text-gray-400">Current channel</div>
-                <div className="text-2xl font-bold text-white">
+            <div className="grid grid-cols-2 gap-3">
+              <Card padding="md" tone="inset">
+                <div className="eyebrow">Current channel</div>
+                <div className="num text-3xl font-bold text-fg-primary tabular-nums leading-none mt-1">
                   {currentChannel ?? "—"}
                 </div>
-                <div className="text-xs text-gray-500">
+                <div className="text-xs text-fg-muted mt-1">
                   {currentChannel != null &&
                     `${(NRF_BASE_MHZ + currentChannel) / 1000} GHz`}
                 </div>
-              </div>
-              <div className="bg-emerald-900/30 border border-emerald-700 rounded p-3">
-                <div className="text-xs text-emerald-300">Recommended</div>
-                <div className="text-2xl font-bold text-emerald-200">
+              </Card>
+              <Card padding="md" tone="ok">
+                <div className="eyebrow text-ok-fg">Recommended</div>
+                <div className="num text-3xl font-bold text-ok-fg tabular-nums leading-none mt-1">
                   {recommended ?? "—"}
                 </div>
-                <div className="text-xs text-emerald-400">
+                <div className="text-xs text-ok-fg/70 mt-1">
                   {recommended != null &&
                     `${(NRF_BASE_MHZ + recommended) / 1000} GHz`}
                 </div>
                 {recommended != null && recommended !== currentChannel && (
-                  <button
+                  <Button
+                    size="sm"
+                    variant="live"
+                    className="mt-3 w-full"
                     onClick={applyRecommended}
                     disabled={!!blockedReason}
-                    className={`mt-2 w-full text-xs font-bold py-1.5 px-2 rounded ${
-                      blockedReason
-                        ? "bg-gray-700 text-gray-400 cursor-not-allowed"
-                        : "bg-emerald-600 hover:bg-emerald-500 text-white"
-                    }`}
                   >
                     Apply ch {recommended}
-                  </button>
+                  </Button>
                 )}
-              </div>
+              </Card>
             </div>
           )}
 
           {scan?.top?.length > 0 && (
-            <div className="text-sm text-gray-300">
-              <div className="text-xs text-gray-400 mb-1">
+            <div>
+              <div className="eyebrow mb-1.5">
                 Top candidates (lowest neighborhood-weighted score wins)
               </div>
-              <div className="flex gap-2 flex-wrap">
+              <div className="flex gap-1.5 flex-wrap">
                 {scan.top.map((t, i) => (
-                  <span
+                  <Badge
                     key={t.ch}
-                    className={`px-2 py-1 rounded text-xs font-mono ${
-                      i === 0
-                        ? "bg-emerald-700 text-white"
-                        : "bg-gray-700 text-gray-200"
-                    }`}
+                    tone={i === 0 ? "ok" : "neutral"}
                     title={`hits=${t.hits}, score=${t.score}`}
                   >
-                    ch {t.ch} · {t.hits}h
-                  </span>
+                    <span className="font-mono">ch {t.ch} · {t.hits}h</span>
+                  </Badge>
                 ))}
               </div>
             </div>
@@ -331,13 +326,13 @@ function ScanModal({
           )}
 
           {!loading && !scan && !scanning && (
-            <div className="text-center text-gray-500 italic py-8">
-              No scan available. Click <strong>Run Scan</strong> to sample the
+            <div className="text-center text-fg-muted italic py-8">
+              No scan available. Click <strong className="text-fg-primary">Run scan</strong> to sample the
               spectrum.
             </div>
           )}
         </div>
-      </div>
+      </Card>
     </div>
   );
 }

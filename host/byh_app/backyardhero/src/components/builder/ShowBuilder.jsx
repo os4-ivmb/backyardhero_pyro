@@ -10,6 +10,32 @@ import SpatialLayoutMap from "./SpatialLayoutMap";
 import RacksTab from "./RacksTab";
 import RackShellsSelector from "./RackShellsSelector";
 import WaveSurfer from 'wavesurfer.js';
+import {
+  Modal,
+  Button,
+  Field,
+  inputClass,
+  selectClass,
+  Card,
+  Badge,
+  cn,
+} from "@/design";
+
+// Item type catalogue surfaced in the Add Item modal. Centralised so the
+// dropdown order stays predictable and labels stay in one place.
+const ADD_ITEM_TYPES = [
+  { value: "CAKE_FOUNTAIN", label: "Cake fountain" },
+  { value: "CAKE_200G", label: "Cake 200g" },
+  { value: "CAKE_350G", label: "Cake 350g" },
+  { value: "CAKE_500G", label: "Cake 500g" },
+  { value: "COMPOUND_CAKE", label: "Compound cake" },
+  { value: "AERIAL_SHELL", label: "Aerial shell" },
+  { value: "GENERIC", label: "Generic / placeholder" },
+  { value: "FUSE", label: "Fuse" },
+  { value: "FUSED_SHELL_LINE", label: "Fused shell line" },
+  { value: "FUSED_LINE", label: "Fused line" },
+  { value: "RACK_SHELLS", label: "Rack shells" },
+];
 
 export const mergeCues = (receivers) => {
   const mergedCues = {};
@@ -325,282 +351,362 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
 
   if (!isOpen) return null;
 
+  // Whether the user has selected/built something we can actually add.
+  const canAdd =
+    !!selectedItem ||
+    !!fusedLine ||
+    !!fusedItemLine ||
+    !!rackShells ||
+    selectedType === "GENERIC";
+
+  // Item type categories that surface an inventory list inline.
+  const showsInventoryList =
+    !fusedLine &&
+    !fusedItemLine &&
+    !rackShells &&
+    selectedType !== "FUSED_SHELL_LINE" &&
+    selectedType !== "FUSED_LINE" &&
+    selectedType !== "RACK_SHELLS" &&
+    selectedType !== "GENERIC";
+
+  const onTypeChange = (newType) => {
+    setSelectedType(newType);
+    setSelectedItem(null);
+    setFireMultiple(false);
+    setMultipleCount(2);
+    if (newType === "FUSED_SHELL_LINE") {
+      setFusedBuilderOpen(true);
+    } else if (newType === "FUSED_LINE") {
+      setFusedItemBuilderOpen(true);
+    } else if (newType === "RACK_SHELLS") {
+      setIsRackShellsOpen(true);
+    } else {
+      setFusedLine(null);
+      setFusedItemLine(null);
+      setRackShells(null);
+    }
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-      <div className="bg-gray-800 text-white p-6 rounded shadow-lg w-96 relative z-50">
-        <h2 className="text-xl mb-4">Add Item to Timeline</h2>
-        
-        {/* Type Selector */}
-        <div className="mb-4">
-          <label className="block mb-2">Select Type:</label>
-          <select
-            className="w-full p-2 bg-gray-700 rounded"
-            value={selectedType}
-            onChange={(e) => {
-              const newType = e.target.value;
-              setSelectedType(newType);
-              setSelectedItem(null)
-              setFireMultiple(false);
-              setMultipleCount(2);
-              if (newType === "FUSED_SHELL_LINE") {
-                setFusedBuilderOpen(true);
-              } else if (newType === "FUSED_LINE") {
-                setFusedItemBuilderOpen(true);
-              } else if (newType === "RACK_SHELLS") {
-                setIsRackShellsOpen(true);
-              } else {
-                setFusedLine(null);
-                setFusedItemLine(null);
-                setRackShells(null);
-              }
-            }}
-          >
-            <option value="CAKE_FOUNTAIN">Cake Fountain</option>
-            <option value="CAKE_200G">Cake 200g</option>
-            <option value="CAKE_350G">Cake 350g</option>
-            <option value="CAKE_500G">Cake 500g</option>
-            <option value="COMPOUND_CAKE">Compound</option>
-            <option value="AERIAL_SHELL">Aerial Shell</option>
-            <option value="GENERIC">Generic</option>
-            <option value="FUSE">Fuse</option>
-            <option value="FUSED_SHELL_LINE">Fused Shell Line</option>
-            <option value="FUSED_LINE">Fused Line</option>
-            <option value="RACK_SHELLS">Rack Shells</option>
-          </select>
-        </div>
-
-        {/* FusedLine Preview */}
-        {fusedLine && (
-          <div className="mb-4 p-4 bg-gray-700 rounded">
-            <h3 className="text-lg mb-2">Fused Line Preview:</h3>
-            <p>
-              <strong>Fuse Type:</strong>{" "}
-              <b style={{ color: `${fusedLine.fuse.color}` }}>{fusedLine.fuse.name}</b>
-            </p>
-            <p><strong>Spacing:</strong> {fusedLine.spacing}"</p>
-            <p><strong>Duration:</strong> {fusedLine.duration}s</p>
-            <p>
-              <strong>Shells:</strong>
-              <ul className="list-decimal list-inside" style={{ borderLeft: `3px solid ${fusedLine.fuse.color}` }}>
-                {fusedLine.shells.map((shell, index) => (
-                  <li key={index}>{shell.name}</li>
-                ))}
-              </ul>
-            </p>
-          </div>
-        )}
-
-        {/* Rack Shells Preview */}
-        {rackShells && (
-          <div className="mb-4 p-4 bg-gray-700 rounded">
-            <h3 className="text-lg mb-2">Rack Shells Preview:</h3>
-            <p><strong>Rack:</strong> {rackShells.rackName}</p>
-            <p>
-              <strong>Fireable Item:</strong>{" "}
-              {rackShells.fireableItem?.type === 'single' 
-                ? `Single Shell (Cell ${rackShells.fireableItem.cells[0]})`
-                : `Fused Link (${rackShells.fireableItem?.cells.length || 0} shells)`
-              }
-            </p>
-            {rackShells.fireableItemId && (
-              <p><strong>ID:</strong> {rackShells.fireableItemId}</p>
-            )}
-            <p><strong>Cells:</strong> {rackShells.rackCells?.join(', ') || 'N/A'}</p>
-            {rackShells.fireableItem?.type === 'fused' && rackShells.fireableItem.fuse && (
-              <>
-                <p>
-                  <strong>Fuse:</strong>{" "}
-                  {(() => {
-                    const fuseItem = inventory.find(item => item.type === 'FUSE' && item.id === parseInt(rackShells.fireableItem.fuse.type));
-                    return fuseItem ? (
-                      <span style={{ color: fuseItem.color }}>{fuseItem.name}</span>
-                    ) : 'Unknown';
-                  })()}
-                </p>
-                <p><strong>Lead-In:</strong> {rackShells.fireableItem.fuse.leadIn || 0}"</p>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* FusedItemLine (FUSED_LINE) Preview */}
-        {fusedItemLine && (
-          <div className="mb-4 p-4 bg-gray-700 rounded">
-            <h3 className="text-lg mb-2">Fused Line Preview:</h3>
-            <p><strong>Steps:</strong> {fusedItemLine.steps?.length || 0}</p>
-            <p><strong>Total Duration:</strong> {fusedItemLine.duration?.toFixed(2)}s</p>
-            <ol className="list-decimal list-inside text-sm mt-2">
-              {fusedItemLine.steps?.map((s, i) => (
-                <li key={i}>
-                  {s.name}
-                  {s.multiple > 1 ? ` ×${s.multiple}` : ""}
-                  <span className="text-gray-400">
-                    {" "}— {i === 0 ? "cue→start" : "after prev"} {(s.fuseDelay || 0).toFixed(2)}s, dur {s.duration.toFixed(2)}s
-                  </span>
-                </li>
-              ))}
-            </ol>
-            <button
-              className="mt-2 bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-xs"
-              onClick={() => setFusedItemBuilderOpen(true)}
+    <>
+      <Modal
+        isOpen={isOpen}
+        onClose={onClose}
+        title="Add item to timeline"
+        eyebrow={`Cue · t = ${Number(startTime || 0).toFixed(2)}s`}
+        size="lg"
+        footer={
+          <>
+            <Button variant="outline" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              onClick={handleAdd}
+              disabled={!canAdd}
             >
-              Edit Fused Line
-            </button>
-          </div>
-        )}
+              Add to timeline
+            </Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-4">
+          <Field label="Item type">
+            <select
+              className={selectClass}
+              value={selectedType}
+              onChange={(e) => onTypeChange(e.target.value)}
+            >
+              {ADD_ITEM_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </Field>
 
-        {/* Select Item for non-fused types */}
-        {!fusedLine && !fusedItemLine && !rackShells && selectedType !== "FUSED_SHELL_LINE" && selectedType !== "FUSED_LINE" && selectedType !== "RACK_SHELLS" && selectedType !== "GENERIC" && (
-          <div className="mb-4">
-            <label className="block mb-2">Select Item:</label>
-            <ul className="h-32 overflow-y-auto bg-gray-700 p-2 rounded">
-              {filteredInventory.map((item) => (
-                <li
-                  key={item.id}
-                  className={`p-2 rounded cursor-pointer ${selectedItem?.id === item.id ? "bg-blue-500" : "hover:bg-gray-600"}`}
-                  onClick={() => handleItemSelected(item)}
+          {/* Inline preview cards for composite items */}
+          {fusedLine && (
+            <Card tone="raised" padding="md">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="eyebrow mb-1">Fused shell line</div>
+                  <div className="text-sm font-medium text-fg-primary truncate">
+                    {fusedLine.fuse?.name}{" "}
+                    <span className="text-fg-muted">·</span>{" "}
+                    {fusedLine.shells?.length || 0} shells
+                  </div>
+                  <div className="num text-2xs text-fg-muted mt-0.5">
+                    spacing {fusedLine.spacing}″ ·{" "}
+                    {Number(fusedLine.duration || 0).toFixed(2)}s
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setFusedBuilderOpen(true)}
                 >
-                  {item.name} ({item.duration} sec)
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
+                  Edit
+                </Button>
+              </div>
+              <ol className="list-decimal list-inside text-2xs text-fg-secondary mt-3 space-y-0.5 pl-1">
+                {fusedLine.shells?.map((shell, index) => (
+                  <li key={index} className="truncate">
+                    {shell?.name}
+                  </li>
+                ))}
+              </ol>
+            </Card>
+          )}
 
-        {/* Fire Multiple — fire several physical units of this item from one cue.
-            Only meaningful for cake/fountain/compound/aerial-shell single items;
-            counts feed into loadout totals and total cost. */}
-        {supportsMultiple && (
-          <div className="mb-4">
-            <div className="flex items-center space-x-2">
-              <label className="flex items-center space-x-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={fireMultiple}
-                  onChange={(e) => setFireMultiple(e.target.checked)}
-                />
-                <span>Fire Multiple</span>
-              </label>
-              {fireMultiple && (
-                <input
-                  type="number"
-                  min={2}
-                  step={1}
-                  className="w-24 p-2 bg-gray-700 rounded text-white"
-                  value={multipleCount}
-                  onChange={(e) => {
-                    const v = parseInt(e.target.value, 10);
-                    setMultipleCount(Number.isFinite(v) && v >= 2 ? v : 2);
-                  }}
-                />
-              )}
-            </div>
-            {fireMultiple && (
-              <p className="mt-1 text-sm text-gray-300">
-                How many fired together on this cue.
-              </p>
-            )}
-          </div>
-        )}
+          {rackShells && (
+            <Card tone="raised" padding="md">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="eyebrow mb-1">Rack shells</div>
+                  <div className="text-sm font-medium text-fg-primary truncate">
+                    {rackShells.rackName}
+                  </div>
+                  <div className="text-2xs text-fg-muted mt-0.5">
+                    {rackShells.fireableItem?.type === "single"
+                      ? `Single shell · cell ${rackShells.fireableItem.cells[0]}`
+                      : `Fused link · ${rackShells.fireableItem?.cells.length || 0} shells`}
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setIsRackShellsOpen(true)}
+                >
+                  Change
+                </Button>
+              </div>
+              <div className="text-2xs text-fg-muted mt-2 num">
+                Cells: {rackShells.rackCells?.join(", ") || "—"}
+              </div>
+              {rackShells.fireableItem?.type === "fused" &&
+                rackShells.fireableItem.fuse &&
+                (() => {
+                  const fuseItem = inventory.find(
+                    (item) =>
+                      item.type === "FUSE" &&
+                      item.id === parseInt(rackShells.fireableItem.fuse.type)
+                  );
+                  return (
+                    <div className="text-2xs text-fg-muted mt-1">
+                      Fuse:{" "}
+                      <span className="text-fg-secondary">
+                        {fuseItem?.name || "Unknown"}
+                      </span>{" "}
+                      · lead-in{" "}
+                      <span className="num">
+                        {rackShells.fireableItem.fuse.leadIn || 0}″
+                      </span>
+                    </div>
+                  );
+                })()}
+            </Card>
+          )}
 
-        {/* Meta Label Field */}
-        <div className="mb-4">
-          <label className="block mb-2">Label:</label>
-          <input
-            type="text"
-            className="w-full p-2 bg-gray-700 rounded text-white"
-            value={metaLabel}
-            onChange={(e) => setMetaLabel(e.target.value)}
-            placeholder="Enter meta label"
-          />
-        </div>
+          {fusedItemLine && (
+            <Card tone="raised" padding="md">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="eyebrow mb-1">Fused line</div>
+                  <div className="text-sm font-medium text-fg-primary">
+                    {fusedItemLine.steps?.length || 0} step
+                    {fusedItemLine.steps?.length === 1 ? "" : "s"} ·{" "}
+                    <span className="num">
+                      {fusedItemLine.duration?.toFixed(2)}s
+                    </span>
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setFusedItemBuilderOpen(true)}
+                >
+                  Edit
+                </Button>
+              </div>
+              <ol className="text-2xs text-fg-secondary mt-3 space-y-0.5">
+                {fusedItemLine.steps?.map((s, i) => (
+                  <li key={i} className="flex items-baseline gap-2 min-w-0">
+                    <span className="text-fg-muted shrink-0 num">
+                      {String(i + 1).padStart(2, "0")}
+                    </span>
+                    <span className="truncate">
+                      {s.name}
+                      {s.multiple > 1 ? ` ×${s.multiple}` : ""}
+                    </span>
+                    <span className="num text-fg-muted shrink-0 ml-auto">
+                      +{(s.fuseDelay || 0).toFixed(2)}s ·{" "}
+                      {s.duration.toFixed(2)}s
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            </Card>
+          )}
 
-        {/* Additional Delay */}
-        <div className="mb-4">
-          <label className="block mb-2">Additional Delay (sec):</label>
-          <input
-            type="number"
-            className="w-full p-2 bg-gray-700 rounded text-white"
-            value={metaDelaySec}
-            onChange={(e) => setMetaDelaySec(parseFloat(e.target.value))}
-            placeholder="Delay in sec"
-          />
-        </div>
-
-        {/* Zone and Target (in line) */}
-        <div className="mb-4 flex space-x-4 items-end">
-          <div className="flex-1">
-            <label className="block mb-2">Zone:</label>
-            <select
-              value={zone}
-              onChange={(e) => {
-                const newZone = e.target.value;
-                setZone(newZone);
-                // Reset target to first available target in new zone
-                if (newZone && availableDevices[newZone]) {
-                  const firstAvailableTarget = availableDevices[newZone].find(
-                    t => !isOccupied(newZone, t)
-                  ) || availableDevices[newZone][0];
-                  setTarget(firstAvailableTarget);
-                }
-              }}
-              className="block appearance-none w-full border border-gray-400 hover:border-gray-500 px-4 py-2 rounded shadow leading-tight focus:outline-none focus:shadow-outline"
+          {showsInventoryList && (
+            <Field
+              label="Item"
+              hint={
+                filteredInventory.length === 0
+                  ? "No inventory of this type yet."
+                  : `${filteredInventory.length} matching item${filteredInventory.length === 1 ? "" : "s"}`
+              }
             >
-              {Object.keys(availableDevices).map((k, i) => {
-                const label = receiverLabels?.[k];
-                const displayText = label ? `${label} (${k})` : k;
-                return (
-                  <option 
-                    key={i} 
-                    value={k}
-                    disabled={isZoneFullyOccupied(k)}
-                  >
-                    {displayText}{isZoneFullyOccupied(k) ? ' (X)' : ''}
-                  </option>
-                );
-              })}
-            </select>
-          </div>
-          <div className="flex-1">
-            <label className="block mb-2">Target:</label>
-            <select
-              value={target}
-              onChange={(e) => setTarget(parseInt(e.target.value))}
-              className="block appearance-none w-full border border-gray-400 hover:border-gray-500 px-4 py-2 rounded shadow leading-tight focus:outline-none focus:shadow-outline"
+              <Card tone="inset" padding="none">
+                <ul className="max-h-44 overflow-y-auto py-1">
+                  {filteredInventory.length === 0 && (
+                    <li className="px-3 py-2 text-sm text-fg-muted">
+                      Add some in the Inventory page first.
+                    </li>
+                  )}
+                  {filteredInventory.map((item) => {
+                    const selected = selectedItem?.id === item.id;
+                    return (
+                      <li
+                        key={item.id}
+                        className={cn(
+                          "px-3 py-1.5 cursor-pointer text-sm flex items-center justify-between gap-3 transition-colors",
+                          selected
+                            ? "bg-accent-muted text-accent-fg"
+                            : "hover:bg-surface-3 text-fg-primary"
+                        )}
+                        onClick={() => handleItemSelected(item)}
+                      >
+                        <span className="truncate">{item.name}</span>
+                        <span className="num text-2xs text-fg-muted shrink-0">
+                          {Number(item.duration || 0).toFixed(1)}s
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </Card>
+            </Field>
+          )}
+
+          {supportsMultiple && (
+            <Field
+              label="Fire multiple"
+              hint="Fire several physical units of this item from one cue. Used for loadout totals and cost."
             >
-              {zone && availableDevices[zone].map((k, i) => {
-                const occupied = isOccupied(zone, k);
-                return (
-                  <option 
-                    key={i} 
-                    value={k}
-                    disabled={occupied}
-                  >
-                    {k}{occupied ? ' (X)' : ''}
-                  </option>
-                );
-              })}
-            </select>
-          </div>
-        </div>
+              <div className="flex items-center gap-3">
+                <label className="flex items-center gap-2 text-sm text-fg-secondary cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={fireMultiple}
+                    onChange={(e) => setFireMultiple(e.target.checked)}
+                  />
+                  <span>Fire multiple</span>
+                </label>
+                {fireMultiple && (
+                  <input
+                    type="number"
+                    min={2}
+                    step={1}
+                    className={inputClass + " w-24"}
+                    value={multipleCount}
+                    onChange={(e) => {
+                      const v = parseInt(e.target.value, 10);
+                      setMultipleCount(
+                        Number.isFinite(v) && v >= 2 ? v : 2
+                      );
+                    }}
+                  />
+                )}
+              </div>
+            </Field>
+          )}
 
-        {/* Error display */}
-        <div className="text-xs text-red-500 mb-2">{error}</div>
+          <Field label="Label">
+            <input
+              type="text"
+              className={inputClass}
+              value={metaLabel}
+              onChange={(e) => setMetaLabel(e.target.value)}
+              placeholder="Auto-fills from item name"
+            />
+          </Field>
 
-        {/* Modal Buttons */}
-        <div className="flex justify-end space-x-2">
-          <button className="bg-gray-600 px-4 py-2 rounded" onClick={onClose}>
-            Cancel
-          </button>
-          <button
-            className="bg-blue-600 px-4 py-2 rounded"
-            onClick={handleAdd}
-            disabled={!selectedItem && !fusedLine && !fusedItemLine && !rackShells && !(selectedType === "GENERIC")}
+          <Field
+            label="Additional delay (sec)"
+            hint="Padding added on top of the item's intrinsic fuse / lift delay."
           >
-            Add
-          </button>
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              className={inputClass}
+              value={metaDelaySec}
+              onChange={(e) =>
+                setMetaDelaySec(parseFloat(e.target.value) || 0)
+              }
+              placeholder="0"
+            />
+          </Field>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Zone">
+              <select
+                value={zone || ""}
+                onChange={(e) => {
+                  const newZone = e.target.value;
+                  setZone(newZone);
+                  if (newZone && availableDevices[newZone]) {
+                    const firstAvailableTarget =
+                      availableDevices[newZone].find(
+                        (t) => !isOccupied(newZone, t)
+                      ) || availableDevices[newZone][0];
+                    setTarget(firstAvailableTarget);
+                  }
+                }}
+                className={selectClass}
+              >
+                {Object.keys(availableDevices).map((k, i) => {
+                  const label = receiverLabels?.[k];
+                  const displayText = label ? `${label} (${k})` : k;
+                  const fullyOccupied = isZoneFullyOccupied(k);
+                  return (
+                    <option key={i} value={k} disabled={fullyOccupied}>
+                      {displayText}
+                      {fullyOccupied ? " · full" : ""}
+                    </option>
+                  );
+                })}
+              </select>
+            </Field>
+            <Field label="Target">
+              <select
+                value={target ?? ""}
+                onChange={(e) => setTarget(parseInt(e.target.value))}
+                className={selectClass}
+              >
+                {zone &&
+                  availableDevices[zone]?.map((k, i) => {
+                    const occupied = isOccupied(zone, k);
+                    return (
+                      <option key={i} value={k} disabled={occupied}>
+                        {k}
+                        {occupied ? " · used" : ""}
+                      </option>
+                    );
+                  })}
+              </select>
+            </Field>
+          </div>
+
+          {error ? (
+            <div className="rounded-sm border border-danger/40 bg-danger-bg/60 px-3 py-2 text-xs text-danger-fg">
+              {error}
+            </div>
+          ) : null}
         </div>
-      </div>
+      </Modal>
 
       {/* FusedLineBuilderModal */}
       {isFusedBuilderOpen && (
@@ -625,29 +731,35 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
 
       {/* RackShellsSelector */}
       {isRackShellsOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-          <div className="bg-gray-800 text-white p-6 rounded shadow-lg w-96 relative z-50">
-            <h2 className="text-xl mb-4">Select Rack Shells</h2>
-            <RackShellsSelector
-              onSelect={(rackShells) => {
-                setRackShells(rackShells);
-                setIsRackShellsOpen(false);
-                if (!metaLabel) {
-                  setMetaLabel(rackShells.rackName);
-                }
-              }}
-              onClose={() => {
-                setIsRackShellsOpen(false);
-                setSelectedType("CAKE_FOUNTAIN");
-              }}
-              items={items}
-              inventory={inventory}
-              showId={showMetadata?.id}
-            />
-          </div>
-        </div>
+        <Modal
+          isOpen={isRackShellsOpen}
+          onClose={() => {
+            setIsRackShellsOpen(false);
+            if (!rackShells) setSelectedType("CAKE_FOUNTAIN");
+          }}
+          title="Select rack shells"
+          size="2xl"
+          layer={1}
+        >
+          <RackShellsSelector
+            onSelect={(picked) => {
+              setRackShells(picked);
+              setIsRackShellsOpen(false);
+              if (!metaLabel) {
+                setMetaLabel(picked.rackName);
+              }
+            }}
+            onClose={() => {
+              setIsRackShellsOpen(false);
+              if (!rackShells) setSelectedType("CAKE_FOUNTAIN");
+            }}
+            items={items}
+            inventory={inventory}
+            showId={showMetadata?.id}
+          />
+        </Modal>
       )}
-    </div>
+    </>
   );
 };
 
@@ -682,62 +794,85 @@ const ChainTimingModal = ({ isOpen, onClose, onApply, selectedItems }) => {
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-      <div className="bg-gray-800 text-white p-6 rounded shadow-lg w-96 relative z-50">
-        <h2 className="text-xl mb-4">Chain Timing</h2>
-        <p className="text-sm text-gray-300 mb-4">
-          Set timing interval between {selectedItems.length} selected items
-        </p>
-        
-        <div className="mb-4">
-          <label className="block mb-2">Start Time (seconds):</label>
-          <input
-            type="number"
-            className="w-full p-2 bg-gray-700 rounded text-white"
-            value={startTime}
-            onChange={(e) => setStartTime(parseFloat(e.target.value) || 0)}
-            step="0.1"
-          />
-        </div>
-
-        <div className="mb-4">
-          <label className="block mb-2">Interval Between Items (seconds):</label>
-          <input
-            type="number"
-            className="w-full p-2 bg-gray-700 rounded text-white"
-            value={intervalSeconds}
-            onChange={(e) => setIntervalSeconds(parseFloat(e.target.value) || 0)}
-            step="0.1"
-            min="0"
-          />
-        </div>
-
-        <div className="mb-4 p-3 bg-gray-700 rounded">
-          <h3 className="text-sm font-bold mb-2">Preview:</h3>
-          {selectedItems.slice(0, 3).map((item, index) => (
-            <div key={item.id} className="text-xs">
-              {item.name}: {startTime + (index * intervalSeconds)}s
-            </div>
-          ))}
-          {selectedItems.length > 3 && (
-            <div className="text-xs text-gray-400">... and {selectedItems.length - 3} more</div>
-          )}
-        </div>
-
-        <div className="flex justify-end space-x-2">
-          <button className="bg-gray-600 px-4 py-2 rounded" onClick={onClose}>
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      title="Chain timing"
+      eyebrow={`${selectedItems.length} items selected`}
+      size="md"
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose}>
             Cancel
-          </button>
-          <button
-            className="bg-blue-600 px-4 py-2 rounded"
+          </Button>
+          <Button
+            variant="primary"
             onClick={handleApply}
             disabled={selectedItems.length < 2}
           >
-            Apply
-          </button>
+            Apply spacing
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <p className="text-sm text-fg-secondary leading-snug">
+          Re-time the selected items in their current order, starting at{" "}
+          <span className="num text-fg-primary">{startTime.toFixed(2)}s</span>{" "}
+          and stepping every{" "}
+          <span className="num text-fg-primary">
+            {intervalSeconds.toFixed(2)}s
+          </span>
+          .
+        </p>
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Start time (sec)">
+            <input
+              type="number"
+              step="0.1"
+              className={inputClass}
+              value={startTime}
+              onChange={(e) => setStartTime(parseFloat(e.target.value) || 0)}
+            />
+          </Field>
+          <Field label="Interval (sec)">
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              className={inputClass}
+              value={intervalSeconds}
+              onChange={(e) =>
+                setIntervalSeconds(parseFloat(e.target.value) || 0)
+              }
+            />
+          </Field>
         </div>
+
+        <Card tone="inset" padding="sm">
+          <div className="eyebrow mb-2">Preview</div>
+          <ul className="flex flex-col gap-1 text-sm">
+            {selectedItems.slice(0, 5).map((item, index) => (
+              <li
+                key={item.id}
+                className="flex items-center justify-between gap-3 min-w-0"
+              >
+                <span className="truncate text-fg-secondary">{item.name}</span>
+                <span className="num text-fg-muted">
+                  {(startTime + index * intervalSeconds).toFixed(2)}s
+                </span>
+              </li>
+            ))}
+            {selectedItems.length > 5 && (
+              <li className="text-2xs text-fg-muted italic">
+                +{selectedItems.length - 5} more…
+              </li>
+            )}
+          </ul>
+        </Card>
       </div>
-    </div>
+    </Modal>
   );
 };
 
@@ -1327,17 +1462,31 @@ const CopyItemTargetModal = ({ isOpen, onClose, onConfirm, sourceItem, items, av
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-      <div className="bg-gray-800 text-white p-6 rounded shadow-lg w-96 relative z-50">
-        <h2 className="text-xl mb-2">Copy "{sourceItem?.name}"</h2>
-        <p className="text-sm text-gray-300 mb-4">
-          Pick a receiver/cue for the copy. After confirming, click a spot on the
-          timeline to place it.
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      title={`Copy "${sourceItem?.name || "item"}"`}
+      eyebrow="Step 1 of 2 · pick destination"
+      size="md"
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={handleConfirm}>
+            Continue
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <p className="text-sm text-fg-secondary leading-snug">
+          Pick a receiver and cue for the copy. After confirming, click a spot
+          on the timeline to drop it.
         </p>
 
-        <div className="mb-4 flex space-x-4 items-end">
-          <div className="flex-1">
-            <label className="block mb-2">Zone:</label>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Zone">
             <select
               value={zone ?? ""}
               onChange={(e) => {
@@ -1345,55 +1494,54 @@ const CopyItemTargetModal = ({ isOpen, onClose, onConfirm, sourceItem, items, av
                 setZone(newZone);
                 if (newZone && availableDevices[newZone]) {
                   const firstFree =
-                    availableDevices[newZone].find((t) => !isOccupied(newZone, t)) ??
-                    availableDevices[newZone][0];
+                    availableDevices[newZone].find(
+                      (t) => !isOccupied(newZone, t)
+                    ) ?? availableDevices[newZone][0];
                   setTarget(firstFree);
                 }
               }}
-              className="block appearance-none w-full border border-gray-400 hover:border-gray-500 px-4 py-2 rounded shadow leading-tight focus:outline-none focus:shadow-outline"
+              className={selectClass}
             >
               {Object.keys(availableDevices || {}).map((k, i) => {
                 const label = receiverLabels?.[k];
                 const displayText = label ? `${label} (${k})` : k;
+                const fullyOccupied = isZoneFullyOccupied(k);
                 return (
-                  <option key={i} value={k} disabled={isZoneFullyOccupied(k)}>
-                    {displayText}{isZoneFullyOccupied(k) ? " (X)" : ""}
+                  <option key={i} value={k} disabled={fullyOccupied}>
+                    {displayText}
+                    {fullyOccupied ? " · full" : ""}
                   </option>
                 );
               })}
             </select>
-          </div>
-          <div className="flex-1">
-            <label className="block mb-2">Target:</label>
+          </Field>
+          <Field label="Target">
             <select
               value={target ?? ""}
               onChange={(e) => setTarget(parseInt(e.target.value))}
-              className="block appearance-none w-full border border-gray-400 hover:border-gray-500 px-4 py-2 rounded shadow leading-tight focus:outline-none focus:shadow-outline"
+              className={selectClass}
             >
-              {zone && availableDevices?.[zone]?.map((k, i) => {
-                const occupied = isOccupied(zone, k);
-                return (
-                  <option key={i} value={k} disabled={occupied}>
-                    {k}{occupied ? " (X)" : ""}
-                  </option>
-                );
-              })}
+              {zone &&
+                availableDevices?.[zone]?.map((k, i) => {
+                  const occupied = isOccupied(zone, k);
+                  return (
+                    <option key={i} value={k} disabled={occupied}>
+                      {k}
+                      {occupied ? " · used" : ""}
+                    </option>
+                  );
+                })}
             </select>
+          </Field>
+        </div>
+
+        {error ? (
+          <div className="rounded-sm border border-danger/40 bg-danger-bg/60 px-3 py-2 text-xs text-danger-fg">
+            {error}
           </div>
-        </div>
-
-        {error && <div className="text-xs text-red-500 mb-2">{error}</div>}
-
-        <div className="flex justify-end space-x-2">
-          <button className="bg-gray-600 px-4 py-2 rounded" onClick={onClose}>
-            Cancel
-          </button>
-          <button className="bg-blue-600 px-4 py-2 rounded" onClick={handleConfirm}>
-            Continue
-          </button>
-        </div>
+        ) : null}
       </div>
-    </div>
+    </Modal>
   );
 };
 
@@ -1895,62 +2043,71 @@ const ShowBuilder = (props) => {
             onPlayPause={handleAudioPlayPause}
             onAudioFileChange={handleAudioFileChange}
           />
-          {/* Remove Audio Button */}
           {audioFile && (
             <div className="mb-2 flex justify-end">
-              <button
-                className="bg-red-700 hover:bg-red-800 text-white px-3 py-1 rounded text-sm"
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-fg-muted hover:text-danger"
                 onClick={handleRemoveAudio}
               >
-                Remove Audio
-              </button>
-            </div>
-          )}
-          
-          {/* Chain Timing Button */}
-          {selectedItems.length >= 2 && (
-            <div className="mb-4 p-3 bg-blue-900 rounded-lg border border-blue-700">
-              <div className="flex items-center justify-between">
-                <span className="text-white">
-                  {selectedItems.length} items selected - Command+Click to select multiple
-                </span>
-                <button
-                  onClick={handleChainTiming}
-                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded"
-                >
-                  Chain Timing
-                </button>
-              </div>
+                Remove audio
+              </Button>
             </div>
           )}
 
-          {/* Copy Item controls / status banner */}
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 min-w-0">
+          {selectedItems.length >= 2 && (
+            <Card tone="raised" padding="sm" className="mb-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm text-fg-secondary min-w-0">
+                  <span className="num text-fg-primary">
+                    {selectedItems.length}
+                  </span>{" "}
+                  items selected
+                  <span className="text-fg-muted">
+                    {" "}
+                    · ⌘-click to add or remove
+                  </span>
+                </div>
+                <Button size="sm" variant="primary" onClick={handleChainTiming}>
+                  Chain timing…
+                </Button>
+              </div>
+            </Card>
+          )}
+
+          <div className="mb-2 flex items-center justify-between gap-2 min-h-7">
+            <div className="flex items-center gap-2 min-w-0 text-sm">
               {copyMode === "select-source" && (
-                <span className="text-sm text-emerald-300">
+                <Badge tone="accent" size="sm">Pick source</Badge>
+              )}
+              {copyMode === "select-source" && (
+                <span className="text-fg-secondary truncate">
                   Click an item in the timeline to copy.
                 </span>
               )}
               {copyMode === "select-position" && (
-                <span className="text-sm text-emerald-300">
-                  Copying <span className="font-semibold">{copySourceItem?.name}</span>{" "}
-                  → {receiverLabels?.[copyTargetZone] || copyTargetZone}:{copyTargetCue}.
-                  Click a spot on the timeline to place it.
+                <Badge tone="accent" size="sm">Place copy</Badge>
+              )}
+              {copyMode === "select-position" && (
+                <span className="text-fg-secondary truncate">
+                  Copying{" "}
+                  <span className="font-medium text-fg-primary">
+                    {copySourceItem?.name}
+                  </span>{" "}
+                  → {receiverLabels?.[copyTargetZone] || copyTargetZone}:
+                  {copyTargetCue}. Click a spot on the timeline.
                 </span>
               )}
             </div>
-            <button
+            <Button
+              size="sm"
+              variant={copyMode ? "danger" : "outline"}
               onClick={copyMode ? cancelCopyItem : startCopyItem}
-              className={`px-3 py-1 rounded text-sm text-white shrink-0 ${
-                copyMode
-                  ? "bg-red-700 hover:bg-red-800"
-                  : "bg-emerald-600 hover:bg-emerald-700"
-              }`}
               title="Copy an existing timeline item to another receiver/cue"
             >
-              {copyMode ? "Cancel Copy" : "Copy Item"}
-            </button>
+              {copyMode ? "Cancel copy" : "Copy item"}
+            </Button>
           </div>
 
           <Timeline 

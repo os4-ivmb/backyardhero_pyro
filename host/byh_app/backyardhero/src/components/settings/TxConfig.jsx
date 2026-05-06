@@ -1,92 +1,105 @@
-import { useState } from "react";
+import React from "react";
 import axios from "axios";
+import useStateAppStore from "@/store/useStateAppStore";
+import { Field, inputClass, selectClass } from "@/design";
+import useDraft from "@/hooks/useDraft";
+import SaveBar from "./SaveBar";
 
-const PROTOCOLS = ["BKYD_TS_HYBRID"]
+const PROTOCOLS = ["BKYD_TS_HYBRID"];
+const DEFAULTS = { addr: "/dev/tty.usbmodem01", baud: 115200, protocol: PROTOCOLS[0] };
+
+// RF frontend (the dongle) connection settings. Multi-field group so we
+// use a draft hook + single Save button instead of inline submits per
+// field. Hydrates from `fw_state.settings.rf` so the inputs reflect
+// whatever the daemon is actually using right now.
 
 export default function TxConfig() {
-  const [rfSerialAddr, setRFSerialAddr] = useState("/dev/tty.usbmodem01");
-  const [rfSerialBaud, setRFSerialBaud] = useState(115200);
-  const [rfProtocol, setRFProtocol] = useState(PROTOCOLS[0]);
-
-  const updateRFFrontend = async (evt) => {
-    await axios.post(
-      "/api/system/cmd_daemon",
-      { type: "select_serial", device: rfSerialAddr, baud: rfSerialBaud, protocol: rfProtocol},
-      {
-        headers: {
-          "Content-Type": "application/json",
-        }
-      }
-    );
+  const { stateData } = useStateAppStore();
+  const rf = stateData?.fw_state?.settings?.rf || {};
+  const upstream = {
+    addr: rf.addr || DEFAULTS.addr,
+    baud: rf.baud || DEFAULTS.baud,
+    protocol: rf.protocol || DEFAULTS.protocol,
   };
+  const draft = useDraft(upstream);
+
+  const onSave = () =>
+    draft.save(async (s) => {
+      await axios.post(
+        "/api/system/cmd_daemon",
+        {
+          type: "select_serial",
+          device: s.addr,
+          baud: parseInt(s.baud, 10),
+          protocol: s.protocol,
+        },
+        { headers: { "Content-Type": "application/json" } },
+      );
+    });
 
   return (
-    <div className="">
-        <h2 className="text-lg">RF Frontend Settings</h2>
-        <div className="flex flex-col gap-3">
-            <label
-                className="block text-gray-200 text-sm font-bold mb-2"
-                htmlFor="protocol"
-            >
-                Protocol
-            </label>
-            <select
-                value={rfProtocol}
-                onChange={setRFProtocol}
-                name="protocol"
-                className="block appearance-none w-full border border-gray-400 hover:border-gray-500 px-4 py-2 pr-8 rounded shadow leading-tight focus:outline-none focus:shadow-outline"
-            >
-                {PROTOCOLS.map((k, i) => (
-                <option key={i} value={k}>
-                    {k}
-                </option>
-                ))}
-            </select>
-            <p className="text-gray-400 text-xs italic">
-              Protocol to use to transmit (by default - If transmitters are used in shows the appropriate protocol for that transmitter is always used.).
-            </p>
-            <label
-              className="block text-gray-200 text-sm font-bold mb-2"
-              htmlFor="serial_addr"
-            >
-              Serial Device Address
-            </label>
-            <input
-              value={rfSerialAddr}
-              onChange={(e)=>setRFSerialAddr(e.target.value)}
-              className="shadow appearance-none border rounded w-full py-2 px-3 text-white mb-3 leading-tight focus:outline-none focus:shadow-outline"
-              name="serial_addr"
-              type="text"
-            />
-            <p className="text-gray-400 text-xs italic">
-              RF Frontend address to use to transmit.
-            </p>
-  
-            <label
-              className="block text-gray-200 text-sm font-bold mb-2"
-              htmlFor="rf_serial_baud"
-            >
-              RF Serial BAUD Rate
-            </label>
-            <input
-              value={rfSerialBaud}
-              onChange={(e)=>setRFSerialBaud(parseInt(e.target.value))}
-              className="shadow appearance-none border rounded w-full py-2 px-3 text-white mb-3 leading-tight focus:outline-none focus:shadow-outline"
-              name="rf_serial_baud"
-              type="number"
-            />
-            <p className="text-gray-400 text-xs italic">Baud rate for the serial interface to RF Frontend.</p>
-
-            <div className="flex items-center justify-between">
-                <button
-                onClick={updateRFFrontend}
-                className="bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline"
-                type="button"
-                >
-                  Update
-                </button>
-            </div>
+    <div className="flex flex-col gap-4">
+      <Field
+        label="Protocol"
+        htmlFor="rf-protocol"
+        hint="Default protocol used when a show doesn't pin one. Only one is currently supported."
+      >
+        <div className="relative">
+          <select
+            id="rf-protocol"
+            value={draft.state.protocol}
+            onChange={(e) => draft.set("protocol", e.target.value)}
+            className={selectClass}
+          >
+            {PROTOCOLS.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
         </div>
+      </Field>
+
+      <div className="grid grid-cols-1 sm:grid-cols-[2fr_1fr] gap-3">
+        <Field
+          label="Serial device"
+          htmlFor="rf-addr"
+          hint="Where the dongle is mounted. Look for a /dev/tty… path."
+        >
+          <input
+            id="rf-addr"
+            type="text"
+            value={draft.state.addr}
+            onChange={(e) => draft.set("addr", e.target.value)}
+            className={inputClass + " font-mono"}
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </Field>
+        <Field
+          label="Baud"
+          htmlFor="rf-baud"
+          hint="Match the dongle's firmware."
+        >
+          <input
+            id="rf-baud"
+            type="number"
+            value={draft.state.baud}
+            onChange={(e) => draft.set("baud", e.target.value)}
+            className={inputClass + " num tabular-nums"}
+          />
+        </Field>
+      </div>
+
+      <SaveBar
+        dirty={draft.dirty}
+        saving={draft.saving}
+        error={draft.error}
+        savedAt={draft.savedAt}
+        onSave={onSave}
+        onReset={draft.reset}
+        saveLabel="Apply"
+      />
     </div>
   );
 }

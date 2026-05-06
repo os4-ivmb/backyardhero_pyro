@@ -163,17 +163,17 @@ def _gather_state_blocking():
         # Re-raise so the caller can decide whether to retry.
         raise
 
-    # Tail the daemon error log
+    # Tail the daemon error log. Lines are emitted in chronological
+    # order (oldest first) so the client's timestamp regex can parse
+    # them. A long-standing typo here did `[s[::-1] for s in tail]`,
+    # which reverses each *line's characters* (not the list order) and
+    # broke timestamp extraction on the client -- daemon.err entries
+    # silently never made it to toasts.
     try:
         error_log_path = "/data/log/daemon.err"
         if os.path.exists(error_log_path):
             tail = get_last_n_lines(error_log_path, 5)
-            if isinstance(tail, list):
-                # NB: original code reversed each line ([::-1]). Preserved
-                # here to keep behavior unchanged in this perf-only pass.
-                result["fw_d_error"] = [s[::-1] for s in tail]
-            else:
-                result["fw_d_error"] = []
+            result["fw_d_error"] = tail if isinstance(tail, list) else []
         else:
             result["fw_d_error"] = []
     except Exception as e:

@@ -1,114 +1,91 @@
-import React, { useEffect, useState } from 'react';
-import InventoryManager from "./inventory/InventoryManager";
-import useAppStore from '@/store/useAppStore';
+import React, { useEffect, useState } from "react";
 import { FaExplosion, FaGear, FaList } from "react-icons/fa6";
 import { FiTarget, FiEdit, FiRadio } from "react-icons/fi";
-import { MdAssignment } from "react-icons/md";
-import Image from 'next/image';
-import ManualFiring from './manualFire/ManualFiring';
-import Status from './homepanel/Status';
-import StatusPanel from './homepanel/StatusPanel';
-import SettingsPanel from './settings/SettingsPanel';
-import ShowBuilder from './builder/ShowBuilder';
-import ReceiverDisplay from './receivers/ReceiverDisplay';
-import ShowLoadout from './receivers/ShowLoadout';
+import { MdAssignment, MdHome } from "react-icons/md";
 
-const MainNav = () => {
-  const menuItems = [
-    { label: "Main", icon: <FaExplosion/>, href: "/", key: "main" },
-    { label: "Receivers", icon: <FiRadio/>, href: "/about", key: "receivers" },
-    { label: "Show Editor", icon: <FiEdit/>, href: "/about", key: "editor" },
-    { label: "Show Loadout", icon: <MdAssignment/>, href: "/loadout", key: "loadout" },
-    { label: "Inventory", icon: <FaList/>, href: "/contact", key: "inventory" },
-    { label: "Manual Fire", icon: <FiTarget/>, href: "/profile", key: "manual"  },
-    { label: "Settings", icon: <FaGear/>, href: "/profile", key: "setting" },
-  ];
+import useAppStore from "@/store/useAppStore";
+import useAppMode from "@/design/useAppMode";
+import AppShell from "./shell/AppShell";
+import TopBar from "./shell/TopBar";
+import StatusBar from "./shell/StatusBar";
 
-  const { fetchInventory, fetchShows, fetchSystemConfig, stagedShow } = useAppStore();
-  const [currTab, setCurrTab] = useState('main');
+import InventoryManager from "./inventory/InventoryManager";
+import ManualFiring from "./manualFire/ManualFiring";
+import ConsolePanel from "./console/ConsolePanel";
+import SettingsPanel from "./settings/SettingsPanel";
+import ShowBuilder from "./builder/ShowBuilder";
+import ReceiverDisplay from "./receivers/ReceiverDisplay";
+import ShowLoadout from "./receivers/ShowLoadout";
+
+// ---------------------------------------------------------------------------
+// MainNav is now a thin shell wrapper. All the per-tab logic moved to
+// the panels themselves; chrome (header, mode badge, status footer) and
+// mode-aware tab visibility live here. Panels are mounted lazily via the
+// existing conditional-render pattern so heavy components (builder /
+// loadout) don't run effects when their tab isn't active.
+// ---------------------------------------------------------------------------
+
+const TABS = [
+  { key: "main",      label: "Console",   icon: <MdHome />,        alwaysVisible: true },
+  { key: "receivers", label: "Receivers", icon: <FiRadio /> },
+  { key: "editor",    label: "Editor",    icon: <FiEdit /> },
+  { key: "loadout",   label: "Loadout",   icon: <MdAssignment />,  alwaysVisible: true },
+  { key: "inventory", label: "Inventory", icon: <FaList /> },
+  { key: "manual",    label: "Manual",    icon: <FiTarget />,      alwaysVisible: true },
+  { key: "setting",   label: "Settings",  icon: <FaGear /> },
+];
+
+export default function MainNav() {
+  const {
+    fetchInventory, fetchShows, fetchSystemConfig,
+    stagedShow, shows, inventoryById, hydrateStagedShowFromId,
+  } = useAppStore();
+  const [currTab, setCurrTab] = useState("main");
   const hasStagedShow = Boolean(stagedShow?.id);
+  const { mode } = useAppMode();
 
+  // Loadout tab only makes sense when there's something staged. If the
+  // user is on it and the staged show goes away, fall back to console.
   useEffect(() => {
-    if (currTab === 'loadout' && !hasStagedShow) {
-      setCurrTab('main');
-    }
+    if (currTab === "loadout" && !hasStagedShow) setCurrTab("main");
   }, [currTab, hasStagedShow]);
 
+  useEffect(() => { fetchInventory(); }, [fetchInventory]);
+  useEffect(() => { fetchShows(); }, [fetchShows]);
+  useEffect(() => { fetchSystemConfig(); }, [fetchSystemConfig]);
+
+  // Re-stage the previously-staged show from localStorage once both
+  // shows and inventory have populated. Idempotent: the action no-ops if
+  // there's nothing persisted or if the rich object is already in sync.
   useEffect(() => {
-      fetchInventory();
-    }, [fetchInventory]);
+    hydrateStagedShowFromId();
+  }, [shows, inventoryById, hydrateStagedShowFromId]);
 
-    useEffect(() => {
-      fetchShows();
-    }, [fetchShows]);
+  const tabs = TABS
+    .map((t) => t.key === "loadout" ? { ...t, hidden: !hasStagedShow } : t);
 
-    useEffect(() => {
-      fetchSystemConfig();
-    }, [fetchSystemConfig]);
+  const armedRail = mode.id === "armed" || mode.id === "live" || mode.id === "manual_fire";
 
   return (
-    <div>
-        <nav className="bg-slate-900 text-white w-full border-b border-slate-700">
-        <div className="flex items-center h-12">
-            {/* Logo */}
-            <div className="text-2xl font-bold px-3 flex items-center h-full">
-            <Image src="/BYHLOGOv1.png" alt="anImage" width={80} height={40} style={{
-              filter: 'invert(1)', 
-              height: '40px',
-              objectFit: 'contain',
-              objectPosition: 'center',
-              margin: '0',
-              clipPath: 'inset(27% 10% 34% 10%)'
-            }}/>
-            </div>
-
-            {/* Menu */}
-            <ul className="flex flex-1 justify-around h-full">
-            {menuItems
-              .filter((item) => item.key !== 'loadout' || hasStagedShow)
-              .map((item, index) => (
-                <li onClick={()=> setCurrTab(item.key)}
-                key={item.key}
-                className={`flex items-center space-x-1.5 px-3 py-1 h-full transition-all duration-200 flex-1 justify-center border-b-2 ${
-                  currTab === item.key 
-                    ? 'border-cyan-500 text-cyan-300 bg-slate-800 shadow-[0_0_8px_rgba(6,182,212,0.3)]' 
-                    : 'border-transparent text-slate-400 hover:text-slate-300 hover:border-slate-600'
-                }`}
-                >
-                <span className="text-sm">{item.icon}</span>
-                <span className="text-sm font-medium">
-                    {item.label}
-                </span>
-                </li>
-            ))}
-            </ul>
-        </div>
-        </nav>
-        <div className="mb-12">
-            {/*
-              Conditionally render each panel rather than hiding with CSS.
-              The previous implementation kept every panel mounted, which
-              meant their effects, intervals, fetch calls, and (in the
-              builder/loadout case) heavy derived data were always running
-              in the background regardless of which tab was active.
-
-              Trade-off: panel-local UI state (scroll position, expanded
-              accordions, modal flags) is reset on tab switch. Domain data
-              (stagedShow, inventory, shows, system config) lives in the
-              Zustand stores so it persists across remounts.
-            */}
-            {currTab==='main' && <StatusPanel setCurrentTab={setCurrTab}/>}
-            {currTab==='inventory' && <InventoryManager/>}
-            {currTab==='editor' && <ShowBuilder/>}
-            {currTab==='receivers' && <ReceiverDisplay setCurrentTab={setCurrTab}/>}
-            {currTab==='loadout' && <ShowLoadout setCurrentTab={setCurrTab}/>}
-            {currTab==='manual' && <ManualFiring/>}
-            {currTab==='setting' && <SettingsPanel/>}
-        </div>
-        <div className="absolute bottom-0 left-0 w-full border-t border-slate-700 px-3 bg-slate-900 bg-opacity-95 backdrop-blur-sm">
-            <Status/>
-        </div>
-    </div>
+    <AppShell
+      armedRail={armedRail}
+      topBar={
+        <TopBar
+          tabs={tabs}
+          currentTab={currTab}
+          onTabChange={setCurrTab}
+          mode={mode}
+        />
+      }
+      statusBar={<StatusBar />}
+    >
+      {currTab === "main"      && <ConsolePanel setCurrentTab={setCurrTab} />}
+      {currTab === "inventory" && <InventoryManager />}
+      {currTab === "editor"    && <ShowBuilder />}
+      {currTab === "receivers" && <ReceiverDisplay setCurrentTab={setCurrTab} />}
+      {currTab === "loadout"   && <ShowLoadout setCurrentTab={setCurrTab} />}
+      {currTab === "manual"    && <ManualFiring />}
+      {currTab === "setting"   && <SettingsPanel />}
+    </AppShell>
   );
-};
-export default MainNav;
+}
