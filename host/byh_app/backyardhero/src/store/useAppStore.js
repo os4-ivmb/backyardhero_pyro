@@ -3,6 +3,15 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import axios from 'axios';
 
+const receiverRowToStoreEntry = (row) => ({
+  label: row.label,
+  type: row.type,
+  cues: row.cues_data || {},
+  enabled: !!row.enabled,
+  metadata: row.metadata || {},
+  configuration_version: row.configuration_version,
+});
+
 // We persist only a tiny subset (the staged show ID) to localStorage. The
 // rich `stagedShow` object — items merged with inventory metadata, parsed
 // audioFile, etc. — is *re-derived* from the canonical shows/inventory
@@ -310,13 +319,13 @@ const useAppStore = create(persist((set, get) => ({
       set((state) => ({
         receivers: {
           ...state.receivers,
-          [row.id]: {
-            label: row.label,
-            type: row.type,
-            cues: row.cues_data || {},
-            enabled: !!row.enabled,
-            metadata: row.metadata || {},
-            configuration_version: row.configuration_version,
+          [row.id]: receiverRowToStoreEntry(row),
+        },
+        systemConfig: {
+          ...state.systemConfig,
+          receivers: {
+            ...(state.systemConfig?.receivers || {}),
+            [row.id]: receiverRowToStoreEntry(row),
           },
         },
       }));
@@ -337,13 +346,13 @@ const useAppStore = create(persist((set, get) => ({
       set((state) => ({
         receivers: {
           ...state.receivers,
-          [id]: {
-            label: data.label,
-            type: data.type,
-            cues: data.cues_data || {},
-            enabled: !!data.enabled,
-            metadata: data.metadata || {},
-            configuration_version: data.configuration_version,
+          [id]: receiverRowToStoreEntry(data),
+        },
+        systemConfig: {
+          ...state.systemConfig,
+          receivers: {
+            ...(state.systemConfig?.receivers || {}),
+            [id]: receiverRowToStoreEntry(data),
           },
         },
       }));

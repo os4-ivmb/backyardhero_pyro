@@ -18,10 +18,50 @@
 //     servicing isn't stalled during them
 //   * Configurable rf_channel and rf_system_id (compile-time, matches dongle)
 //   * SHOW_LOADN handler (packed multi-cue load)
+// v10: 2026-05-XX - Fix RF address aliasing. RECEIVER_BASE is now
+//   arithmetically *added* to NODE_ID instead of OR'd. Pre-v10 receivers
+//   with even NODE_IDs already used `BASE+N` by accident (because OR
+//   with 0x01 == +1 when LSB=0), so they don't move; receivers with odd
+//   NODE_IDs shift up by one address slot. Pair only with dongle FW v8+.
+// v11: 2026-05-XX - Adaptive disconnect detection + ACK-payload freshness:
+//   * Disconnect threshold now scales with the observed inter-poll gap
+//     (median of the last 8 successful contacts, * 5x, floored at 5s and
+//     capped at 60s). The dongle's clockSyncIntervalMs * numReceivers
+//     can range from ~50ms to many seconds; the old fixed 10s timeout
+//     false-fired the moment the operator slowed polling for a large
+//     fleet. Now a fleet polled every 8s tolerates a missed ACK without
+//     declaring "disconnect" until ~40s of true silence.
+//   * refreshAckPayload() now flushes the ACK TX FIFO before writing
+//     so the dongle never receives a stale (>250ms) status piggyback
+//     when commands come in faster than the periodic refresh.
+// v12: 2026-05-XX - Don't abort the show on radio dropout + clock-domain fix:
+//   * The disconnect detection used `now = millis() + clock_offset` for
+//     `lastCmdReceived` but recomputed `now` with the LATEST clock_offset
+//     on the following loop iteration. A CLOCK_SYNC inside the same iter
+//     would mutate clock_offset, so the next iteration's
+//     `now - lastCmdReceived` included the entire clock-offset delta --
+//     enough to trip the 5s floor on any meaningful clock jump (e.g. an
+//     msync at daemon restart, or jitter compounding over minutes), even
+//     though no real time had elapsed. That manifested as a quick
+//     magenta `ANIM_FLASHING_PURPLE` flash mid-show and the receiver
+//     halting all subsequent cue fires. Now we track `lastCmdReceived`
+//     in raw `millis()` so the disconnect math is monotonic and
+//     unaffected by clock_offset updates.
+//   * Even on a real disconnect, we no longer clear `isPlaying`. The
+//     show is loaded locally with absolute synchronized fire times --
+//     a brief RF dropout doesn't invalidate any of that, and aborting
+//     the autonomous schedule is exactly the wrong response. The radio
+//     is still re-armed and we still flash purple so the operator sees
+//     the blip, but cues continue to fire on the loaded schedule. The
+//     operator can hit STOP if they want a hard abort.
+// v13: 2026-05-XX - Relax receiver disconnect tolerance:
+//   * Minimum disconnect threshold increased from 5s to 8s.
+//   * Adaptive threshold increased from 5x to 6x observed poll gap.
+//   * Maximum threshold increased from 60s to 90s.
 #define BOARD_VERISON 9
-#define FW_VERSION 9
-#define NODE_ID 157
-const char RECEIVER_IDENT[] = "RX157";
+#define FW_VERSION 13
+#define NODE_ID 146
+const char RECEIVER_IDENT[] = "RX146";
 
 const bool RECEIVER_USES_V1_CUES = false;
 
@@ -72,10 +112,39 @@ bool targetFired[128] = { false };
 
 bool gotCommand = false;
 bool everConnected = false;
-uint64_t lastCmdReceived = 0;
+// Raw millis() at the time of the most recent inbound command. Stays in
+// the monotonic millis domain so the disconnect math doesn't depend on
+// clock_offset. (Previously this was stored in synchronized-clock units
+// and a CLOCK_SYNC arrival could shift it relative to `now` by the
+// clock-offset delta -- which trips the 5s threshold on clock jumps.)
+uint64_t lastCmdReceivedMs = 0;
 uint64_t lastInputModeRunTime = 0;
 uint64_t lastMessageReceivedTime = 0;
 uint64_t lastAckPayloadRefresh = 0;
+
+// Rolling estimate of the inter-poll gap so the disconnect threshold can
+// adapt to the dongle's clockSyncIntervalMs without us being told. We
+// keep the last few gap samples and use the median for stability against
+// occasional "dropped one ACK then got the next" outliers (which would
+// otherwise double the apparent gap and slow detection of real failures).
+//
+// Gap is measured between successive *commands of any kind* arriving;
+// the dongle's TDMA poller guarantees at least one CLOCK_SYNC per slot,
+// so command arrivals are a faithful proxy for "i am still being seen".
+#define POLL_GAP_SAMPLES 8
+uint32_t pollGapSamples[POLL_GAP_SAMPLES] = { 0 };
+uint8_t  pollGapNextIdx = 0;
+uint8_t  pollGapCount   = 0;
+uint64_t prevPollMs     = 0;
+
+// Floor / ceiling around the adaptive disconnect threshold. The floor
+// keeps fast pollers from triggering a false disconnect after a single
+// dropped ACK; the ceiling prevents a slow poller (or a one-off long
+// gap from a queue stall on the dongle) from making us blind to a real
+// outage for minutes.
+#define DISCONNECT_MIN_MS 8000UL
+#define DISCONNECT_MAX_MS 90000UL
+#define DISCONNECT_GAP_MULTIPLIER 6UL
 
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 Adafruit_NeoPixel statusStrip(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -167,9 +236,13 @@ uint32_t animStartMs = 0;
 
 RF24 radio(RF24_CE_PIN, RF24_CSN_PIN);
 
-// Must match the dongle scheme. With rfSystemId == 0 (default) the addresses
-// are byte-identical to the pre-v9 receiver firmware, so a v9 receiver can
-// still talk to either a v3 or v4 dongle on the same channel.
+// Must match the dongle scheme. v10 fixed a long-standing bug where
+// RECEIVER_BASE was bitwise-OR'd with NODE_ID instead of arithmetically
+// added; that aliased every (even N, odd N+1) pair onto the same radio
+// address. v10 receivers MUST be paired with v8+ dongle firmware -- a
+// v10 receiver with NODE_ID=153 listens on 154, while a v9 receiver
+// with NODE_ID=153 listens on 153. Mixing the two on the same fleet
+// silently breaks polling.
 const uint8_t rfChannel = 85;
 const uint8_t rfSystemId = 0;
 #define MASTER_WRITE_BASE 0x0000000000ULL
@@ -178,10 +251,13 @@ static inline uint64_t systemSalt() {
   return ((uint64_t)rfSystemId) << 32;
 }
 static inline uint64_t masterWriteAddress() {
+  // MASTER_WRITE_BASE is 0 so `|` and `+` are equivalent; `|` is kept to
+  // make the salt-merge intent explicit.
   return MASTER_WRITE_BASE | systemSalt();
 }
 static inline uint64_t receiverReadAddress() {
-  return RECEIVER_BASE | systemSalt() | (uint64_t)NODE_ID;
+  // Arithmetic add (not OR) so each NODE_ID maps to a unique address.
+  return systemSalt() + RECEIVER_BASE + (uint64_t)NODE_ID;
 }
 
 // ADDITIONAL_CLOCK_TX_OFFSET (ms): empirical compensation for the time between
@@ -481,14 +557,69 @@ void buildStatus(ReceiverStatusMessage* msg) {
 
 // Refresh the ACK-payload FIFO so the next incoming command's auto-ACK carries
 // fresh status. Call after every command processed and periodically.
+//
+// We flush the TX FIFO first, then write a single fresh payload. Without
+// the flush, the FIFO (3 slots deep) accumulates entries when the
+// periodic 250ms refresh outpaces command consumption -- the dongle
+// would then see the *oldest* queued payload, up to ~750ms stale, which
+// matters for battery / continuity / showState bits during loading.
+// flush_tx() on the receiver side affects only outgoing payloads (the
+// auto-ACK queue) and is safe to call any time we own the radio.
 void refreshAckPayload() {
   ReceiverStatusMessage msg;
   buildStatus(&msg);
-  // writeAckPayload silently drops if FIFO is full; we keep the FIFO at 1 by
-  // refreshing only after a command is consumed (which frees a slot) plus a
-  // periodic refresh that's harmless if the slot is still occupied.
+  radio.flush_tx();
   radio.writeAckPayload(0, &msg, sizeof(msg));
   lastAckPayloadRefresh = millis();
+}
+
+// Push one inter-poll gap sample into the ring and return a stability-
+// preferring estimator (median for >= 3 samples, mean otherwise). Median
+// keeps a single huge outlier from doubling our disconnect threshold.
+uint32_t pollGapEstimateMs() {
+  if (pollGapCount == 0) return 0;
+  uint32_t copy[POLL_GAP_SAMPLES];
+  for (uint8_t i = 0; i < pollGapCount; i++) copy[i] = pollGapSamples[i];
+  // tiny insertion sort (n <= 8)
+  for (uint8_t i = 1; i < pollGapCount; i++) {
+    uint32_t v = copy[i];
+    int8_t j = i - 1;
+    while (j >= 0 && copy[j] > v) { copy[j + 1] = copy[j]; j--; }
+    copy[j + 1] = v;
+  }
+  if (pollGapCount >= 3) return copy[pollGapCount / 2];
+  uint32_t sum = 0;
+  for (uint8_t i = 0; i < pollGapCount; i++) sum += copy[i];
+  return sum / pollGapCount;
+}
+
+// Recompute the adaptive disconnect threshold from the current gap
+// estimate. Returns ms.
+uint32_t adaptiveDisconnectMs() {
+  uint32_t gap = pollGapEstimateMs();
+  if (gap == 0) return DISCONNECT_MIN_MS;
+  uint64_t scaled = (uint64_t)gap * DISCONNECT_GAP_MULTIPLIER;
+  if (scaled < DISCONNECT_MIN_MS) return DISCONNECT_MIN_MS;
+  if (scaled > DISCONNECT_MAX_MS) return DISCONNECT_MAX_MS;
+  return (uint32_t)scaled;
+}
+
+// Record that we just heard a command from the dongle. Updates the
+// rolling gap estimate so adaptiveDisconnectMs() tracks the dongle's
+// current poll cadence.
+void notePollContact(uint64_t nowMs) {
+  if (prevPollMs != 0) {
+    uint64_t delta = nowMs - prevPollMs;
+    // Guard against a >1 minute gap (we were probably actually
+    // disconnected) corrupting the estimate. Anything beyond the cap
+    // is itself a sign of trouble; we just don't let it skew the
+    // baseline.
+    if (delta > DISCONNECT_MAX_MS) delta = DISCONNECT_MAX_MS;
+    pollGapSamples[pollGapNextIdx] = (uint32_t)delta;
+    pollGapNextIdx = (pollGapNextIdx + 1) % POLL_GAP_SAMPLES;
+    if (pollGapCount < POLL_GAP_SAMPLES) pollGapCount++;
+  }
+  prevPollMs = nowMs;
 }
 
 void sendToShiftRegister(uint64_t pos1, uint64_t pos2) {}
@@ -946,6 +1077,9 @@ void loop() {
     gotCommand = true;
     everConnected = true;
     lastMessageReceivedTime = millis();
+    // Feed the adaptive-cadence estimator so the disconnect threshold
+    // tracks whatever clockSyncIntervalMs the dongle is running on.
+    notePollContact((uint64_t)millis());
 
     // Bounds-check each message struct against the wire size before casting.
     switch (mType) {
@@ -990,7 +1124,9 @@ void loop() {
     if (mType == SHOW_START)         requestAnim(ANIM_SMOOTH_WAVE);
     else if (mType == GENERIC_RESET) requestAnim(ANIM_SMOOTHER_SWEEP);
 
-    lastCmdReceived = now;
+    // Stamp in raw millis (monotonic) so the disconnect math is
+    // unaffected by handleClockSync mutating clock_offset above.
+    lastCmdReceivedMs = (uint64_t)millis();
   }
 
   // Periodic ACK payload refresh so battery/continuity stays current even
@@ -1002,20 +1138,55 @@ void loop() {
   updateNonBlockingAnim();
   updateStatusLEDs();
 
-  // Disconnect detection.
-  if (now - lastCmdReceived > 10000 && gotCommand) {
-    DBG_PRINTLN("Disconnect detected.");
+  // Disconnect detection. Threshold scales with the observed inter-poll
+  // gap so the dongle's clockSyncIntervalMs can be retuned at runtime
+  // without us false-firing. See pollGapEstimateMs / adaptiveDisconnectMs.
+  //
+  // IMPORTANT: this uses raw millis() on both sides of the comparison.
+  // We deliberately don't use the synchronized clock here -- a
+  // handleClockSync() inside the radio.available() loop above can
+  // mutate clock_offset, and using `now = millis() + clock_offset`
+  // would inject that delta into the disconnect math even though no
+  // real time has passed.
+  //
+  // Crucially, on a true disconnect we re-arm the radio and flash
+  // purple so the operator can see the blip, but we DO NOT clear
+  // isPlaying. The show is loaded locally with absolute synchronized
+  // fire times; a transient RF dropout doesn't invalidate any of that.
+  // Killing isPlaying caused receivers that briefly lost contact
+  // mid-show to stop firing for the rest of the show, which is much
+  // worse than the alternative of firing through the blackout. If the
+  // operator wants a hard stop, they can hit the stop button.
+  uint64_t nowMs = (uint64_t)millis();
+  uint32_t discMs = adaptiveDisconnectMs();
+  if (nowMs - lastCmdReceivedMs > discMs && gotCommand) {
+    DBG_PRINT("Disconnect detected (threshold=");
+    DBG_PRINT(discMs);
+    DBG_PRINTLN("ms, isPlaying=");
+    DBG_PRINT(isPlaying ? 1 : 0);
+    DBG_PRINTLN(") -- re-arming radio, NOT aborting show");
     if (isPlaying) {
+      // Visual cue for the operator that this receiver lost the dongle
+      // briefly. The animation is non-blocking and lasts ~1s; firing
+      // continues on the loaded schedule throughout.
       requestAnim(ANIM_FLASHING_PURPLE);
-      isPlaying = false;
     }
     gotCommand = false;
+    // Reset the gap estimator -- the new cadence will be re-learned from
+    // the next few contacts post-reconnect, which is right: a stale
+    // pre-disconnect estimate would otherwise inflate the new threshold.
+    pollGapCount = 0;
+    pollGapNextIdx = 0;
+    prevPollMs = 0;
     // Re-arm the radio in case it's stuck in a weird state.
     radio.flush_tx();
     radio.flush_rx();
     radio.openReadingPipe(0, receiverReadAddress());
     radio.startListening();
     refreshAckPayload();
+    // Bump lastCmdReceivedMs so we don't re-trigger every loop iter
+    // until the next real contact arrives.
+    lastCmdReceivedMs = nowMs;
   }
 
   // Auto-clear stale firing state if the show loop didn't (defensive).

@@ -295,10 +295,9 @@ class BYHProtocolHandler:
         # in _handle_scan_result. We also stamp this so a stuck scan can
         # be detected (timeout in the UI / state file).
         self.parent.rf_scan_pending_since_ms = int(time.time() * 1000)
-        try:
-            self.parent.update_state_file()
-        except Exception:
-            pass
+        # Route through the flusher so all state writes share the same
+        # debounce + unix-socket publish path.
+        self.parent.mark_state_dirty()
 
         cmd = f"scan {passes} {ch_start} {ch_end}"
         print(f"start_rf_scan: sending '{cmd}'")
@@ -375,10 +374,7 @@ class BYHProtocolHandler:
                 'top':            top5,
             }
             self.parent.rf_scan_pending_since_ms = None
-            try:
-                self.parent.update_state_file()
-            except Exception:
-                pass
+            self.parent.mark_state_dirty()
             print(
                 f"scan_result: {len(cleaned)} bins, "
                 f"current_ch={current_ch}, recommended_ch={recommended_ch}"
@@ -447,52 +443,102 @@ class BYHProtocolHandler:
         return false_device_ids
 
 
+    # Mapping from the dongle's abbreviated keys to the full-name dict
+    # the rest of the daemon (and the UI) consume. Shared across the
+    # per-second `status` aggregate AND the FW v7 `rxupd` push line so
+    # both shapes parse through one code path.
+    _ABBR_KEY_MAP = {
+        'i': 'ident',
+        'n': 'node',
+        'b': 'battery',
+        's': 'showId',
+        't': 'lmt',
+        'l': 'loadComplete',
+        'r': 'startReady',
+        'c': 'continuity',
+        'x': 'lat',
+        'sp': 'successPercent',
+    }
+
+    def _merge_receiver(self, abbr_dict, lmtoffset):
+        """Merge one abbreviated receiver dict into self.receivers[ident].
+
+        Returns True if the receiver was known and the merge happened,
+        False if the ident is unknown (caller decides whether to log).
+        Used by both the per-second `status` aggregate and the FW v7
+        `rxupd` push path so the data shape stays identical.
+        """
+        ident = abbr_dict.get('i')
+        if ident not in self.receivers:
+            return False
+
+        full_receiver = dict(self.receivers[ident].get('status') or {})
+        for abbr_key, full_key in self._ABBR_KEY_MAP.items():
+            if abbr_key not in abbr_dict:
+                continue
+            value = abbr_dict[abbr_key]
+            if abbr_key == 't':
+                value = value + lmtoffset
+            elif abbr_key == 'x':
+                # Sliding-average latency. Bounded deque drops the
+                # oldest sample automatically once we hit maxlen.
+                samples = self.latency_samples.get(ident)
+                if samples is None:
+                    samples = deque(maxlen=20)
+                    self.latency_samples[ident] = samples
+                samples.append(value)
+                value = round(sum(samples) / len(samples))
+            full_receiver[full_key] = value
+        self.receivers[ident]['drift'] = lmtoffset
+        self.receivers[ident]['status'] = full_receiver
+        return True
+
     def process_status_msg(self, msg_obj):
+        # Slow-path tick from the dongle: full per-receiver array. Used
+        # for housekeeping fields (`x` averaged latency, `sp`
+        # success%) that the v7 rxupd push deliberately omits. Acts as a
+        # 1Hz heartbeat so dropped rxupd lines self-heal within a second.
         self.last_status_ts = msg_obj.get('timestamp', 0)
-
-        # Define a mapping for abbreviated keys to full keys
-        key_map = {
-            'i': 'ident',
-            'n': 'node',
-            'b': 'battery',
-            's': 'showId',
-            't': 'lmt',
-            'l': 'loadComplete',
-            'r': 'startReady',
-            'c': 'continuity',
-            'x': 'lat',
-            'sp': 'successPercent'
-        }
-
         lmtoffset = int(time.time() * 1000) - msg_obj.get('timestamp', 0)
-
         for receiver in msg_obj.get('receivers', []):
-            if receiver.get('i') in self.receivers:
-                receiver_ident = receiver.get('i')
-                # Create a new dictionary with full keys
-                full_receiver = {}
-                for abbr_key, full_key in key_map.items():
-                    if abbr_key in receiver:
-                        full_receiver[full_key] = receiver[abbr_key]
-                        if(abbr_key == 't'):
-                            full_receiver[full_key] = full_receiver[full_key] + lmtoffset
-                        elif(abbr_key == 'x'):
-                            # Sliding-average latency. Bounded deque drops the
-                            # oldest sample automatically once we hit maxlen.
-                            latency_value = receiver[abbr_key]
-                            samples = self.latency_samples.get(receiver_ident)
-                            if samples is None:
-                                samples = deque(maxlen=20)
-                                self.latency_samples[receiver_ident] = samples
-                            samples.append(latency_value)
-
-                            avg_latency = sum(samples) / len(samples)
-                            full_receiver[full_key] = round(avg_latency)
-                self.receivers[receiver['i']]['drift'] = lmtoffset
-                self.receivers[receiver['i']]['status'] = full_receiver
-            else:
+            if not self._merge_receiver(receiver, lmtoffset):
                 print(f"Receiver {receiver.get('i')} is not known. Ignoring.")
-        
+        self.updateRelevantStates()
+
+    def process_rxupd_msg(self, msg_obj):
+        # Fast-path push from the dongle (FW v7+): exactly one receiver
+        # update emitted the moment the radio ACK landed.
+        #
+        # IMPORTANT: the dongle emits rxupd from TWO paths:
+        #   1. Successful TX/ACK -- carries `x` (fresh single-sample RTT)
+        #      AND a freshly-bumped `t` (lastMessageTime).
+        #   2. Failed TX (auto-retries exhausted) -- carries `sp` (success%
+        #      now lower) but NO `x` and the OLD `t` from the last
+        #      successful contact.
+        #
+        # We only want to overwrite `t` with host-now on path #1, otherwise
+        # silent receivers will appear fresh because every dropped poll
+        # still produces a TX-fail rxupd. Use the presence of `x` as the
+        # "actually heard from radio" signal -- it's emitted iff the
+        # ACK-payload bookkeeping just landed a real sample.
+        msg_obj = dict(msg_obj)
+        had_radio_contact = ('x' in msg_obj)
+        if had_radio_contact:
+            # USB-CDC delivery is sub-ms after the radio ACK, so host wall
+            # clock at arrival is a more accurate "last seen" than the
+            # dongle's tsOffset-corrected stamp (which drifts over hours).
+            msg_obj['t'] = int(time.time() * 1000)
+        else:
+            # Drop `t` entirely so _merge_receiver doesn't clobber the
+            # existing lmt with a stale value. The receiver's `lat`/`sp`
+            # bookkeeping still updates, but freshness stays bounded by
+            # the most recent successful poll -- which is exactly what
+            # the UI's red/orange/green coding wants.
+            msg_obj.pop('t', None)
+        if not self._merge_receiver(msg_obj, lmtoffset=0):
+            # Don't spam if the ident is still being learned -- the
+            # per-second `status` tick will register it shortly.
+            return
         self.updateRelevantStates()
 
     def process_serial_in(self, msg):
@@ -510,7 +556,39 @@ class BYHProtocolHandler:
                     # firmware just won't include the key (None on parent).
                     if 'ch' in msg_obj:
                         self.parent.current_rf_channel = int(msg_obj['ch'])
+                    # Pipe the dongle's command-queue saturation through to
+                    # the UI status bar. `q` is current depth, `qmax` was
+                    # added in dongle FW v8 (older firmware just won't
+                    # include the key, so we fall back to the prior value
+                    # rather than clobbering with None).
+                    if 'q' in msg_obj:
+                        try:
+                            self.parent.dongle_cmd_queue_depth = int(msg_obj['q'])
+                        except (TypeError, ValueError):
+                            pass
+                    if 'qmax' in msg_obj:
+                        try:
+                            self.parent.dongle_cmd_queue_capacity = int(msg_obj['qmax'])
+                        except (TypeError, ValueError):
+                            pass
+                    # FW v9+: the dongle echoes its post-clamp clock-sync
+                    # interval. Surface it so the UI can confirm the
+                    # actually-applied value (e.g. flag clamped settings
+                    # back to the operator).
+                    if 'csim' in msg_obj:
+                        try:
+                            self.parent.dongle_clock_sync_interval_ms = int(msg_obj['csim'])
+                        except (TypeError, ValueError):
+                            pass
                     self.process_status_msg(msg_obj)
+                    # Per-second status carries a lot of state -- mark
+                    # the daemon dirty so the WS server gets the new
+                    # snapshot ASAP rather than at the next 100ms switch
+                    # poll.
+                    self.parent.mark_state_dirty()
+                elif(msg_type == 'rxupd'):
+                    self.process_rxupd_msg(msg_obj)
+                    self.parent.mark_state_dirty()
                 elif(msg_type == 'scan_result'):
                     self._handle_scan_result(msg_obj)
             except json.JSONDecodeError as e:

@@ -8,7 +8,6 @@ import {
   MdSignalWifi4Bar, 
   MdSignalWifiOff, 
   MdPlayArrow,
-  MdAccessTime,
   MdAssignment,
   MdLock,
   MdLockOpen,
@@ -19,6 +18,7 @@ import {
 } from 'react-icons/md';
 import { FaSpinner } from 'react-icons/fa';
 import ShowHealth from "../homepanel/ShowHealth";
+import { isPollableReceiver } from "@/util/receivers";
 
 // FW_VERSION: Frontend version tracking for ReceiverDisplay component
 // v1.0.0: Initial version - Basic receiver display with battery, connectivity, and cue status
@@ -26,7 +26,33 @@ import ShowHealth from "../homepanel/ShowHealth";
 // v1.2.0: Increased connection timeout threshold from 5 seconds to 10 seconds
 // v1.3.0: Added latency scale bar (1s=100%/green, 10s=0%/red) with smooth animations, moved health bar to bottom with percentage text
 // v1.4.0: DB-backed receivers; lock-toggle edit mode (label, enable, cue count); per-receiver retry button; daemon reload on save
-const FW_VERSION = "1.4.0";
+// v1.5.0: Drop the analog freshness bar in favour of a 3-tone status (green/orange/red) keyed off raw seconds, plus a top-level segmented bar with one segment per enabled receiver.
+const FW_VERSION = "1.5.0";
+
+// Discrete freshness tones. Operators were misreading the analog bar as
+// "the radio is laggy" when it was just polling cadence; the discrete
+// version makes "is this receiver still talking to me?" unambiguous.
+//   green : last seen <= 4s
+//   orange: 4s < last seen <= 8s
+//   red   : last seen > 8s, or no lmt at all
+const FRESHNESS_OK_MS   = 4000;
+const FRESHNESS_WARN_MS = 8000;
+function freshnessTone(freshnessMs) {
+  if (freshnessMs == null || !Number.isFinite(freshnessMs)) return 'danger';
+  if (freshnessMs <= FRESHNESS_OK_MS)   return 'ok';
+  if (freshnessMs <= FRESHNESS_WARN_MS) return 'warn';
+  return 'danger';
+}
+const TONE_DOT_BG = {
+  ok:     'bg-green-500',
+  warn:   'bg-orange-500',
+  danger: 'bg-red-500',
+};
+const TONE_TEXT = {
+  ok:     'text-green-400',
+  warn:   'text-orange-400',
+  danger: 'text-red-400',
+};
 
 // Helper: derive the cue count from a receiver's cues_data map. With the
 // current "id-as-zone" convention each receiver has exactly one zone, so we
@@ -114,8 +140,6 @@ function SingleReceiver({
 }) {
   const [popup, setPopup] = useState(null);
   const receiverRef = useRef(null);
-  const [smoothedLatency, setSmoothedLatency] = useState(0);
-  const latencyRef = useRef(0);
 
   const handleTargetClick = (target, item, event) => {
     if (item) {
@@ -149,55 +173,21 @@ function SingleReceiver({
     batteryLevel = receiver.battery || "N/A";
   }
 
-  // Determine connectivity using the last message timestamp (lmt)
+  // `freshness` (ms): wall-clock time since the dongle last heard from
+  // this receiver. Bounded below by the dongle's TDMA poll cadence
+  // (clock_sync_interval_ms / numReceivers). Surfaced only as a tone on
+  // the WiFi icon -- the literal number was just visual noise that
+  // operators were misreading as RF lag.
   let isConnectionGood;
-  let latency = 0;
-  let txmtLatency = 0;
+  let freshness = null;
   if (receiver.status && receiver.status.lmt) {
-    latency = Date.now() - receiver.status.lmt
-    isConnectionGood = (latency <= 10000);
+    freshness = Date.now() - receiver.status.lmt;
+    isConnectionGood = (freshness <= 10000);
   } else {
     isConnectionGood = receiver.connectionStatus === "good";
   }
-
-  // Smooth latency value to reduce jumpiness (exponential moving average)
-  useEffect(() => {
-    if (receiver.status && receiver.status.lmt && latency > 0) {
-      // Use exponential moving average with smoothing factor of 0.9 (highly responsive)
-      // Higher value = more responsive, lower value = smoother but slower
-      const smoothingFactor = 0.8;
-      const newSmoothed = latencyRef.current === 0 
-        ? latency 
-        : latencyRef.current + (latency - latencyRef.current) * smoothingFactor;
-      
-      latencyRef.current = newSmoothed;
-      setSmoothedLatency(newSmoothed);
-    } else {
-      latencyRef.current = 0;
-      setSmoothedLatency(0);
-    }
-  }, [latency, receiver.status?.lmt]);
-
-  // Use smoothed latency for both display and bar calculation for consistency
-  const latencyForDisplay = smoothedLatency > 0 ? smoothedLatency : latency;
-  const lfx = (latencyForDisplay / 1000).toFixed(1)
-
-  // Calculate latency percentage for visual bar (0 sec = 100%, 10 sec = 0%)
-  // Use smoothed latency so bar moves smoothly
-  // 5 seconds = 50% (halfway point)
-  let latencyPercent = null;
-  if (receiver.status && receiver.status.lmt && latencyForDisplay >= 0) {
-    if (lfx <= 1) {
-      latencyPercent = 100;
-    } else if (lfx >= 10) {
-      latencyPercent = 0;
-    } else {
-      // Linear interpolation: 100% at 0s, 0% at 10s
-      latencyPercent = 100 - (lfx / 10) * 100;
-    }
-    // Clamp to ensure valid percentage
-    latencyPercent = Math.max(0, Math.min(100, latencyPercent));
-  }
+  const tone = freshnessTone(freshness);
+  const lfx = freshness != null ? (freshness / 1000).toFixed(1) : "—";
 
   // Get successPercent for health bar (0-100)
   const successPercent = receiver.status?.successPercent ?? null;
@@ -278,9 +268,14 @@ function SingleReceiver({
             {typeof batteryLevel === 'number' ? batteryLevel : "N/A"}%
           </span>
 
-          {/* Connectivity Indicator */}
+          {/* Connectivity indicator. Tone-coloured by freshness so the
+              card-level icon mirrors the segmented strip up top: green
+              <=4s, orange <=8s, red beyond that or no link at all. */}
           {isConnectionGood ? (
-            <MdSignalWifi4Bar className="text-green-400" />
+            <MdSignalWifi4Bar
+              className={TONE_TEXT[tone]}
+              title={`Last seen ${lfx}s ago`}
+            />
           ) : (
             <MdSignalWifiOff className="text-red-400" />
           )}
@@ -403,32 +398,6 @@ function SingleReceiver({
         </div>
       )}
 
-      {/* New Latency Display Section */}
-      {isConnectionGood && (
-        <div className="text-sm text-gray-400 mt-auto pt-2 border-t border-gray-700">
-          <div className="flex items-center justify-center gap-1 mb-2">
-            <MdAccessTime />
-            <span>Latency: {lfx}s (RTT: {txmtLatency}ms)</span>
-          </div>
-          {/* Latency Bar */}
-          {latencyPercent !== null && (
-            <div className="relative w-full">
-              <div className="w-full h-1 bg-gray-700 rounded-full overflow-hidden opacity-80">
-                <div
-                  className="h-full transition-all duration-1000 ease-out"
-                  style={{
-                    width: `${latencyPercent}%`,
-                    backgroundColor: latencyPercent >= 50 
-                      ? `rgba(${Math.floor(225 * (1 - (latencyPercent - 50) / 50))}, 225, 0, 0.85)` 
-                      : `rgba(225, ${Math.floor(225 * (latencyPercent / 50))}, 0, 0.85)`
-                  }}
-                  title={`Latency Quality: ${latencyPercent.toFixed(0)}%`}
-                />
-              </div>
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Health Bar - Muted at bottom */}
       {healthPercent !== null && (
@@ -907,33 +876,37 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       ? []
       : Object.keys(receivers).filter((k) => isReceiverDisabled(receivers[k]));
 
-    // Calculate system health metrics
+    // Calculate system health metrics.
+    //
+    // The freshness rollup is now a segmented bar: one slot per *enabled*
+    // (pollable) receiver -- not just online ones -- so disabled rows
+    // never show up but a receiver that has gone fully silent still
+    // occupies its slot, coloured red. Operators can tell at a glance
+    // "5/6 of my mortars are alive" without having to read text.
     const calculateSystemHealth = () => {
-      const onlineReceivers = Object.entries(receivers).filter(([ident, receiver]) => {
+      const pollableEntries = Object.entries(receivers)
+        .filter(([_, r]) => isPollableReceiver(r))
+        .sort(([a], [b]) => a.localeCompare(b)); // stable order = stable segment positions
+
+      const freshnessSegments = pollableEntries.map(([ident, receiver]) => {
+        const lmt = receiver?.status?.lmt;
+        const fresh = (typeof lmt === 'number')
+          ? Date.now() - lmt
+          : null;
+        return { ident, tone: freshnessTone(fresh) };
+      });
+
+      // Online = anything we've heard from in the last 10s. Used by the
+      // success-rate / continuity panels which only make sense for
+      // currently-talking nodes.
+      const onlineReceivers = pollableEntries.filter(([_, receiver]) => {
         if (!receiver.status || !receiver.status.lmt) return false;
-        const latency = Date.now() - receiver.status.lmt;
-        return latency <= 10000; // 10 second timeout
+        return Date.now() - receiver.status.lmt <= 10000;
       });
 
       if (onlineReceivers.length === 0) {
-        return { avgLatencyPercent: null, worstLatencyPercent: null, worstLatencyIdent: null, avgSuccessPercent: null, worstSuccessPercent: null, worstSuccessIdent: null, continuityPercent: null, continuityCount: null, continuityTotal: null };
+        return { freshnessSegments, avgSuccessPercent: null, worstSuccessPercent: null, worstSuccessIdent: null, continuityPercent: null, continuityCount: null, continuityTotal: null };
       }
-
-      // Calculate latency metrics with ident tracking
-      const latencyData = onlineReceivers.map(([ident, receiver]) => {
-        const latency = Date.now() - receiver.status.lmt;
-        const lfx = latency / 1000;
-        let percent;
-        if (lfx <= 1) percent = 100;
-        else if (lfx >= 10) percent = 0;
-        else percent = 100 - (lfx / 10) * 100;
-        return { ident, percent };
-      });
-
-      const avgLatencyPercent = latencyData.reduce((sum, d) => sum + d.percent, 0) / latencyData.length;
-      const worstLatency = latencyData.reduce((worst, current) => current.percent < worst.percent ? current : worst);
-      const worstLatencyPercent = worstLatency.percent;
-      const worstLatencyIdent = worstLatency.ident;
 
       // Calculate success percent metrics with ident tracking
       const successData = onlineReceivers
@@ -944,7 +917,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
         .filter(d => d.percent !== null);
 
       if (successData.length === 0) {
-        return { avgLatencyPercent, worstLatencyPercent, worstLatencyIdent, avgSuccessPercent: null, worstSuccessPercent: null, worstSuccessIdent: null, continuityPercent: null, continuityCount: null, continuityTotal: null };
+        return { freshnessSegments, avgSuccessPercent: null, worstSuccessPercent: null, worstSuccessIdent: null, continuityPercent: null, continuityCount: null, continuityTotal: null };
       }
 
       const avgSuccessPercent = successData.reduce((sum, d) => sum + d.percent, 0) / successData.length;
@@ -999,7 +972,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
         }
       }
 
-      return { avgLatencyPercent, worstLatencyPercent, worstLatencyIdent, avgSuccessPercent, worstSuccessPercent, worstSuccessIdent, continuityPercent, continuityCount, continuityTotal };
+      return { freshnessSegments, avgSuccessPercent, worstSuccessPercent, worstSuccessIdent, continuityPercent, continuityCount, continuityTotal };
     };
 
     const systemHealth = calculateSystemHealth();
@@ -1008,49 +981,30 @@ export default function ReceiverDisplay({ setCurrentTab }) {
         <div className="w-full">
             <ShowHealth />
             {/* System Health Bar - Fixed at top */}
-            {(systemHealth.avgLatencyPercent !== null || systemHealth.avgSuccessPercent !== null || systemHealth.continuityPercent !== null) && (
+            {(systemHealth.freshnessSegments.length > 0 || systemHealth.avgSuccessPercent !== null || systemHealth.continuityPercent !== null) && (
               <div className="sticky top-0 z-10 bg-gray-900 border-b border-gray-700 py-2 px-3">
                 <div className="max-w-7xl mx-auto">
                   <div className="flex gap-4">
-                    {/* Latency Health Bar */}
-                    {systemHealth.avgLatencyPercent !== null && (
+                    {/* Freshness strip: one fixed-width segment per enabled
+                        receiver, coloured by that receiver's freshness
+                        tone. Operators can read "5/6 alive" from a glance
+                        rather than parsing a sliding average. Stable sort
+                        order so segment positions don't reshuffle when a
+                        receiver flips state. */}
+                    {systemHealth.freshnessSegments.length > 0 && (
                       <div className="flex-1">
-                        <div className="text-xs text-gray-500 mb-0.5">Latency</div>
-                        <div className="relative w-full h-1.5 bg-gray-800 rounded-full overflow-visible">
-                          {/* Average bar with full 0-100 color gradient */}
-                          <div
-                            className="absolute h-full transition-all duration-1000 ease-out rounded-full"
-                            style={{
-                              width: `${systemHealth.avgLatencyPercent}%`,
-                              backgroundColor: systemHealth.avgLatencyPercent >= 50 
-                                ? `rgba(${Math.floor(225 * (1 - (systemHealth.avgLatencyPercent - 50) / 50))}, 225, 0, 0.85)` 
-                                : `rgba(225, ${Math.floor(225 * (systemHealth.avgLatencyPercent / 50))}, 0, 0.85)`
-                            }}
-                          />
-                          {/* Red tick marker for worst value */}
-                          <div
-                            className="absolute top-0 w-0.5 h-full bg-red-500 transition-all duration-1000 ease-out"
-                            style={{
-                              left: `${systemHealth.worstLatencyPercent}%`,
-                              transform: 'translateX(-50%)',
-                              boxShadow: '0 0 4px 2px rgba(239, 68, 68, 0.5)'
-                            }}
-                          />
-                          {/* Worst receiver ident */}
-                          {systemHealth.worstLatencyIdent && (
+                        <div className="text-xs text-gray-500 mb-0.5">Freshness</div>
+                        <div className="flex w-full h-1.5 gap-0.5 rounded-full overflow-hidden bg-gray-800">
+                          {systemHealth.freshnessSegments.map((seg) => (
                             <div
-                              className="absolute text-[10px] text-gray-300 transition-all duration-1000 ease-out whitespace-nowrap z-10"
-                              style={{
-                                left: `${systemHealth.worstLatencyPercent}%`,
-                                top: '-14px',
-                                transform: 'translateX(-100%)',
-                                marginRight: '4px',
-                                textShadow: '0 1px 2px rgba(0, 0, 0, 0.8), 0 0 4px rgba(0, 0, 0, 0.6)'
-                              }}
-                            >
-                              {systemHealth.worstLatencyIdent}
-                            </div>
-                          )}
+                              key={seg.ident}
+                              className={`flex-1 ${TONE_DOT_BG[seg.tone]}`}
+                              title={`${seg.ident}: ${
+                                seg.tone === 'ok' ? 'fresh' :
+                                seg.tone === 'warn' ? 'stale' : 'lost'
+                              }`}
+                            />
+                          ))}
                         </div>
                       </div>
                     )}

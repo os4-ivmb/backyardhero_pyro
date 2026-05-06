@@ -22,6 +22,11 @@ SERIAL_PORT = "/dev/ttyACM0"
 BAUD_RATE = 115200
 DB_PATH = "/data/backyardhero.db"
 STATE_FILE_PATH = "/data/state"
+# Optional unix datagram socket the WS server can bind. When the daemon's
+# state changes we fire a packet at it so the WS server doesn't have to
+# wait for inotify on the state file. Falls back silently to file-based
+# delivery if no listener is bound.
+STATE_SOCKET_PATH = "/tmp/byh_state.sock"
 LAST_SCAN_FILE_PATH = "/data/last_scan.json"
 CONFIG_PATH = "/config/systemcfg.json"
 ERR_LOG_PATH = "/data/log/daemon.err"
@@ -205,15 +210,101 @@ class FireworkDaemon:
         # a second fetch.
         self.current_rf_channel = None
         self.last_rf_scan_summary = None
+        # Dongle command-queue saturation. Updated from the per-second
+        # status frame. `_capacity` defaults to None until the dongle
+        # (FW v8+) reports it; the UI treats a missing capacity as
+        # "unknown" rather than 0.
+        self.dongle_cmd_queue_depth = 0
+        self.dongle_cmd_queue_capacity = None
+        # Live (post-clamp) clock-sync interval the dongle is running with.
+        # Echoed back from the dongle's per-second status (FW v9+ field
+        # `csim`). UI uses this to confirm the operator's edit took
+        # effect (or got clamped).
+        self.dongle_clock_sync_interval_ms = None
         # When set, /data/last_scan.json holds the full per-channel result
         # from the most recent scan_result we've received from the dongle.
         self.rf_scan_pending_since_ms = None
 
         self.led_handler = LEDHandler(self)
 
+        # State-publish plumbing. `_state_dirty` is a threading.Event the
+        # state flusher coalesces on -- any code path that mutates state
+        # the UI cares about should call mark_state_dirty() rather than
+        # update_state_file() directly. The flusher debounces tightly
+        # (~10ms) so a burst of dongle ACK-payload status updates produces
+        # one snapshot, not 16. The unix datagram socket is opened lazily
+        # the first time we publish.
+        self._state_dirty = threading.Event()
+        self._state_pub_sock = None
+        self._state_pub_warned = False
+
         self.load_config()
-        
+
         self.clear_states()
+
+    def mark_state_dirty(self):
+        """Signal the flusher that a snapshot needs to be published.
+
+        Cheap and lock-free: just sets a threading.Event. Safe to call
+        from any thread (read_from_tcp, monitor_switch, command handlers,
+        protocol handler callbacks).
+        """
+        self._state_dirty.set()
+
+    def _publish_state_to_socket(self, state_json_bytes):
+        """Best-effort fire-and-forget push to the WS server.
+
+        Uses an abstract-namespace-free unix datagram so the WS server
+        can `recv()` on the same path without coordination. If no
+        listener is bound (WS server not running yet, or crashed), the
+        send raises ENOENT/ECONNREFUSED -- we swallow it and keep going.
+        The state file write still happens, so the WS server will pick
+        up the next snapshot via its inotify fallback the moment it
+        reconnects.
+        """
+        try:
+            if self._state_pub_sock is None:
+                self._state_pub_sock = socket.socket(
+                    socket.AF_UNIX, socket.SOCK_DGRAM
+                )
+                # Don't block on a full socket buffer -- prefer dropping
+                # an in-flight snapshot over stalling the daemon.
+                self._state_pub_sock.setblocking(False)
+            self._state_pub_sock.sendto(state_json_bytes, STATE_SOCKET_PATH)
+            self._state_pub_warned = False
+        except (FileNotFoundError, ConnectionRefusedError, BlockingIOError):
+            # Most common case: WS server hasn't bound yet. The file
+            # write is the fallback; don't spam the log.
+            pass
+        except Exception as e:
+            if not self._state_pub_warned:
+                print(f"State socket publish failed (will keep trying): {e}")
+                self._state_pub_warned = True
+
+    def state_flusher(self):
+        """Coalesce state-dirty signals into snapshot writes.
+
+        Wakes on every set() of the dirty event, sleeps a short debounce
+        window so a burst of mutations produces a single write, then
+        flushes. The 10ms window is well below human-perceptible latency
+        but big enough to fold a typical 16-receiver burst into one
+        snapshot.
+        """
+        DEBOUNCE_S = 0.01
+        while self.running:
+            # Block until somebody marks state dirty. Timeout periodically
+            # so a quiet daemon still publishes a heartbeat snapshot
+            # (handy for newly-connected WS clients during an idle moment).
+            triggered = self._state_dirty.wait(timeout=1.0)
+            if triggered:
+                # Coalesce a burst of dirty-marks within the debounce
+                # window, then publish once.
+                time.sleep(DEBOUNCE_S)
+            self._state_dirty.clear()
+            try:
+                self.update_state_file()
+            except Exception as e:
+                print(f"state_flusher write error: {e}")
 
     def debug_enabled(self):
         return self.led_handler.debug_enabled()
@@ -499,7 +590,9 @@ class FireworkDaemon:
                 self.last_switch_state = switch_state
                 self.last_arming_state = arming_state
                 self.last_man_fire_state = man_fire_state
-                self.update_state_file()
+                # The flusher will coalesce this with any other dirty
+                # signal that arrived in the last debounce window.
+                self.mark_state_dirty()
                 time.sleep(0.1)  # Check every 100ms
             except Exception as e:
                 print(f"Error monitoring switches: {e}")
@@ -525,7 +618,7 @@ class FireworkDaemon:
             except Exception as e:
                 print(f"Error polling command directory: {e}")
 
-            self.update_state_file()
+            self.mark_state_dirty()
             time.sleep(0.5)  # Poll every 500ms
 
     def write_error(self, err_msg):
@@ -939,6 +1032,21 @@ class FireworkDaemon:
             "loaded_show_id": self.loaded_show_id,
             "show_running": any(thread.is_alive() for thread in self.command_timer_threads),
             "device_is_transmitting": self.last_serial_sent is not None and (datetime.now() - self.last_serial_sent).total_seconds() <= 10,
+            # Dongle command-queue saturation, fed from the per-second
+            # status frame. `capacity` is None until a v8+ dongle reports
+            # `qmax` -- older firmware just keeps `depth` and the UI hides
+            # the saturation bar. Surfaced as a top-level block (not under
+            # settings) since it's runtime telemetry, not a knob.
+            "dongle_cmd_queue": {
+                "depth": self.dongle_cmd_queue_depth,
+                "capacity": self.dongle_cmd_queue_capacity,
+            },
+            # Active clock-sync interval the dongle is running with
+            # (post-clamp). None until a FW v9+ dongle reports `csim`.
+            # Lets the UI show the operator the value the firmware
+            # actually accepted, e.g. when their config request was
+            # out-of-range and got bounded.
+            "dongle_clock_sync_interval_ms": self.dongle_clock_sync_interval_ms,
             "device_is_armed": gpio_handler.read_key(ARMING_GPIO_KEY) == LOW,
             "manual_fire_active": gpio_handler.read_key(MAN_FIRE_GPIO_KEY) == LOW,
             "start_sw_active": self.start_sw_active,
@@ -986,6 +1094,27 @@ class FireworkDaemon:
         # unique tmp files let both writers finish independently; whichever
         # replace() runs last just wins as the published snapshot, which is
         # exactly what we want.
+        # Render once. We push the same bytes both to disk (for legacy
+        # readers and the WS server's inotify fallback) and to the unix
+        # datagram socket (for sub-millisecond delivery to the WS server
+        # when it's bound).
+        try:
+            state_bytes = json.dumps(state, indent=4).encode("utf-8")
+        except Exception as e:
+            print(f"Error serializing daemon state: {e}")
+            return
+
+        # Best-effort push to the in-process WS subscriber FIRST. This
+        # gives the lowest-latency path priority; the file write is the
+        # robust fallback. Order matters because the file write does
+        # disk I/O which can take milliseconds on a busy SD card.
+        self._publish_state_to_socket(state_bytes)
+
+        # Atomic file publish for any out-of-process reader and for the
+        # WS server's inotify fallback. We deliberately do NOT fsync()
+        # here -- the state file is regenerated state, not durable data,
+        # and fsync on SD-card-backed filesystems is the dominant cost
+        # of this function (5-50ms per call under contention).
         state_dir = os.path.dirname(STATE_FILE_PATH) or "."
         tmp_fd = None
         tmp_path = None
@@ -993,11 +1122,11 @@ class FireworkDaemon:
             tmp_fd, tmp_path = tempfile.mkstemp(
                 prefix=".state.", suffix=".tmp", dir=state_dir
             )
-            with os.fdopen(tmp_fd, "w") as state_file:
+            with os.fdopen(tmp_fd, "wb") as state_file:
                 tmp_fd = None  # ownership passed to the file object
-                json.dump(state, state_file, indent=4)
-                state_file.flush()
-                os.fsync(state_file.fileno())
+                state_file.write(state_bytes)
+                # No fsync: we publish via os.replace below, which is
+                # atomic on POSIX, and the data is regenerated each tick.
             os.replace(tmp_path, STATE_FILE_PATH)
             tmp_path = None  # successfully published, nothing to clean up
         except Exception as e:
@@ -1019,6 +1148,17 @@ class FireworkDaemon:
     def stop(self):
         """Stop the daemon."""
         self.running = False
+        # Wake the flusher if it's parked on the dirty event so it can
+        # exit cleanly instead of waiting out its 1s heartbeat timeout.
+        try:
+            self._state_dirty.set()
+        except Exception:
+            pass
+        if self._state_pub_sock is not None:
+            try:
+                self._state_pub_sock.close()
+            except Exception:
+                pass
         if self.serial_connection:
             self.serial_connection.close()
         #GPIO.cleanup()  # Clean up GPIO resources
@@ -1035,6 +1175,12 @@ class FireworkDaemon:
             threading.Thread(target=self.read_from_tcp),
             #threading.Thread(target=self.listen_serial),
             threading.Thread(target=self.monitor_switch),
+            # The state flusher coalesces state-dirty signals into
+            # snapshot writes (file + unix-socket push). It replaces the
+            # ad-hoc per-tick update_state_file() calls that used to live
+            # in monitor_switch/poll_command_dir and adds an immediate
+            # path for dongle status updates.
+            threading.Thread(target=self.state_flusher, daemon=True),
         ]
 
         for thread in threads:

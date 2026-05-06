@@ -20,7 +20,6 @@ import { isPollableReceiver } from "@/util/receivers";
 //     something goes wrong.
 //   - Moves the "ARMED" indicator OUT of here; ARMED is dominant chrome
 //     handled by AppShell's armed-rail and the ModeBadge in TopBar.
-//   - Compresses the whole bar to a single hairline row in armed/live.
 //
 // The websocket connection management itself lives here (it always did, in
 // Status.jsx). It's been preserved unchanged behaviourally — only the UI
@@ -39,6 +38,48 @@ const checkIfLogIsRecent = (log) => {
   if (Number.isNaN(t)) return false;
   return Date.now() - t <= 5 * 60 * 1000;
 };
+
+// 8-segment dongle command-queue saturation indicator. Each segment has a
+// fixed colour stepping from green (idle) to red (saturated); the number
+// of *lit* segments tracks `depth/capacity`. We always light at least one
+// segment when the depth is known so the operator can tell "this widget
+// is reporting" vs "no telemetry yet".
+const QUEUE_SEGMENT_COUNT = 8;
+const QUEUE_SEGMENT_HSL = Array.from({ length: QUEUE_SEGMENT_COUNT }, (_, i) => {
+  // Hue 120 (green) → 0 (red), evenly spaced across the 8 steps.
+  const hue = 120 - (i / (QUEUE_SEGMENT_COUNT - 1)) * 120;
+  return `hsl(${hue.toFixed(0)} 75% 48%)`;
+});
+
+function QueueBar({ depth, capacity, className }) {
+  if (depth == null || capacity == null || capacity <= 0) return null;
+  const fraction = Math.max(0, Math.min(1, depth / capacity));
+  // Always show at least one lit segment so a "0/128" reading is
+  // visually distinct from "no telemetry available".
+  const litCount = Math.max(1, Math.ceil(fraction * QUEUE_SEGMENT_COUNT));
+  const tooltip = `Dongle command queue: ${depth}/${capacity}`;
+  return (
+    <div
+      className={cn("flex items-center gap-[2px]", className)}
+      role="img"
+      aria-label={tooltip}
+      title={tooltip}
+    >
+      {QUEUE_SEGMENT_HSL.map((color, i) => {
+        const lit = i < litCount;
+        return (
+          <span
+            key={i}
+            className="w-[3px] h-3 rounded-[1px]"
+            style={{
+              backgroundColor: lit ? color : "rgba(255,255,255,0.10)",
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
 
 export default function StatusBar() {
   // --- WS lifecycle (preserved from Status.jsx) -----------------------------
@@ -175,10 +216,6 @@ export default function StatusBar() {
 
   // --- Render --------------------------------------------------------------
 
-  // Compact mode: in armed/live, the bar collapses to a single thin row
-  // showing only the most operationally-critical info (link health + cursor).
-  const compact = mode.id === "armed" || mode.id === "live";
-
   // -----------------------------------------------------------------
   // Three independent health signals (web ↔ daemon ↔ dongle). The old
   // UI displayed all three but with equal weight; the previous redesign
@@ -217,6 +254,19 @@ export default function StatusBar() {
       dongleLabel = activeProtocol;
     }
   }
+
+  // Dongle command-queue saturation. The dongle reports `q`/`qmax` once
+  // per second; we render it next to the dongle stat so an operator can
+  // tell at a glance "is the radio falling behind on outbound commands?"
+  // -- which is the failure mode we'd otherwise only catch by watching
+  // `q` climb in the raw status JSON.
+  const dongleCmdQueue = stateData.fw_state?.dongle_cmd_queue || null;
+  const dongleQueueDepth =
+    typeof dongleCmdQueue?.depth === "number" ? dongleCmdQueue.depth : null;
+  const dongleQueueCapacity =
+    typeof dongleCmdQueue?.capacity === "number" && dongleCmdQueue.capacity > 0
+      ? dongleCmdQueue.capacity
+      : null;
 
   const showLabel = !isShowLoaded ? "—" : isShowRunning ? "Running" : "Loaded";
   const showTone = !isShowLoaded ? "neutral" : isShowRunning ? "live" : "ok";
@@ -263,10 +313,7 @@ export default function StatusBar() {
       </div>
 
       <div
-        className={cn(
-          "px-3 flex items-center gap-4 text-sm",
-          compact ? "h-7" : "h-12"
-        )}
+        className="px-3 h-12 flex items-center gap-4 text-sm"
       >
         {/* ─── Link button (web ↔ daemon backend WS) ───────────────────── */}
         <button
@@ -284,28 +331,24 @@ export default function StatusBar() {
           ) : (
             <MdSignalWifiOff className="text-base" aria-hidden />
           )}
-          {!compact && (
-            <span className="font-medium">
-              {isConnected && wsAlive ? "Link" : (
-                <span className="inline-flex items-center gap-1">
-                  <MdRefresh aria-hidden /> Reconnect
-                </span>
-              )}
-            </span>
-          )}
+          <span className="font-medium">
+            {isConnected && wsAlive ? "Link" : (
+              <span className="inline-flex items-center gap-1">
+                <MdRefresh aria-hidden /> Reconnect
+              </span>
+            )}
+          </span>
         </button>
 
-        {!compact && <div className="h-6 w-px bg-border-subtle" aria-hidden />}
+        <div className="h-6 w-px bg-border-subtle" aria-hidden />
 
         {/* ─── Daemon (PC daemon process) ─────────────────────────────── */}
-        {!compact && (
-          <Stat label="Daemon" value={daemonLabel} tone={daemonTone} dot size="sm" />
-        )}
+        <Stat label="Daemon" value={daemonLabel} tone={daemonTone} dot size="sm" />
 
-        {!compact && <div className="h-6 w-px bg-border-subtle" aria-hidden />}
+        <div className="h-6 w-px bg-border-subtle" aria-hidden />
 
         {/* ─── Dongle (USB radio device + bound protocol + TX pulse) ───── */}
-        {!compact && (
+        <div className="flex items-center gap-3 min-w-0">
           <div className="flex flex-col min-w-0">
             <div className="flex items-center gap-1.5">
               <Dot
@@ -339,44 +382,50 @@ export default function StatusBar() {
               {dongleLabel}
             </span>
           </div>
-        )}
+          {/* Command-queue saturation -- only shown when the dongle has
+              actually reported. While the dongle is silent / unbound the
+              bar is suppressed so it doesn't pretend to be measuring
+              something. */}
+          {dongleTone === "ok" && (
+            <QueueBar
+              depth={dongleQueueDepth}
+              capacity={dongleQueueCapacity}
+            />
+          )}
+        </div>
 
-        {!compact && <div className="h-6 w-px bg-border-subtle" aria-hidden />}
+        <div className="h-6 w-px bg-border-subtle" aria-hidden />
 
         {/* ─── Receivers ─────────────────────────────────────────────── */}
-        {!compact && (
-          <Stat
-            label="Receivers"
-            value={`${receiverSummary.online}/${receiverSummary.total}`}
-            tone={
-              receiverSummary.total === 0
-                ? "neutral"
-                : receiverSummary.online === receiverSummary.total
-                ? "ok"
-                : receiverSummary.online === 0
-                ? "danger"
-                : "warn"
-            }
-            dot
-            size="sm"
-            numeric
-          />
-        )}
+        <Stat
+          label="Receivers"
+          value={`${receiverSummary.online}/${receiverSummary.total}`}
+          tone={
+            receiverSummary.total === 0
+              ? "neutral"
+              : receiverSummary.online === receiverSummary.total
+              ? "ok"
+              : receiverSummary.online === 0
+              ? "danger"
+              : "warn"
+          }
+          dot
+          size="sm"
+          numeric
+        />
 
-        {!compact && <div className="h-6 w-px bg-border-subtle" aria-hidden />}
+        <div className="h-6 w-px bg-border-subtle" aria-hidden />
 
         {/* ─── Show group ─────────────────────────────────────────────── */}
-        {!compact && (
-          <Stat label="Show" value={showLabel} tone={showTone} dot size="sm" />
-        )}
+        <Stat label="Show" value={showLabel} tone={showTone} dot size="sm" />
 
         {/* ─── Cursor (always visible) ────────────────────────────────── */}
-        <div className={cn("flex items-center gap-2 ml-auto", compact && "ml-auto")}>
+        <div className="flex items-center gap-2 ml-auto">
           <span className="eyebrow">Cursor</span>
           <span className="font-mono text-base text-fg-primary num">{cursorText}</span>
         </div>
 
-        {!compact && mode.id === "manual_fire" ? (
+        {mode.id === "manual_fire" ? (
           <Badge tone="armed" leading={<Dot tone="armed" pulse />}>
             Manual fire active
           </Badge>

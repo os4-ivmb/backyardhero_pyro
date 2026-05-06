@@ -27,7 +27,29 @@
 //     line that the host parses and persists.
 //   * Per-second status JSON now includes `ch` (current rfChannel) so the
 //     UI can show the active frequency without a separate query.
-#define FW_VERSION 6
+// v7: 2026-05-XX - Push-on-arrival receiver telemetry:
+//   * Each successful ACK-payload status update now emits a single-line
+//     `{"type":"rxupd", ...}` JSON to the host the moment it arrives,
+//     rather than waiting for the per-second aggregate. Status-to-host
+//     latency drops from "0..1000ms (1Hz tick)" to "tens of ms" (RF retry
+//     window + USB-CDC).
+//   * The per-second `status` JSON is unchanged and still emitted — it
+//     covers slow-changing housekeeping (queue depth, fw, channel,
+//     aggregate latency) and acts as a heartbeat for the host so dropped
+//     rxupd lines self-heal within a second.
+// v9: 2026-05-XX - Clamp clockSyncIntervalMs + scrub queue on `forget`:
+//   * config knobs `clock_sync_interval_ms` / `response_timeout_ms` /
+//     `receiver_timeout_ms` are now sanity-bounded on apply (50..30000ms,
+//     5..500ms, 60s..6h respectively). Out-of-range values silently
+//     broke polling -- e.g. setting csim=0 made pollSpacingMs=0 then
+//     5ms-floored, which busted ACK timing on slow links. The actually-
+//     applied values get echoed back in the per-second status as `csim`
+//     so the host UI can show what the dongle is running with.
+//   * `forget IDENT` now removes any pending queued commands targeting
+//     that nodeID. Previously a forgotten receiver would still get any
+//     in-flight queued commands dispatched, wasting up to ~22ms of
+//     radio time per cmd on TX-FAIL retries.
+#define FW_VERSION 9
 
 #define RF24_CE_PIN 37
 #define RF24_CSN_PIN 36
@@ -160,6 +182,32 @@ uint32_t commandResponseTimeoutMs = 50UL;
 uint32_t clockSyncIntervalMs = 2000UL;
 uint8_t debugMode = 0;
 
+// Sanity bounds for the runtime-tunable timing knobs. The previous code
+// accepted anything (incl. 0), which silently broke polling math --
+// pollSpacingMs = clockSyncIntervalMs / numReceivers underflows to 0,
+// which the floor at 5ms then masked but in a way that decoupled cadence
+// from configured intent. Clamping at parse time keeps the live values
+// in a regime the rest of the firmware was tested against.
+//
+//   clockSyncIntervalMs:     50..30000ms
+//   commandResponseTimeoutMs: 5..500ms
+//   receiverInactivityTimeoutMs: 60_000..21_600_000ms (1min..6h)
+//
+// Implemented as a macro (not a function) so we don't introduce a
+// top-level function before the QueuedCommand struct -- Arduino's
+// ctags-based auto-prototype generator hoists prototypes to the
+// location of the FIRST top-level function in the .ino, which would
+// land before QueuedCommand and break compilation of the queue helpers.
+#define CSIM_MIN_MS  50UL
+#define CSIM_MAX_MS  30000UL
+#define CRTM_MIN_MS  5UL
+#define CRTM_MAX_MS  500UL
+#define RITM_MIN_MS  60000UL
+#define RITM_MAX_MS  21600000UL
+
+#define CLAMP_U32(v, lo, hi) \
+  ((uint32_t)((v) < (lo) ? (lo) : ((v) > (hi) ? (hi) : (v))))
+
 // Runtime-tunable RF parameters. Defaults preserve previous behavior.
 uint8_t rfChannel = 85;
 // rfSystemId salts the RF base address so two independent firing systems on
@@ -242,12 +290,23 @@ RF24 radio(RF24_CE_PIN, RF24_CSN_PIN);
 // RF24 addressing (Star Topology):
 // Master listens on pipe 0 at masterReadAddress(); receivers each listen on
 // receiverAddress(nodeID). The rfSystemId is salted into the high bytes so
-// two independent firing systems on the same channel won't collide. With
-// rfSystemId == 0 (the default) the addresses are byte-identical to the
-// pre-v4 scheme — old receivers can keep talking to a new dongle and
-// vice-versa during a rolling upgrade.
-//   rfSystemId=0:   master_read=0x0000000000, receiver_N=0x0000000001+N
-//   rfSystemId=k:   master_read=k*0x0100000000, receiver_N=k*0x0100000000 + 1 + N
+// two independent firing systems on the same channel won't collide.
+//
+// IMPORTANT (FW v8+): the low-byte math is *arithmetic addition*, not
+// bitwise OR. The pre-v8 firmware used `RECEIVER_BASE | nodeID`, which
+// for any even nodeID set the LSB (giving nodeID+1) but for any odd
+// nodeID was a no-op (giving nodeID). That collapsed every (even N,
+// odd N+1) pair onto the *same* radio address -- e.g. RX162 (even) and
+// RX163 (odd) both ended up listening on address 163. Result: when the
+// dongle thought it was talking to one of the pair, the other actually
+// answered, and any newly-registered odd-paired receiver was silently
+// invisible to the radio. Switching to `+` gives every uint8_t nodeID a
+// unique address. Receivers and dongle MUST be running matching firmware
+// (v8+ on dongle, v10+ on receiver) for the math to agree.
+//
+//   rfSystemId=0:   master_read=0x0000000000, receiver_N = 0x0000000001 + N
+//   rfSystemId=k:   master_read=k*0x0100000000, receiver_N = k*0x0100000000 + 1 + N
+//
 // Note: with the ACK-payload protocol, master rarely listens — it sends
 // commands and receives status back as the ACK payload. Reading-pipe is only
 // kept for legacy / out-of-band messages.
@@ -260,10 +319,13 @@ static inline uint64_t systemSalt() {
   return ((uint64_t)rfSystemId) << 32;
 }
 static inline uint64_t masterReadAddress() {
+  // MASTER_READ_BASE is 0 so `|` and `+` are equivalent here; using `|`
+  // makes the salt-merge intent explicit.
   return MASTER_READ_BASE | systemSalt();
 }
 static inline uint64_t receiverAddress(uint8_t nodeID) {
-  return RECEIVER_BASE | systemSalt() | (uint64_t)nodeID;
+  // See the IMPORTANT note above re: arithmetic add vs. bitwise OR.
+  return systemSalt() + RECEIVER_BASE + (uint64_t)nodeID;
 }
 
 bool isQueueFull() { return cmdQueueCount >= MAX_COMMANDS_IN_QUEUE; }
@@ -380,9 +442,24 @@ void parseLedJSON(const String& json) {
     else               { ledStates[6] = 4; ledEffects[6] = 0; }
   }
 
-  if (doc.containsKey("receiver_timeout_ms"))    receiverInactivityTimeoutMs = doc["receiver_timeout_ms"].as<uint32_t>();
-  if (doc.containsKey("response_timeout_ms"))    commandResponseTimeoutMs    = doc["response_timeout_ms"].as<uint32_t>();
-  if (doc.containsKey("clock_sync_interval_ms")) clockSyncIntervalMs         = doc["clock_sync_interval_ms"].as<uint32_t>();
+  if (doc.containsKey("receiver_timeout_ms")) {
+    receiverInactivityTimeoutMs = CLAMP_U32(
+      doc["receiver_timeout_ms"].as<uint32_t>(), RITM_MIN_MS, RITM_MAX_MS);
+  }
+  if (doc.containsKey("response_timeout_ms")) {
+    commandResponseTimeoutMs = CLAMP_U32(
+      doc["response_timeout_ms"].as<uint32_t>(), CRTM_MIN_MS, CRTM_MAX_MS);
+  }
+  if (doc.containsKey("clock_sync_interval_ms")) {
+    uint32_t newCsim = CLAMP_U32(
+      doc["clock_sync_interval_ms"].as<uint32_t>(), CSIM_MIN_MS, CSIM_MAX_MS);
+    if (newCsim != clockSyncIntervalMs) {
+      clockSyncIntervalMs = newCsim;
+      // Reset the round-robin clock so the next poll fires promptly under
+      // the new cadence rather than honoring the old spacing's deadline.
+      lastPollDispatchTime = 0;
+    }
+  }
   if (doc.containsKey("debug_mode"))             debugMode                   = doc["debug_mode"].as<uint8_t>();
 
   bool rfChanged = false;
@@ -449,12 +526,39 @@ ReceiverInfo* getReceiverByIdent(const String &ident, bool createIfNotExist) {
   if (!createIfNotExist) return nullptr;
 
   if (numReceivers < MAX_RECEIVERS) {
+    uint8_t newNodeID = nodeIDFromIdent(ident);
+    // Defensive: refuse to register a receiver whose radio address would
+    // collide with one we already know about. A collision means radio
+    // writes to the new receiver land on the old one (RX162 ACKs for
+    // RX163 etc.), which manifests as silent retries plus duplicated
+    // status emits. The old `|`-based address math used to make this
+    // happen for every (even N, odd N+1) pair; v8+ uses `+`, but the
+    // check is cheap and protects against future regressions.
+    if (newNodeID != 0) {
+      uint64_t newAddr = receiverAddress(newNodeID);
+      for (uint8_t i = 0; i < numReceivers; i++) {
+        if (receivers[i].nodeID == 0) continue;
+        if (receiverAddress(receivers[i].nodeID) == newAddr) {
+          Serial.print(F("ERR: RF addr collision adding "));
+          Serial.print(ident);
+          Serial.print(F(" (N"));
+          Serial.print(newNodeID);
+          Serial.print(F(") with "));
+          Serial.print(receivers[i].ident);
+          Serial.print(F(" (N"));
+          Serial.print(receivers[i].nodeID);
+          Serial.println(F(") -- registration refused"));
+          return nullptr;
+        }
+      }
+    }
+
     ReceiverInfo &r = receivers[numReceivers];
     r.ident = ident;
     // Bootstrap nodeID from the ident pattern so we can address the receiver
     // before its first ACK-payload status comes back. The next ACK payload
     // will overwrite this with the receiver's authoritative value.
-    r.nodeID = nodeIDFromIdent(ident);
+    r.nodeID = newNodeID;
     r.batteryLevel = 0;
     r.showId = 0;
     r.loadComplete = false;
@@ -484,18 +588,57 @@ ReceiverInfo* getReceiverByNodeID(uint8_t nodeID) {
   return nullptr;
 }
 
+// Drop every queued command targeting `nodeID`. Used by `forget` so a
+// disabled receiver doesn't keep eating radio time on retries that will
+// never succeed. Compacts the ring in-place to preserve queue ordering
+// for everyone else.
+//
+// Returns the number of commands dropped.
+uint8_t scrubQueueForNode(uint8_t nodeID) {
+  if (cmdQueueCount == 0 || nodeID == 0) return 0;
+  uint8_t dropped = 0;
+  // Walk the live range and copy survivors back to a fresh head.
+  // This works even with the wrap-around layout because we read in
+  // order and write in order to indices we've already read past.
+  int readIdx = cmdQueueHead;
+  int writeIdx = cmdQueueHead;
+  int remaining = cmdQueueCount;
+  while (remaining-- > 0) {
+    QueuedCommand& src = commandBuffer[readIdx];
+    if (src.targetNodeID == nodeID) {
+      dropped++;
+    } else {
+      if (writeIdx != readIdx) commandBuffer[writeIdx] = src;
+      writeIdx = (writeIdx + 1) % MAX_COMMANDS_IN_QUEUE;
+    }
+    readIdx = (readIdx + 1) % MAX_COMMANDS_IN_QUEUE;
+  }
+  cmdQueueTail = writeIdx;
+  cmdQueueCount -= dropped;
+  return dropped;
+}
+
 // Remove a receiver by ident. Used for the host-driven `forget IDENT` serial
 // command (host edited the Receivers DB table, told us this one is no longer
-// in scope). Returns true if the receiver was found and removed.
+// in scope). Returns true if the receiver was found and removed. Also
+// scrubs any pending queued commands targeting the removed receiver --
+// otherwise dispatchOneCommand would keep retrying them and silently
+// burn ~22ms of radio time per cmd on TX-FAIL retries.
 bool removeReceiverByIdent(const String &ident) {
   for (uint8_t i = 0; i < numReceivers; i++) {
     if (receivers[i].ident == ident) {
+      uint8_t goneNodeID = receivers[i].nodeID;
       // Shift the tail down to keep the array compact.
       for (uint8_t j = i; j < numReceivers - 1; ++j) receivers[j] = receivers[j + 1];
       numReceivers--;
       // Reset the round-robin pointer to a safe slot — it might have pointed
       // past the end after the shift.
       if (nextPollReceiverIdx >= numReceivers) nextPollReceiverIdx = 0;
+      uint8_t dropped = scrubQueueForNode(goneNodeID);
+      if (dropped > 0 && debugMode > 0) {
+        Serial.print(F("INFO: forget scrubbed ")); Serial.print(dropped);
+        Serial.print(F(" queued cmd(s) for N")); Serial.println(goneNodeID);
+      }
       return true;
     }
   }
@@ -521,14 +664,58 @@ uint8_t calculateSuccessPercent(ReceiverInfo* rinfo) {
   return (uint8_t)((cnt * 100) / rinfo->successCount);
 }
 
+// Stream a single-receiver update line to the host the instant we have
+// fresh data. This collapses the 0..1s latency that the per-second status
+// dump used to impose. Field names match the per-second `receivers[]`
+// array entries so the host can ingest both shapes through the same
+// abbreviated-key map.
+//
+// What lives in rxupd vs. the per-second tick:
+//   * `x` (latest single-sample radio RTT) — included when caller has
+//     just landed a TX/ACK pair, NULL when emitted from the unsolicited
+//     path. Host adds samples to a sliding window and recomputes the
+//     averaged `lat` per rxupd.
+//   * `sp` (rolling success%) — included so the daemon-side rate of
+//     successful TX matches reality between aggregate ticks.
+//   * `q`/`ch`/`fw` (dongle housekeeping) — stay on the slow tick.
+void emitRxUpd(const ReceiverInfo* r, bool includeFreshLatency) {
+  if (!r) return;
+  StaticJsonDocument<256> d;
+  d["type"] = "rxupd";
+  d["i"]    = r->ident;
+  d["n"]    = r->nodeID;
+  d["b"]    = r->batteryLevel;
+  d["s"]    = r->showId;
+  d["l"]    = r->loadComplete ? 1 : 0;
+  d["r"]    = r->startReady   ? 1 : 0;
+  d["t"]    = r->lastMessageTime;
+  if (includeFreshLatency && r->latencySampleCount > 0) {
+    // Most-recent single-sample RTT lives one slot behind the write head.
+    uint8_t lastIdx = (r->latencyNextIndex + MAX_LATENCY_SAMPLES - 1) %
+                      MAX_LATENCY_SAMPLES;
+    d["x"] = r->latencies[lastIdx];
+  }
+  d["sp"] = calculateSuccessPercent((ReceiverInfo*)r);
+  JsonArray ca = d.createNestedArray("c");
+  for (uint8_t j = 0; j < CONTINUITY_INDEX_CT; j++) ca.add(r->continuity[j]);
+  serializeJson(d, Serial);
+  Serial.write('\n');
+}
+
 // Process a status message (whether received as an ACK payload or unsolicited).
 // Validates length first.
-void ingestStatusFrame(const uint8_t* buf, uint8_t len, uint64_t now) {
+//
+// Returns the ReceiverInfo* we updated, or NULL if the frame was rejected.
+// Caller is responsible for pushing a follow-up `rxupd` line — we deliberately
+// don't emit here so the caller can record post-ACK bookkeeping (latency,
+// success%) before the line goes out, ensuring rxupd carries the freshest
+// possible sample for that TX.
+ReceiverInfo* ingestStatusFrame(const uint8_t* buf, uint8_t len, uint64_t now) {
   if (len < sizeof(ReceiverStatusMessage)) {
     if (debugMode > 0) {
       Serial.print(F("WARN: short status frame, len=")); Serial.println(len);
     }
-    return;
+    return NULL;
   }
 
   const ReceiverStatusMessage* status = (const ReceiverStatusMessage*)buf;
@@ -536,7 +723,7 @@ void ingestStatusFrame(const uint8_t* buf, uint8_t len, uint64_t now) {
     if (debugMode > 0) {
       Serial.print(F("WARN: ack payload type mismatch=")); Serial.println(status->type);
     }
-    return;
+    return NULL;
   }
 
   // ident must be a printable, NUL-terminated string starting with 'R'.
@@ -547,13 +734,13 @@ void ingestStatusFrame(const uint8_t* buf, uint8_t len, uint64_t now) {
     if (debugMode > 0) {
       Serial.print(F("WARN: bogus ident in status: ")); Serial.println(identBuf);
     }
-    return;
+    return NULL;
   }
 
   ReceiverInfo* r = getReceiverByIdent(String(identBuf), true);
   if (!r) {
     Serial.print(F("ERR: Status from unknown ident/node ")); Serial.println(status->nodeID);
-    return;
+    return NULL;
   }
 
   r->nodeID = status->nodeID;
@@ -564,6 +751,7 @@ void ingestStatusFrame(const uint8_t* buf, uint8_t len, uint64_t now) {
   r->lastMessageTime = now;
   r->continuity[0] = status->cont64_0;
   r->continuity[1] = status->cont64_1;
+  return r;
 }
 
 // Soft recovery: clear the radio FIFOs and reapply config without a power-cycle.
@@ -694,6 +882,7 @@ bool sendCommandFrame(uint8_t nodeID, const void* msg, uint8_t msgLen, uint64_t 
   // write deposits the receiver's status here. Use radio.available() rather
   // than isAckPayloadAvailable() so we also pick up rare stale entries
   // (legacy unsolicited frames during the migration window).
+  ReceiverInfo* updatedR = NULL;
   while (radio.available()) {
     uint8_t ackBuf[32];
     uint8_t ackLen = radio.getDynamicPayloadSize();
@@ -703,7 +892,8 @@ bool sendCommandFrame(uint8_t nodeID, const void* msg, uint8_t msgLen, uint64_t 
       break;
     }
     radio.read(ackBuf, ackLen);
-    ingestStatusFrame(ackBuf, ackLen, now);
+    ReceiverInfo* maybeR = ingestStatusFrame(ackBuf, ackLen, now);
+    if (maybeR) updatedR = maybeR;
   }
 
   // Return to RX standby for inbound traffic from receivers we haven't polled
@@ -724,6 +914,11 @@ bool sendCommandFrame(uint8_t nodeID, const void* msg, uint8_t msgLen, uint64_t 
       pushCommandResult(r, true);
       r->consecutiveFailures = 0;
     }
+    // Emit AFTER the latency/success bookkeeping so the just-arrived
+    // sample is what the host sees. Prefer the pointer the ACK actually
+    // came from, fall back to the node-id lookup.
+    ReceiverInfo* emit = updatedR ? updatedR : r;
+    if (emit) emitRxUpd(emit, true);
   } else {
     if (debugMode > 0) {
       Serial.print(F("TX FAIL: N")); Serial.println(nodeID);
@@ -737,6 +932,11 @@ bool sendCommandFrame(uint8_t nodeID, const void* msg, uint8_t msgLen, uint64_t 
         softRadioRecovery();
         r->consecutiveFailures = 0;
       }
+      // Push the success% delta to the host even on TX fail, so the
+      // displayed success rate dips in real time. Skip the fresh latency
+      // sample (we don't have one) and don't update lmt — freshness is
+      // still bounded by the most recent successful poll.
+      emitRxUpd(r, false);
     }
   }
   return ok;
@@ -1260,7 +1460,11 @@ void loop() {
     }
     radio.read(&buf, msgSize);
     if (msgSize > 0 && buf[0] == RECEIVER_STATUS) {
-      ingestStatusFrame(buf, msgSize, now);
+      // Unsolicited frames have no associated TX, so there's no fresh
+      // latency sample to emit — pass false so the host doesn't see a
+      // duplicate sample in the sliding window.
+      ReceiverInfo* r = ingestStatusFrame(buf, msgSize, now);
+      if (r) emitRxUpd(r, false);
     } else if (msgSize > 0) {
       if (debugMode > 0) {
         Serial.print(F("WARN: unexpected inbound type=")); Serial.println(buf[0]);
@@ -1284,8 +1488,17 @@ void loop() {
     DynamicJsonDocument doc(1024 + (numReceivers * 256));
     doc["timestamp"] = now;
     doc["q"] = cmdQueueCount;
+    // Expose queue capacity so the UI can render q/qmax as a saturation
+    // bar without hardcoding the dongle constant on the host side.
+    // Cheap (one extra int per second).
+    doc["qmax"] = MAX_COMMANDS_IN_QUEUE;
     doc["fw"] = FW_VERSION;
     doc["ch"] = rfChannel;
+    // Echo the live (post-clamp) clock-sync interval so the UI can show
+    // the operator what the dongle is actually running with -- e.g. if
+    // they typed 0 in settings, they'll see CSIM_MIN_MS reflected here
+    // rather than wondering why polling didn't change.
+    doc["csim"] = clockSyncIntervalMs;
 
     uint32_t totalLat = 0; int avgLat = 0;
     if (latencySampleCount > 0) {

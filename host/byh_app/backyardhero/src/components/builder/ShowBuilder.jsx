@@ -883,8 +883,16 @@ const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex,
   const [cadence, setCadence] = useState(1);
   const [pattern, setPattern] = useState("row"); // "row" or "sequential"
 
-  // Get all available receivers from the receivers object
-  const availableReceivers = Object.keys(receivers || {});
+  // Only show receivers the user actually wants to fire on. The DB's
+  // Receivers.enabled flag is mirrored into the receiver record (see
+  // useAppStore.fetchReceivers). Disabled receivers are kept around for
+  // historical / inspection purposes but should never seed test cues --
+  // the daemon won't poll them and the dongle would refuse to address
+  // them, so generating items for them just produces dead cues that
+  // confuse the operator at run time.
+  const availableReceivers = Object.entries(receivers || {})
+    .filter(([_, rcv]) => rcv?.enabled !== false)
+    .map(([key]) => key);
 
   const handleToggleReceiver = (receiverKey) => {
     setSelectedReceivers(prev => {
@@ -1546,7 +1554,15 @@ const CopyItemTargetModal = ({ isOpen, onClose, onConfirm, sourceItem, items, av
 };
 
 const ShowBuilder = (props) => {
-  const { systemConfig, inventory, inventoryById, stagedShow, setStagedShow, updateShow } = useAppStore();
+  const {
+    systemConfig,
+    receivers,
+    inventory,
+    inventoryById,
+    stagedShow,
+    setStagedShow,
+    updateShow,
+  } = useAppStore();
   const [items, setItems] = useState([]);
   const [showMetadata, setShowMetadata] = useState({});
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -1581,6 +1597,16 @@ const ShowBuilder = (props) => {
 
   const [isInitialized, setIsInitialized] = useState(false);
 
+  // Receiver edits on the Receivers page update the DB-backed `receivers`
+  // slice immediately. `systemConfig.receivers` is still present for legacy
+  // consumers and initial config load, but it can be stale until
+  // fetchSystemConfig runs again. Prefer the live slice so the builder sees
+  // cue-count changes (e.g. RX143 16 -> 32 cues) without a full page refresh.
+  const activeReceivers =
+    receivers && Object.keys(receivers).length > 0
+      ? receivers
+      : systemConfig.receivers;
+
   const handleTabChange = (tabName) => {
     // Save current scroll position
     const scrollY = window.scrollY;
@@ -1610,16 +1636,16 @@ const ShowBuilder = (props) => {
 
     console.log('Using protocol:', tprotocol);
 
-    if (tprotocol && systemConfig.receivers && systemConfig.protocols) {
+    if (tprotocol && activeReceivers && systemConfig.protocols) {
       const protocol = systemConfig.protocols[tprotocol];
       console.log('Found protocol object:', protocol);
       
       if (protocol && protocol.receivers) {
         console.log('Protocol receivers:', protocol.receivers);
-        console.log('Available system receivers:', Object.keys(systemConfig.receivers));
+        console.log('Available system receivers:', Object.keys(activeReceivers));
         
         const filteredReceivers = Object.fromEntries(
-          Object.entries(systemConfig.receivers).filter(([key, receiver]) => {
+          Object.entries(activeReceivers).filter(([key, receiver]) => {
             const isIncluded = protocol.receivers.includes(key);
             console.log(`Receiver ${key}: ${isIncluded ? 'included' : 'excluded'}`);
             return isIncluded;
@@ -1655,15 +1681,15 @@ const ShowBuilder = (props) => {
       } else {
         console.log('Protocol or protocol.receivers is missing, using all receivers');
         // If protocol.receivers doesn't exist, use all available receivers
-        setFilteredReceivers(systemConfig.receivers);
-        const availableDevicesData = mergeCues(systemConfig.receivers);
+        setFilteredReceivers(activeReceivers);
+        const availableDevicesData = mergeCues(activeReceivers);
         console.log('Using all receivers, availableDevices:', availableDevicesData);
         
         // If mergeCues returns empty, try using the receivers directly
-        if (Object.keys(availableDevicesData).length === 0 && Object.keys(systemConfig.receivers).length > 0) {
+        if (Object.keys(availableDevicesData).length === 0 && Object.keys(activeReceivers).length > 0) {
           console.log('mergeCues returned empty, using all receivers directly');
           const directMapping = {};
-          Object.entries(systemConfig.receivers).forEach(([receiverKey, receiver]) => {
+          Object.entries(activeReceivers).forEach(([receiverKey, receiver]) => {
             if (receiver.cues) {
               Object.entries(receiver.cues).forEach(([zone, targets]) => {
                 if (!directMapping[zone]) {
@@ -1680,11 +1706,11 @@ const ShowBuilder = (props) => {
         }
       }
     } else {
-      console.log('Missing required data:', { tprotocol, hasReceivers: !!systemConfig.receivers, hasProtocols: !!systemConfig.protocols });
+      console.log('Missing required data:', { tprotocol, hasReceivers: !!activeReceivers, hasProtocols: !!systemConfig.protocols });
       setAvailableDevices({});
       setFilteredReceivers({});
     }
-  }, [showMetadata.protocol, systemConfig.receivers, systemConfig.protocols]);
+  }, [showMetadata.protocol, activeReceivers, systemConfig.protocols]);
 
   // Debug useEffect to monitor availableDevices changes
   useEffect(() => {
@@ -1774,10 +1800,10 @@ const ShowBuilder = (props) => {
   }, [stagedShow]);
 
   const initializeDefaultLocations = () => {
-    if (systemConfig.receivers && systemConfig.protocols) {
+    if (activeReceivers && systemConfig.protocols) {
       const protocol = systemConfig.protocols[showMetadata.protocol];
       if (protocol && protocol.receivers) {
-        const receivers = Object.keys(systemConfig.receivers).filter(key => 
+        const receivers = Object.keys(activeReceivers).filter(key => 
           protocol.receivers.includes(key)
         );
         const defaultLocations = {};
@@ -1793,7 +1819,7 @@ const ShowBuilder = (props) => {
       } else {
         // If protocol.receivers doesn't exist, use all receivers
         console.log('Initializing default locations for all receivers');
-        const receivers = Object.keys(systemConfig.receivers);
+        const receivers = Object.keys(activeReceivers);
         const defaultLocations = {};
         receivers.forEach((receiverKey, index) => {
           const row = Math.floor(index / 3);
@@ -2229,7 +2255,7 @@ const ShowBuilder = (props) => {
               
               {activeTab === "layout" && (
                 <SpatialLayoutMap
-                  receivers={systemConfig.receivers}
+                  receivers={activeReceivers}
                   items={items}
                   receiverLocations={receiverLocations}
                   setReceiverLocations={setReceiverLocations}

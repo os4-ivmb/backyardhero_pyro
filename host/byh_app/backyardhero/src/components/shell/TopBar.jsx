@@ -3,11 +3,9 @@ import Image from "next/image";
 import { cn } from "@/design";
 import ModeBadge from "./ModeBadge";
 
-// Top navigation strip. Tabs collapse / hide based on operational mode:
-//   - In armed/live the design-time tabs (Editor/Inventory/Settings) are
-//     hidden; only operationally-relevant surfaces remain.
-//   - In disconnected the inventory and editor stay accessible because
-//     they're DB-only and don't need the daemon.
+// Top navigation strip. Tabs stay visible across operational modes; the
+// danger state is communicated through the mode badge + armed rail, not by
+// hiding navigation out from under the operator.
 //
 // We deliberately use icons + labels (not icon-only) — icon-only is one of
 // the call-outs in the design brief. Text scales down before icons disappear.
@@ -18,11 +16,8 @@ export default function TopBar({
   mode,
   rightSlot,
 }) {
-  const reducedNav = mode?.id === "armed" || mode?.id === "live";
-
   const visibleTabs = tabs.filter((t) => {
     if (t.hidden) return false;
-    if (reducedNav && !t.alwaysVisible) return false;
     return true;
   });
 
