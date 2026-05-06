@@ -12,6 +12,9 @@ const Timeline = memo((props) => {
   const MAX_SHOW_TIME_SEC=props.timeCapSeconds || 1800
   const [firingProfiles, setFiringProfiles] = useState({}); // Map of itemId -> firing profile
   const [inventory, setInventory] = useState([]); // Inventory for RACK_SHELLS calculations
+  // Tracks the timestamp (ms) of the last copy-place click so a trailing
+  // dblclick from the same gesture doesn't also pop the AddItemModal.
+  const recentCopyPlaceRef = useRef(0);
 
   const handleWheel = (e) => {
     //e.preventDefault();
@@ -60,6 +63,20 @@ const Timeline = memo((props) => {
   }
 
   const handleTimelineClick = (e) => {
+    // Copy Item flow: in 'select-position' mode a click anywhere on the
+    // timeline (background or items) drops the duplicate at that time. Skip
+    // the normal "clear selection / move time cursor" behavior.
+    if (props.copyMode === "select-position") {
+      const timelineOffset = timelineRef.current.scrollLeft;
+      const clickX =
+        e.clientX - timelineRef.current.getBoundingClientRect().left + timelineOffset;
+      const timelineWidth = timelineRef.current.scrollWidth;
+      const dropTime = (clickX / timelineWidth) * 3600;
+      recentCopyPlaceRef.current = Date.now();
+      props.onCopyPlaceClick?.(dropTime);
+      return;
+    }
+
     // If clicking on the timeline background (not on an item), clear selection
     if (e.target === e.currentTarget || e.target.className.includes('border-l')) {
       if (props.clearSelection) {
@@ -74,6 +91,10 @@ const Timeline = memo((props) => {
   }
 
   const handleDoubleClick = (e) => {
+    // Suppress the AddItemModal if this dblclick is the trailing pair of a
+    // copy-place click that just landed.
+    if (Date.now() - recentCopyPlaceRef.current < 500) return;
+
     const timelineOffset = timelineRef.current.scrollLeft;
     const clickX =
       e.clientX - timelineRef.current.getBoundingClientRect().left + timelineOffset;
@@ -192,28 +213,39 @@ const Timeline = memo((props) => {
     type === "CAKE_500G" ||
     type === "COMPOUND_CAKE";
 
-  // Fetch firing profiles for cakes that use shot profiles
+  // Fetch firing profiles for cakes that use shot profiles. Also walks
+  // FUSED_LINE steps so cake steps inside a fused line render shot overlays.
   useEffect(() => {
     const fetchFiringProfiles = async () => {
       const profiles = {};
-      const cakeItems = items.filter(
-        (item) => cakeTypesWithFiringProfiles(item.type) && item.itemId
-      );
-      
-      const promises = cakeItems.map(async (item) => {
+      const itemIds = new Set();
+      items.forEach((item) => {
+        if (cakeTypesWithFiringProfiles(item.type) && item.itemId) {
+          itemIds.add(item.itemId);
+        }
+        if (item.type === "FUSED_LINE" && Array.isArray(item.steps)) {
+          item.steps.forEach((step) => {
+            if (cakeTypesWithFiringProfiles(step.type) && step.itemId) {
+              itemIds.add(step.itemId);
+            }
+          });
+        }
+      });
+
+      const promises = Array.from(itemIds).map(async (itemId) => {
         try {
-          const response = await axios.get(`/api/inventory/${item.itemId}/firing-profile`);
+          const response = await axios.get(`/api/inventory/${itemId}/firing-profile`);
           if (response.data) {
-            profiles[item.itemId] = response.data;
+            profiles[itemId] = response.data;
           }
         } catch (error) {
           // Profile doesn't exist for this item, which is fine
           if (error.response?.status !== 404) {
-            console.error(`Error fetching firing profile for item ${item.itemId}:`, error);
+            console.error(`Error fetching firing profile for item ${itemId}:`, error);
           }
         }
       });
-      
+
       await Promise.all(promises);
       setFiringProfiles(profiles);
     };
@@ -243,7 +275,22 @@ const Timeline = memo((props) => {
 
   const handleItemClick = (e, item) => {
     if (isReadOnly) return;
-    
+
+    // Copy Item flow: in 'select-source' mode an item click picks the source
+    // to duplicate. Swallow the event so we don't also single-select / clear.
+    if (props.copyMode === "select-source") {
+      e.preventDefault();
+      e.stopPropagation();
+      props.onCopySourceClick?.(item);
+      return;
+    }
+
+    // In 'select-position' mode, defer entirely to the timeline-level handler
+    // so we don't also single-select the item the user clicked through.
+    if (props.copyMode === "select-position") {
+      return;
+    }
+
     const isCommandClick = e.metaKey || e.ctrlKey; // Command on Mac, Ctrl on Windows/Linux
     
     if (isCommandClick) {
@@ -326,7 +373,19 @@ const Timeline = memo((props) => {
       {/* Timeline container */}
       <div
         ref={timelineRef}
-        className="relative w-full h-64 overflow-x-scroll border border-gray-700 bg-gray-900"
+        className={`relative w-full h-64 overflow-x-scroll border bg-gray-900 ${
+          props.copyMode
+            ? "border-emerald-500"
+            : "border-gray-700"
+        }`}
+        style={{
+          cursor:
+            props.copyMode === "select-position"
+              ? "crosshair"
+              : props.copyMode === "select-source"
+                ? "copy"
+                : undefined,
+        }}
         onWheel={handleWheel}
         onDragOver={isReadOnly ? (()=>{}) : handleDragOver}
         onDrop={isReadOnly ? (()=>{}) : handleDrop}
@@ -414,6 +473,67 @@ const Timeline = memo((props) => {
               }).filter(shot => shot !== null);
             }
 
+            // Calculate shot timings for FUSED_LINE (fused item line). Each
+            // step's bar starts at an offset within the parent (computed from
+            // prior steps' durations + intervening fuse delays). Shots inside
+            // a step are positioned relative to the step's start.
+            // We also build per-step boundaries so the renderer can drop a
+            // visual divider between adjacent steps.
+            let fusedLineStepBoundariesSec = [];
+            if (item.type === 'FUSED_LINE' && Array.isArray(item.steps) && item.steps.length > 0) {
+              const stepShots = [];
+              const offsets = [];
+              let acc = 0;
+              item.steps.forEach((step, idx) => {
+                if (idx > 0) acc += Math.max(0, Number(step.fuseDelay) || 0);
+                offsets.push(acc);
+                acc += Math.max(0, Number(step.duration) || 0);
+              });
+
+              // A boundary is the start of every step beyond the first; this is
+              // where we draw a vertical black line separator.
+              fusedLineStepBoundariesSec = offsets.slice(1);
+
+              item.steps.forEach((step, idx) => {
+                const offsetSec = offsets[idx];
+                const stepDur = Math.max(0, Number(step.duration) || 0);
+
+                if (step.type === 'FUSED_SHELL_LINE' && step.fusedShellLine) {
+                  const fl = step.fusedShellLine;
+                  const burn_rate = fl.fuse?.burn_rate || 0;
+                  const spacing_inches = parseFloat(fl.spacing) || 0;
+                  const fuse_burn_time_per_shell = (spacing_inches / 12) * burn_rate;
+                  (fl.shells || []).forEach((shell, sIdx) => {
+                    if (!shell) return;
+                    const inStepSec = sIdx * fuse_burn_time_per_shell;
+                    const startSec = offsetSec + inStepSec;
+                    const endSec = startSec + 1.0;
+                    stepShots.push([startSec * 1000, endSec * 1000]);
+                  });
+                } else if (cakeTypesWithFiringProfiles(step.type) && step.itemId && firingProfiles[step.itemId]) {
+                  const ts = firingProfiles[step.itemId].shot_timestamps || [];
+                  ts.forEach((shot) => {
+                    const shotStartMs = shot[0];
+                    const shotEndMs = shot[1];
+                    const color = shot.length >= 3 ? shot[2] : null;
+                    const startMs = (offsetSec * 1000) + shotStartMs;
+                    const endMs = (offsetSec * 1000) + shotEndMs;
+                    if (color) {
+                      stepShots.push([startMs, endMs, color]);
+                    } else {
+                      stepShots.push([startMs, endMs]);
+                    }
+                  });
+                } else {
+                  // Generic fallback: fill the step's full duration with one shot.
+                  const startSec = offsetSec;
+                  const endSec = offsetSec + Math.max(0.2, stepDur);
+                  stepShots.push([startSec * 1000, endSec * 1000]);
+                }
+              });
+              shots = stepShots;
+            }
+
             // Calculate shot timings for rack shells
             // Note: item.startTime represents when the first shot fires (the click point)
             // The delay (lead-in + first shell delays) is only used by the firing system
@@ -495,8 +615,36 @@ const Timeline = memo((props) => {
                   onClick={(e) => handleItemClick(e, item)}
                 >
                   {item.name} @ {props.receiverLabels?.[item.zone] || item.zone}:{item.target}
+                  {Number.isFinite(item.multiple) && item.multiple > 1 && (
+                    <span
+                      className="absolute top-0 right-0 px-1 text-[10px] font-bold leading-none bg-black/40 rounded-bl"
+                      style={{ textShadow: "0px 0px 2px black" }}
+                    >
+                      x{item.multiple}
+                    </span>
+                  )}
                 </div>
                 
+                {/* Vertical black separators for FUSED_LINE step boundaries */}
+                {fusedLineStepBoundariesSec.map((boundarySec, bIdx) => {
+                  const boundaryAbsTime = item.startTime + boundarySec;
+                  const boundaryLeftPct = calculatePosition(boundaryAbsTime);
+                  return (
+                    <div
+                      key={`${item.id}-boundary-${bIdx}`}
+                      className="absolute pointer-events-none"
+                      style={{
+                        left: `${boundaryLeftPct}%`,
+                        top: `${top * 40 + 20}px`,
+                        width: '0px',
+                        height: '24px',
+                        borderLeft: '2px solid #000',
+                        zIndex: 2,
+                      }}
+                    />
+                  );
+                })}
+
                 {/* Shot profile overlays - positioned as siblings to avoid affecting bar layout */}
                 {shots.length > 0 && shots.map((shot, shotIndex) => {
                   // Handle both [start, end] and [start, end, color] formats

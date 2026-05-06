@@ -1,6 +1,6 @@
 import { MdEdit } from "react-icons/md";
 import React, { useState, useMemo, useEffect } from "react";
-import { INV_TYPES } from "@/constants";
+import { INV_TYPES, getTypeLabel } from "@/constants";
 import { FaImage, FaVideo, FaChartLine, FaTriangleExclamation } from "react-icons/fa6";
 import { FaCheckCircle, FaUpload } from "react-icons/fa";
 import axios from "axios";
@@ -13,6 +13,55 @@ const INVENTORY_ROW_ATTENTION_TYPES = new Set(
         (k) => k.startsWith("CAKE_") || k === "COMPOUND_CAKE"
     )
 );
+
+// Tabs that group inventory types into the three high-level categories shown
+// in the UI. Each tab declares which raw item types it owns and which columns
+// to render in its table.
+const TAB_CONFIG = {
+    multishot: {
+        label: "Multishot",
+        types: [
+            "CAKE_FOUNTAIN",
+            "CAKE_200G",
+            "CAKE_350G",
+            "CAKE_500G",
+            "COMPOUND_CAKE",
+            "GENERIC",
+        ],
+        columns: [
+            "name",
+            "type",
+            "duration",
+            "delay",
+            "qty",
+            "unitCost",
+            "tags",
+            "source",
+            "actions",
+        ],
+    },
+    artillery: {
+        label: "Artillery",
+        types: ["AERIAL_SHELL"],
+        columns: [
+            "name",
+            "fuseDelay",
+            "liftDelay",
+            "qty",
+            "unitCost",
+            "tags",
+            "source",
+            "actions",
+        ],
+    },
+    fuse: {
+        label: "Fuse",
+        types: ["FUSE"],
+        columns: ["name", "color", "burnRate", "qty", "unitCost", "source", "actions"],
+    },
+};
+
+const TAB_KEYS = Object.keys(TAB_CONFIG);
 
 export default function InventoryList({inventory, setActiveItem, refreshInventory}) {
 
@@ -29,7 +78,7 @@ export default function InventoryList({inventory, setActiveItem, refreshInventor
 
     const [sortKey, setSortKey] = useState("name"); // Key to sort by
     const [sortDirection, setSortDirection] = useState("asc"); // 'asc' or 'desc'
-    const [filterType, setFilterType] = useState(""); // Filter by type
+    const [activeTab, setActiveTab] = useState("multishot");
     const [firingProfiles, setFiringProfiles] = useState({}); // Map of inventory_id -> firing profile
     const [selectedProfileItem, setSelectedProfileItem] = useState(null); // Item for which to show profile modal
     const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
@@ -92,6 +141,14 @@ export default function InventoryList({inventory, setActiveItem, refreshInventor
         return String(Math.trunc(n));
     };
 
+    /** Render a single delay value (fuse_delay or lift_delay) as a number, or em-dash. */
+    const formatDelayValue = (val) => {
+        if (val === null || val === undefined || val === "") return "—";
+        const n = Number(val);
+        if (Number.isNaN(n) || n < 0) return "—";
+        return String(n);
+    };
+
     /** Fuse / lift delays for table: F:<n> and/or L:<n> when value is a number ≥ 0 */
     const formatDelayCell = (item) => {
         const parts = [];
@@ -108,13 +165,29 @@ export default function InventoryList({inventory, setActiveItem, refreshInventor
         return parts.length ? parts.join(" ") : "—";
     };
 
-    // Handle filtering
-    const filteredInventory = useMemo(() => {
-        if (!filterType) return sortedInventory;
-        return sortedInventory.filter((item) => item.type === filterType);
-    }, [sortedInventory, filterType]);
+    // Per-tab counts so the tab labels can show how many items live in each
+    // category without having to re-filter on every render.
+    const tabCounts = useMemo(() => {
+        const counts = {};
+        for (const tab of TAB_KEYS) counts[tab] = 0;
+        for (const item of inventory) {
+            for (const tab of TAB_KEYS) {
+                if (TAB_CONFIG[tab].types.includes(item.type)) {
+                    counts[tab] += 1;
+                    break;
+                }
+            }
+        }
+        return counts;
+    }, [inventory]);
 
-    /** Sum of (available_ct × unit_cost) for rows currently shown (respects type filter). */
+    // Inventory filtered to just the active tab.
+    const filteredInventory = useMemo(() => {
+        const allowed = new Set(TAB_CONFIG[activeTab].types);
+        return sortedInventory.filter((item) => allowed.has(item.type));
+    }, [sortedInventory, activeTab]);
+
+    /** Sum of (available_ct × unit_cost) for rows currently shown. */
     const filteredInventoryTotalValue = useMemo(() => {
         let sum = 0;
         for (const inv of filteredInventory) {
@@ -291,28 +364,243 @@ export default function InventoryList({inventory, setActiveItem, refreshInventor
         }
     };
 
+    // Column definitions. Each entry describes a header (with optional sort
+    // hookup) and a render function for the matching <td>. Tabs pick the
+    // subset they want via TAB_CONFIG[tab].columns.
+    const columnDefs = {
+        name: {
+            header: "Name",
+            sortKey: "name",
+            thClassName: "py-3 px-6 text-left cursor-pointer",
+            renderCell: (inv) => {
+                const attention = inventoryRowAttention(inv);
+                return (
+                    <td className="p-1 px-4">
+                        <div className="flex items-center gap-2 min-w-0">
+                            {attention.show && (
+                                <span
+                                    className="inline-flex shrink-0 text-yellow-400"
+                                    title={attention.title}
+                                    role="img"
+                                    aria-label={attention.title}
+                                >
+                                    <FaTriangleExclamation aria-hidden />
+                                </span>
+                            )}
+                            <span className="min-w-0">{inv.name}</span>
+                        </div>
+                    </td>
+                );
+            },
+        },
+        type: {
+            header: "Type",
+            sortKey: "type",
+            thClassName: "py-3 px-6 text-left cursor-pointer",
+            renderCell: (inv) => (
+                <td className="p-1 px-4">{getTypeLabel(inv.type)}</td>
+            ),
+        },
+        duration: {
+            header: "Duration",
+            thClassName: "py-3 px-6 text-left",
+            renderCell: (inv) => <td className="p-1 px-4">{inv.duration}</td>,
+        },
+        delay: {
+            header: "Delay",
+            thClassName: "py-3 px-6 text-left whitespace-nowrap",
+            renderCell: (inv) => (
+                <td
+                    className="p-1 px-4 font-mono text-xs whitespace-nowrap"
+                    title="Fuse delay (F) / lift delay (L)"
+                >
+                    {formatDelayCell(inv)}
+                </td>
+            ),
+        },
+        fuseDelay: {
+            header: "Fuse Delay",
+            thClassName: "py-3 px-6 text-left whitespace-nowrap",
+            renderCell: (inv) => (
+                <td className="p-1 px-4 text-right tabular-nums">
+                    {formatDelayValue(inv.fuse_delay)}
+                </td>
+            ),
+        },
+        liftDelay: {
+            header: "Lift Delay",
+            thClassName: "py-3 px-6 text-left whitespace-nowrap",
+            renderCell: (inv) => (
+                <td className="p-1 px-4 text-right tabular-nums">
+                    {formatDelayValue(inv.lift_delay)}
+                </td>
+            ),
+        },
+        burnRate: {
+            header: "Burn Rate",
+            thClassName: "py-3 px-6 text-left",
+            renderCell: (inv) => <td className="p-1 px-4">{inv.burn_rate}</td>,
+        },
+        qty: {
+            header: "Qty avail",
+            sortKey: "available_ct",
+            thClassName:
+                "py-3 px-4 text-right cursor-pointer whitespace-nowrap",
+            thTitle: "Quantity on hand",
+            renderCell: (inv) => (
+                <td className="p-1 px-4 text-right tabular-nums">
+                    {formatAvailableCt(inv.available_ct)}
+                </td>
+            ),
+        },
+        unitCost: {
+            header: "Unit cost",
+            sortKey: "unit_cost",
+            thClassName:
+                "py-3 px-4 text-left cursor-pointer whitespace-nowrap",
+            renderCell: (inv) => (
+                <td className="p-1 px-4 text-right tabular-nums">
+                    {formatUnitCost(inv.unit_cost)}
+                </td>
+            ),
+        },
+        tags: {
+            header: "Tags",
+            thClassName: "py-3 px-1 text-left",
+            renderCell: (inv) => (
+                <td className="p-1 px-1">
+                    <div className="flex items-center gap-2">
+                        {inv.image ? <FaImage /> : ""}
+                        {inv.youtube_link ? (
+                            <a
+                                className="hover:text-blue-300"
+                                href={inv.youtube_link}
+                                target="_blank"
+                            >
+                                <FaVideo />
+                            </a>
+                        ) : (
+                            ""
+                        )}
+                        {inv.youtube_link &&
+                            inv.youtube_link.trim() !== "" &&
+                            (firingProfiles[inv.id] ? (
+                                <button
+                                    onClick={() => handleShowProfile(inv)}
+                                    className="hover:text-blue-300 text-blue-400"
+                                    title="View Shot Profile"
+                                >
+                                    <FaChartLine />
+                                </button>
+                            ) : (
+                                <button
+                                    onClick={() => handleGenerateProfile(inv)}
+                                    className="hover:text-yellow-300 text-yellow-400"
+                                    title="Generate Shot Profile"
+                                >
+                                    <FaChartLine />
+                                </button>
+                            ))}
+                    </div>
+                </td>
+            ),
+        },
+        color: {
+            header: "Color",
+            thClassName: "py-3 px-6 text-left",
+            renderCell: (inv) => (
+                <td
+                    className="p-1 px-4"
+                    style={inv.color ? { backgroundColor: inv.color } : undefined}
+                    title={inv.color || undefined}
+                />
+            ),
+        },
+        source: {
+            header: "Source",
+            thClassName: "py-3 px-6 text-left",
+            renderCell: (inv) => (
+                <td className="p-1 px-4">
+                    <span
+                        className={`px-2 py-1 rounded text-xs ${
+                            inv.source === "imported"
+                                ? "bg-blue-900 text-blue-200"
+                                : "bg-gray-700 text-gray-300"
+                        }`}
+                    >
+                        {inv.source === "imported" ? "Library" : "User"}
+                    </span>
+                </td>
+            ),
+        },
+        actions: {
+            header: "Actions",
+            thClassName: "py-3 px-6 text-left",
+            renderCell: (inv) => (
+                <td className="p-1 px-4">
+                    <div className="flex gap-2">
+                        <button
+                            onClick={() => loadIntoEditor(inv)}
+                            className="bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline flex items-center gap-2"
+                            type="button"
+                        >
+                            <MdEdit />
+                            Edit
+                        </button>
+                        {inv.type === "AERIAL_SHELL" && (
+                            <button
+                                onClick={() => {
+                                    setSelectedShellPackItem(inv);
+                                    setIsShellPackEditorOpen(true);
+                                }}
+                                className="bg-purple-900 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline flex items-center gap-2"
+                                type="button"
+                                title="Edit Shell Pack"
+                            >
+                                Shells
+                                {hasShellPackData(inv) && (
+                                    <FaCheckCircle
+                                        className="text-green-400"
+                                        title="Has shell data"
+                                    />
+                                )}
+                            </button>
+                        )}
+                    </div>
+                </td>
+            ),
+        },
+    };
+
+    const activeColumnKeys = TAB_CONFIG[activeTab].columns;
+
     return (
         <div className="min-w-0 w-full space-y-4">
-                {/* Filter Dropdown and Import Button */}
+                {/* Tabs and Import Button */}
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="min-w-0">
-                        <label htmlFor="filter" className="mr-2 font-bold">Filter by Type:</label>
-                        <select
-                        id="filter"
-                        value={filterType}
-                        onChange={(e) => setFilterType(e.target.value)}
-                        className="border p-2 rounded"
-                        >
-                        <option value="">All</option>
-                        <option value="CAKE_FOUNTAIN">Cake Fountain</option>
-                        <option value="CAKE_200G">Cake 200g</option>
-                        <option value="CAKE_350G">Cake 350g</option>
-                        <option value="CAKE_500G">Cake 500g</option>
-                        <option value="COMPOUND_CAKE">Compound</option>
-                        <option value="AERIAL_SHELL">Aerial Shell</option>
-                        <option value="GENERIC">Generic</option>
-                        <option value="FUSE">Fuse</option>
-                        </select>
+                    <div className="flex flex-wrap gap-1" role="tablist">
+                        {TAB_KEYS.map((key) => {
+                            const isActive = activeTab === key;
+                            return (
+                                <button
+                                    key={key}
+                                    role="tab"
+                                    aria-selected={isActive}
+                                    onClick={() => setActiveTab(key)}
+                                    className={`px-4 py-2 font-bold rounded-t border-b-2 transition-colors ${
+                                        isActive
+                                            ? "bg-gray-700 text-white border-blue-500"
+                                            : "bg-gray-900 text-gray-400 border-transparent hover:text-white hover:bg-gray-800"
+                                    }`}
+                                    type="button"
+                                >
+                                    {TAB_CONFIG[key].label}
+                                    <span className="ml-2 text-xs text-gray-400">
+                                        ({tabCounts[key] || 0})
+                                    </span>
+                                </button>
+                            );
+                        })}
                     </div>
                     <button
                         onClick={() => setIsImportModalOpen(true)}
@@ -503,139 +791,56 @@ export default function InventoryList({inventory, setActiveItem, refreshInventor
         <table className="w-full min-w-0 table-auto bg-gray-800 border border-gray-200 rounded-lg shadow-md">
             <thead>
                 <tr className="bg-gray-600 text-gray-200 uppercase text-sm leading-normal">
-                <th
-                    className="py-3 px-6 text-left cursor-pointer"
-                    onClick={() => handleSort("name")}
-                >
-                Name {sortKey === "name" && (sortDirection === "asc" ? "↑" : "↓")}
-                </th>
-                <th
-                    className="py-3 px-6 text-left cursor-pointer"
-                    onClick={() => handleSort("type")}
-                >
-                Type {sortKey === "type" && (sortDirection === "asc" ? "↑" : "↓")}
-                </th>
-                <th className="py-3 px-6 text-left">Duration</th>
-                <th className="py-3 px-6 text-left whitespace-nowrap">Delay</th>
-                <th className="py-3 px-6 text-left">Burn Rate</th>
-                <th
-                    className="py-3 px-4 text-right cursor-pointer whitespace-nowrap"
-                    onClick={() => handleSort("available_ct")}
-                    title="Quantity on hand"
-                >
-                    Qty avail {sortKey === "available_ct" && (sortDirection === "asc" ? "↑" : "↓")}
-                </th>
-                <th
-                    className="py-3 px-4 text-left cursor-pointer whitespace-nowrap"
-                    onClick={() => handleSort("unit_cost")}
-                >
-                    Unit cost {sortKey === "unit_cost" && (sortDirection === "asc" ? "↑" : "↓")}
-                </th>
-                <th className="py-3 px-1 text-left">Tags</th>
-                <th className="py-3 px-6 text-left">Color</th>
-                <th className="py-3 px-6 text-left">Source</th>
-                <th className="py-3 px-6 text-left">Actions</th>
+                    {activeColumnKeys.map((colKey) => {
+                        const col = columnDefs[colKey];
+                        const sortable = !!col.sortKey;
+                        const isSorted = sortable && sortKey === col.sortKey;
+                        return (
+                            <th
+                                key={colKey}
+                                className={col.thClassName}
+                                onClick={
+                                    sortable ? () => handleSort(col.sortKey) : undefined
+                                }
+                                title={col.thTitle}
+                            >
+                                {col.header}
+                                {isSorted && (sortDirection === "asc" ? " ↑" : " ↓")}
+                            </th>
+                        );
+                    })}
                 </tr>
             </thead>
             <tbody  className="text-gray-6400 text-sm font-light">
-            {filteredInventory.map((inv,ki) => {
-                const attention = inventoryRowAttention(inv);
-                return (
-                    <tr key={ki} className={`${
-                  ki % 2 === 0 ? "bg-gray-900" : "bg-gray-800"
-                } hover:bg-gray-700`}>
-                        <td className="p-1 px-4">
-                            <div className="flex items-center gap-2 min-w-0">
-                                {attention.show && (
-                                    <span
-                                        className="inline-flex shrink-0 text-yellow-400"
-                                        title={attention.title}
-                                        role="img"
-                                        aria-label={attention.title}
-                                    >
-                                        <FaTriangleExclamation aria-hidden />
-                                    </span>
-                                )}
-                                <span className="min-w-0">{inv.name}</span>
-                            </div>
-                        </td>
-                        <td className="p-1 px-4">{inv.type}</td>
-                        <td className="p-1 px-4">{inv.duration}</td>
-                        <td className="p-1 px-4 font-mono text-xs whitespace-nowrap" title="Fuse delay (F) / lift delay (L)">
-                            {formatDelayCell(inv)}
-                        </td>
-                        <td className="p-1 px-4">{inv.burn_rate}</td>
-                        <td className="p-1 px-4 text-right tabular-nums">{formatAvailableCt(inv.available_ct)}</td>
-                        <td className="p-1 px-4 text-right tabular-nums">{formatUnitCost(inv.unit_cost)}</td>
-                        <td className="p-1 px-1">
-                            <div className="flex items-center gap-2">
-                                {inv.image ? <FaImage/> : ""}
-                                {inv.youtube_link ? (
-                                    <a className="hover:text-blue-300" href={inv.youtube_link} target="_blank"><FaVideo/></a>
-                                ) : ""}
-                                {inv.youtube_link && inv.youtube_link.trim() !== '' && (
-                                    firingProfiles[inv.id] ? (
-                                        <button
-                                            onClick={() => handleShowProfile(inv)}
-                                            className="hover:text-blue-300 text-blue-400"
-                                            title="View Shot Profile"
-                                        >
-                                            <FaChartLine/>
-                                        </button>
-                                    ) : (
-                                        <button
-                                            onClick={() => handleGenerateProfile(inv)}
-                                            className="hover:text-yellow-300 text-yellow-400"
-                                            title="Generate Shot Profile"
-                                        >
-                                            <FaChartLine/>
-                                        </button>
-                                    )
-                                )}
-                            </div>
-                        </td>
-                        <td className="p-1 px-4" style={{backgroundColor: `${inv.color}${inv.color? 'FF' : ''}`}}></td>
-                        <td className="p-1 px-4">
-                            <span className={`px-2 py-1 rounded text-xs ${
-                                inv.source === 'imported' 
-                                    ? 'bg-blue-900 text-blue-200' 
-                                    : 'bg-gray-700 text-gray-300'
-                            }`}>
-                                {inv.source || 'user_created'}
-                            </span>
-                        </td>
-                        <td className="p-1 px-4">
-                        <div className="flex gap-2">
-                            <button onClick={()=> {loadIntoEditor(inv)}} className="bg-blue-900 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline flex items-center gap-2" type="button">
-                                <MdEdit/>Edit
-                            </button>
-                            {inv.type === "AERIAL_SHELL" && (
-                                <button 
-                                    onClick={() => {
-                                        setSelectedShellPackItem(inv);
-                                        setIsShellPackEditorOpen(true);
-                                    }} 
-                                    className="bg-purple-900 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline flex items-center gap-2" 
-                                    type="button"
-                                    title="Edit Shell Pack"
-                                >
-                                    Shells
-                                    {hasShellPackData(inv) && (
-                                        <FaCheckCircle className="text-green-400" title="Has shell data" />
-                                    )}
-                                </button>
-                            )}
-                        </div>
-                        </td>
+            {filteredInventory.length === 0 ? (
+                <tr>
+                    <td
+                        colSpan={activeColumnKeys.length}
+                        className="p-6 text-center text-gray-400 italic"
+                    >
+                        No {TAB_CONFIG[activeTab].label.toLowerCase()} items yet.
+                    </td>
+                </tr>
+            ) : (
+                filteredInventory.map((inv, ki) => (
+                    <tr
+                        key={inv.id ?? ki}
+                        className={`${
+                            ki % 2 === 0 ? "bg-gray-900" : "bg-gray-800"
+                        } hover:bg-gray-700`}
+                    >
+                        {activeColumnKeys.map((colKey) => (
+                            <React.Fragment key={colKey}>
+                                {columnDefs[colKey].renderCell(inv)}
+                            </React.Fragment>
+                        ))}
                     </tr>
-                )
-            })}
+                ))
+            )}
             </tbody>
             </table>
             <p className="text-sm text-gray-400 mt-3 text-right tabular-nums">
-                Total value (qty × unit cost, items above)
-                {filterType ? " — filtered" : ""}
-                :{" "}
+                Total value (qty × unit cost, items above):{" "}
                 {filteredInventoryTotalValue.toLocaleString("en-US", {
                     style: "currency",
                     currency: "USD",

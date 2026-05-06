@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef } from "react";
 import Timeline from "../common/Timeline";
 import useAppStore from '@/store/useAppStore';
 import FusedLineBuilderModal from "./FusedLineBuilderModal";
+import FusedItemLineBuilderModal from "./FusedItemLineBuilderModal";
 import ShowTargetGrid from "./ShowTargetGrid";
 import ShowStateHeader from "./ShowStateHeader";
 import VideoPreviewPopup from "../common/VideoPreviewPopup";
@@ -28,18 +29,34 @@ export const mergeCues = (receivers) => {
   return mergedCues;
 }
 
+// Item types that support firing multiples of the same physical item per cue.
+const MULTIPLE_FIRE_TYPES = new Set([
+  "CAKE_FOUNTAIN",
+  "CAKE_200G",
+  "CAKE_350G",
+  "CAKE_500G",
+  "COMPOUND_CAKE",
+  "AERIAL_SHELL",
+]);
+
 const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, availableDevices, receiverLabels, showMetadata }) => {
   const [selectedType, setSelectedType] = useState("CAKE_FOUNTAIN");
   const [selectedItem, setSelectedItem] = useState(null);
   const [fusedLine, setFusedLine] = useState(null); // Store the completed fused line
+  const [fusedItemLine, setFusedItemLine] = useState(null); // Store the completed fused item line (FUSED_LINE)
   const [rackShells, setRackShells] = useState(null); // Store the selected rack shells
   const [isFusedBuilderOpen, setFusedBuilderOpen] = useState(false);
+  const [isFusedItemBuilderOpen, setFusedItemBuilderOpen] = useState(false);
   const [isRackShellsOpen, setIsRackShellsOpen] = useState(false);
   const [zone, setZone] = useState(null);
   const [target, setTarget] = useState(null);
   const [metaLabel, setMetaLabel] = useState("");
   const [metaDelaySec, setMetaDelaySec] = useState(0);
+  const [fireMultiple, setFireMultiple] = useState(false);
+  const [multipleCount, setMultipleCount] = useState(2);
   const [error, setError] = useState(null);
+
+  const supportsMultiple = MULTIPLE_FIRE_TYPES.has(selectedType) && !!selectedItem;
 
   useEffect(() => {
     if (availableDevices) {
@@ -109,7 +126,13 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
       // This matches the behavior for fused lines
       const itemDelay = (selectedItem.fuse_delay || selectedItem.fuseDelay || 0) 
         + (selectedItem.type === "AERIAL_SHELL" ? (selectedItem.lift_delay || 0) : 0);
-      
+
+      // Number of physical items fired together on this cue. Stored only when >1
+      // so legacy items continue to behave as singles. Used by loadout/cost.
+      const multiple = supportsMultiple && fireMultiple
+        ? Math.max(2, Math.floor(multipleCount) || 2)
+        : 1;
+
       onAdd({ 
         ...selectedItem, 
         startTime, 
@@ -118,7 +141,8 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
         name: metaLabel, 
         metaDelaySec, 
         delay: (metaDelaySec || 0) + itemDelay,
-        itemId: selectedItem.id 
+        itemId: selectedItem.id,
+        ...(multiple > 1 ? { multiple } : {}),
       });
       onClose();
     } else if (fusedLine) {
@@ -144,6 +168,23 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
         zone, 
         target, 
         name: metaLabel,  
+        metaDelaySec,
+        delay,
+      });
+      onClose();
+    } else if (fusedItemLine) {
+      // FUSED_LINE: a chain of items fired in sequence off a single cue.
+      // The first step's `fuseDelay` is the wire-fuse burn from the cue to
+      // the first item's ignition (parallel to FUSED_AERIAL_LINE's lead-in).
+      const firstStepFuseDelay = fusedItemLine.firstStepFuseDelay || 0;
+      const delay = (metaDelaySec || 0) + firstStepFuseDelay;
+
+      onAdd({
+        ...fusedItemLine,
+        startTime,
+        zone,
+        target,
+        name: metaLabel,
         metaDelaySec,
         delay,
       });
@@ -245,11 +286,15 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
     setSelectedType("CAKE_FOUNTAIN");
     setSelectedItem(null);
     setFusedLine(null);
+    setFusedItemLine(null);
     setRackShells(null);
     setFusedBuilderOpen(false);
+    setFusedItemBuilderOpen(false);
     setIsRackShellsOpen(false);
     setMetaLabel("");
     setMetaDelaySec(0);
+    setFireMultiple(false);
+    setMultipleCount(2);
   };
 
   const handleFusedLineAdd = (fusedLine) => {
@@ -263,6 +308,19 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
       setSelectedType("CAKE_FOUNTAIN");
     }
     setFusedBuilderOpen(false);
+  };
+
+  const handleFusedItemLineAdd = (line) => {
+    setFusedItemLine(line);
+    setFusedItemBuilderOpen(false);
+    if (!metaLabel) setMetaLabel(line.name || "Fused Line");
+  };
+
+  const handleFusedItemLineCancel = (forced) => {
+    if (forced) {
+      setSelectedType("CAKE_FOUNTAIN");
+    }
+    setFusedItemBuilderOpen(false);
   };
 
   if (!isOpen) return null;
@@ -282,12 +340,17 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
               const newType = e.target.value;
               setSelectedType(newType);
               setSelectedItem(null)
+              setFireMultiple(false);
+              setMultipleCount(2);
               if (newType === "FUSED_SHELL_LINE") {
                 setFusedBuilderOpen(true);
+              } else if (newType === "FUSED_LINE") {
+                setFusedItemBuilderOpen(true);
               } else if (newType === "RACK_SHELLS") {
                 setIsRackShellsOpen(true);
               } else {
                 setFusedLine(null);
+                setFusedItemLine(null);
                 setRackShells(null);
               }
             }}
@@ -301,6 +364,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
             <option value="GENERIC">Generic</option>
             <option value="FUSE">Fuse</option>
             <option value="FUSED_SHELL_LINE">Fused Shell Line</option>
+            <option value="FUSED_LINE">Fused Line</option>
             <option value="RACK_SHELLS">Rack Shells</option>
           </select>
         </div>
@@ -359,8 +423,34 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
           </div>
         )}
 
+        {/* FusedItemLine (FUSED_LINE) Preview */}
+        {fusedItemLine && (
+          <div className="mb-4 p-4 bg-gray-700 rounded">
+            <h3 className="text-lg mb-2">Fused Line Preview:</h3>
+            <p><strong>Steps:</strong> {fusedItemLine.steps?.length || 0}</p>
+            <p><strong>Total Duration:</strong> {fusedItemLine.duration?.toFixed(2)}s</p>
+            <ol className="list-decimal list-inside text-sm mt-2">
+              {fusedItemLine.steps?.map((s, i) => (
+                <li key={i}>
+                  {s.name}
+                  {s.multiple > 1 ? ` ×${s.multiple}` : ""}
+                  <span className="text-gray-400">
+                    {" "}— {i === 0 ? "cue→start" : "after prev"} {(s.fuseDelay || 0).toFixed(2)}s, dur {s.duration.toFixed(2)}s
+                  </span>
+                </li>
+              ))}
+            </ol>
+            <button
+              className="mt-2 bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-xs"
+              onClick={() => setFusedItemBuilderOpen(true)}
+            >
+              Edit Fused Line
+            </button>
+          </div>
+        )}
+
         {/* Select Item for non-fused types */}
-        {!fusedLine && !rackShells && selectedType !== "FUSED_SHELL_LINE" && selectedType !== "RACK_SHELLS" && selectedType !== "GENERIC" && (
+        {!fusedLine && !fusedItemLine && !rackShells && selectedType !== "FUSED_SHELL_LINE" && selectedType !== "FUSED_LINE" && selectedType !== "RACK_SHELLS" && selectedType !== "GENERIC" && (
           <div className="mb-4">
             <label className="block mb-2">Select Item:</label>
             <ul className="h-32 overflow-y-auto bg-gray-700 p-2 rounded">
@@ -374,6 +464,42 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
                 </li>
               ))}
             </ul>
+          </div>
+        )}
+
+        {/* Fire Multiple — fire several physical units of this item from one cue.
+            Only meaningful for cake/fountain/compound/aerial-shell single items;
+            counts feed into loadout totals and total cost. */}
+        {supportsMultiple && (
+          <div className="mb-4">
+            <div className="flex items-center space-x-2">
+              <label className="flex items-center space-x-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={fireMultiple}
+                  onChange={(e) => setFireMultiple(e.target.checked)}
+                />
+                <span>Fire Multiple</span>
+              </label>
+              {fireMultiple && (
+                <input
+                  type="number"
+                  min={2}
+                  step={1}
+                  className="w-24 p-2 bg-gray-700 rounded text-white"
+                  value={multipleCount}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    setMultipleCount(Number.isFinite(v) && v >= 2 ? v : 2);
+                  }}
+                />
+              )}
+            </div>
+            {fireMultiple && (
+              <p className="mt-1 text-sm text-gray-300">
+                How many fired together on this cue.
+              </p>
+            )}
           </div>
         )}
 
@@ -469,7 +595,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
           <button
             className="bg-blue-600 px-4 py-2 rounded"
             onClick={handleAdd}
-            disabled={!selectedItem && !fusedLine && !rackShells && !(selectedType === "GENERIC")}
+            disabled={!selectedItem && !fusedLine && !fusedItemLine && !rackShells && !(selectedType === "GENERIC")}
           >
             Add
           </button>
@@ -483,6 +609,17 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
           onClose={handleFusedLineCancel}
           onAdd={handleFusedLineAdd}
           inventory={inventory}
+        />
+      )}
+
+      {/* FusedItemLineBuilderModal (FUSED_LINE) */}
+      {isFusedItemBuilderOpen && (
+        <FusedItemLineBuilderModal
+          isOpen={isFusedItemBuilderOpen}
+          onClose={handleFusedItemLineCancel}
+          onAdd={handleFusedItemLineAdd}
+          inventory={inventory}
+          initialLine={fusedItemLine}
         />
       )}
 
@@ -1125,6 +1262,141 @@ const AudioWaveform = ({ onTimeUpdate, currentTime, duration, isPlaying, onPlayP
   );
 };
 
+// Modal shown during the Copy Item flow. After the user clicks the source
+// item in the timeline, this prompts for which receiver/cue (zone+target) the
+// duplicate should land on. After confirming, the parent puts the builder in
+// "place" mode so the next timeline click drops the copy.
+const CopyItemTargetModal = ({ isOpen, onClose, onConfirm, sourceItem, items, availableDevices, receiverLabels }) => {
+  const [zone, setZone] = useState(null);
+  const [target, setTarget] = useState(null);
+  const [error, setError] = useState("");
+
+  const isOccupied = (zoneName, targetValue) =>
+    items.some((it) => it.zone === zoneName && it.target === targetValue);
+
+  const isZoneFullyOccupied = (zoneName) => {
+    if (!availableDevices?.[zoneName]) return false;
+    return availableDevices[zoneName].every((t) => isOccupied(zoneName, t));
+  };
+
+  // Default selection: prefer the source item's zone+target if free, else the
+  // first unoccupied slot we can find.
+  useEffect(() => {
+    if (!isOpen || !availableDevices) return;
+    const zones = Object.keys(availableDevices);
+    if (zones.length === 0) return;
+
+    const preferZone = sourceItem?.zone && availableDevices[sourceItem.zone] ? sourceItem.zone : null;
+    const findFirstFreeIn = (z) => availableDevices[z]?.find((t) => !isOccupied(z, t));
+
+    if (preferZone) {
+      const free = findFirstFreeIn(preferZone);
+      if (free !== undefined) {
+        setZone(preferZone);
+        setTarget(free);
+        setError("");
+        return;
+      }
+    }
+    for (const z of zones) {
+      const free = findFirstFreeIn(z);
+      if (free !== undefined) {
+        setZone(z);
+        setTarget(free);
+        setError("");
+        return;
+      }
+    }
+    setZone(zones[0]);
+    setTarget(availableDevices[zones[0]]?.[0] ?? null);
+    setError("");
+  }, [isOpen, sourceItem, availableDevices]);
+
+  if (!isOpen) return null;
+
+  const handleConfirm = () => {
+    if (zone == null || target == null) {
+      setError("Pick a zone and target.");
+      return;
+    }
+    if (isOccupied(zone, target)) {
+      setError(`Zone ${zone} Target ${target} is already in use.`);
+      return;
+    }
+    onConfirm(zone, target);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+      <div className="bg-gray-800 text-white p-6 rounded shadow-lg w-96 relative z-50">
+        <h2 className="text-xl mb-2">Copy "{sourceItem?.name}"</h2>
+        <p className="text-sm text-gray-300 mb-4">
+          Pick a receiver/cue for the copy. After confirming, click a spot on the
+          timeline to place it.
+        </p>
+
+        <div className="mb-4 flex space-x-4 items-end">
+          <div className="flex-1">
+            <label className="block mb-2">Zone:</label>
+            <select
+              value={zone ?? ""}
+              onChange={(e) => {
+                const newZone = e.target.value;
+                setZone(newZone);
+                if (newZone && availableDevices[newZone]) {
+                  const firstFree =
+                    availableDevices[newZone].find((t) => !isOccupied(newZone, t)) ??
+                    availableDevices[newZone][0];
+                  setTarget(firstFree);
+                }
+              }}
+              className="block appearance-none w-full border border-gray-400 hover:border-gray-500 px-4 py-2 rounded shadow leading-tight focus:outline-none focus:shadow-outline"
+            >
+              {Object.keys(availableDevices || {}).map((k, i) => {
+                const label = receiverLabels?.[k];
+                const displayText = label ? `${label} (${k})` : k;
+                return (
+                  <option key={i} value={k} disabled={isZoneFullyOccupied(k)}>
+                    {displayText}{isZoneFullyOccupied(k) ? " (X)" : ""}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+          <div className="flex-1">
+            <label className="block mb-2">Target:</label>
+            <select
+              value={target ?? ""}
+              onChange={(e) => setTarget(parseInt(e.target.value))}
+              className="block appearance-none w-full border border-gray-400 hover:border-gray-500 px-4 py-2 rounded shadow leading-tight focus:outline-none focus:shadow-outline"
+            >
+              {zone && availableDevices?.[zone]?.map((k, i) => {
+                const occupied = isOccupied(zone, k);
+                return (
+                  <option key={i} value={k} disabled={occupied}>
+                    {k}{occupied ? " (X)" : ""}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+        </div>
+
+        {error && <div className="text-xs text-red-500 mb-2">{error}</div>}
+
+        <div className="flex justify-end space-x-2">
+          <button className="bg-gray-600 px-4 py-2 rounded" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="bg-blue-600 px-4 py-2 rounded" onClick={handleConfirm}>
+            Continue
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const ShowBuilder = (props) => {
   const { systemConfig, inventory, inventoryById, stagedShow, setStagedShow, updateShow } = useAppStore();
   const [items, setItems] = useState([]);
@@ -1146,6 +1418,18 @@ const ShowBuilder = (props) => {
   const [itemsFixed, setItemsFixed] = useState(false);
   const [filteredReceivers, setFilteredReceivers] = useState({});
   const [activeTab, setActiveTab] = useState("target"); // "target", "racks", "test", "layout"
+
+  // Copy Item flow:
+  //   null              → idle
+  //   'select-source'   → user must click an existing timeline item to copy
+  //   'select-position' → target picked; user clicks the timeline to drop the copy
+  // The intermediate "pick zone/target" step is the CopyItemTargetModal, gated
+  // by `isCopyTargetModalOpen`.
+  const [copyMode, setCopyMode] = useState(null);
+  const [copySourceItem, setCopySourceItem] = useState(null);
+  const [copyTargetZone, setCopyTargetZone] = useState(null);
+  const [copyTargetCue, setCopyTargetCue] = useState(null);
+  const [isCopyTargetModalOpen, setIsCopyTargetModalOpen] = useState(false);
 
   const [isInitialized, setIsInitialized] = useState(false);
 
@@ -1541,6 +1825,52 @@ const ShowBuilder = (props) => {
     setItemsFixed(false); // Allow ID reassignment
   };
 
+  // ---- Copy Item flow ----------------------------------------------------
+  const startCopyItem = () => {
+    setCopySourceItem(null);
+    setCopyTargetZone(null);
+    setCopyTargetCue(null);
+    setIsCopyTargetModalOpen(false);
+    setCopyMode("select-source");
+  };
+
+  const cancelCopyItem = () => {
+    setCopyMode(null);
+    setCopySourceItem(null);
+    setCopyTargetZone(null);
+    setCopyTargetCue(null);
+    setIsCopyTargetModalOpen(false);
+  };
+
+  const handleCopySourceClick = (item) => {
+    if (copyMode !== "select-source") return;
+    setCopySourceItem(item);
+    setIsCopyTargetModalOpen(true);
+  };
+
+  const handleCopyTargetConfirm = (zone, target) => {
+    setCopyTargetZone(zone);
+    setCopyTargetCue(target);
+    setIsCopyTargetModalOpen(false);
+    setCopyMode("select-position");
+  };
+
+  const handleCopyPlaceClick = (time) => {
+    if (copyMode !== "select-position" || !copySourceItem) return;
+    if (!Number.isFinite(time) || time < 0) return;
+
+    // Deep clone so nested structures (shells/steps/cellData/etc.) on the
+    // source aren't shared with the new item.
+    const cloned = JSON.parse(JSON.stringify(copySourceItem));
+    delete cloned.id; // addItemToTimeline assigns a fresh id
+    cloned.startTime = time;
+    cloned.zone = copyTargetZone;
+    cloned.target = copyTargetCue;
+
+    addItemToTimeline(cloned);
+    cancelCopyItem();
+  };
+
   return (
     <div className="p-4">
       <h1 className="text-xl mb-4">Show Editor</h1>
@@ -1552,7 +1882,6 @@ const ShowBuilder = (props) => {
         showMetadata={showMetadata} 
         setShowMetadata={setShowMetadata}
         clearEditor={clearEditorFnc}
-        protocols={systemConfig.protocols}
         receiverLabels={receiverLabels}
       />
       {availableDevices && Object.keys(availableDevices).length > 0 ? (
@@ -1594,7 +1923,36 @@ const ShowBuilder = (props) => {
               </div>
             </div>
           )}
-          
+
+          {/* Copy Item controls / status banner */}
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              {copyMode === "select-source" && (
+                <span className="text-sm text-emerald-300">
+                  Click an item in the timeline to copy.
+                </span>
+              )}
+              {copyMode === "select-position" && (
+                <span className="text-sm text-emerald-300">
+                  Copying <span className="font-semibold">{copySourceItem?.name}</span>{" "}
+                  → {receiverLabels?.[copyTargetZone] || copyTargetZone}:{copyTargetCue}.
+                  Click a spot on the timeline to place it.
+                </span>
+              )}
+            </div>
+            <button
+              onClick={copyMode ? cancelCopyItem : startCopyItem}
+              className={`px-3 py-1 rounded text-sm text-white shrink-0 ${
+                copyMode
+                  ? "bg-red-700 hover:bg-red-800"
+                  : "bg-emerald-600 hover:bg-emerald-700"
+              }`}
+              title="Copy an existing timeline item to another receiver/cue"
+            >
+              {copyMode ? "Cancel Copy" : "Copy Item"}
+            </button>
+          </div>
+
           <Timeline 
             items={items} 
             setItems={setItems} 
@@ -1606,6 +1964,9 @@ const ShowBuilder = (props) => {
             timeCursor={audioCurrentTime}
             setTimeCursor={setAudioCurrentTime}
             receiverLabels={receiverLabels}
+            copyMode={copyMode}
+            onCopySourceClick={handleCopySourceClick}
+            onCopyPlaceClick={handleCopyPlaceClick}
           />
           
           {/* Tabs Section */}
@@ -1738,6 +2099,15 @@ const ShowBuilder = (props) => {
             onApply={handleChainTimingApply}
             selectedItems={selectedItems}
           />
+          <CopyItemTargetModal
+            isOpen={isCopyTargetModalOpen}
+            onClose={cancelCopyItem}
+            onConfirm={handleCopyTargetConfirm}
+            sourceItem={copySourceItem}
+            items={items}
+            availableDevices={availableDevices}
+            receiverLabels={receiverLabels}
+          />
           {selectedItem ? (
             <VideoPreviewPopup 
               items={[selectedItem]} 
@@ -1752,12 +2122,7 @@ const ShowBuilder = (props) => {
         <div className="text-center p-8">
           <h2 className="text-xl font-bold text-gray-700 mb-4">Show Editor</h2>
           <p className="text-gray-500 mb-4">
-            {!showMetadata.protocol 
-              ? "Please select a protocol in the show header above to get started." 
-              : "No receivers available for the selected protocol. Please check your system configuration."}
-          </p>
-          <p className="text-sm text-gray-400">
-            Available protocols: {systemConfig.protocols ? Object.keys(systemConfig.protocols).join(', ') : 'None configured'}
+            No receivers available. Please check your system configuration.
           </p>
         </div>
       )}

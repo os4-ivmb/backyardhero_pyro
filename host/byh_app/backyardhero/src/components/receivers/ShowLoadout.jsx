@@ -4,6 +4,7 @@ import {
   buildShellUsageCountsFromRackCellAssignments,
   parseShellPackShellKey,
 } from "@/utils/shellUsageCounts";
+import { getTypeLabel } from "@/constants";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MdDownload, MdPrint, MdArrowBack, MdSave } from 'react-icons/md';
 import html2canvas from 'html2canvas';
@@ -277,22 +278,48 @@ function ShowLoadout({ setCurrentTab }) {
     return arrangedCues;
   };
 
-  // Cakes and fountain cakes only (shells / rack cues are in other sections)
+  // Cakes and fountain cakes only (shells / rack cues are in other sections).
+  // FUSED_LINE wraps multiple inventory items off a single cue, so we recurse
+  // into each step and pack any cake/fountain steps too.
   const getItemsToPack = () => {
     if (!stagedShow?.items) return [];
 
     const itemCounts = {};
 
-    stagedShow.items.forEach((item) => {
-      if (!CAKE_AND_FOUNTAIN_PACK_TYPES.has(item.type)) return;
-      const key = `${item.name}-${item.type}`;
+    const addToPack = (entry, qty) => {
+      if (!entry || !CAKE_AND_FOUNTAIN_PACK_TYPES.has(entry.type)) return;
+      const key = `${entry.name}-${entry.type}`;
       if (!itemCounts[key]) {
+        // Steps inside a FUSED_LINE only carry references; pull image/etc
+        // from inventory by id so the pack card looks the same as a top-level
+        // cue would.
+        const inv = entry.itemId != null
+          ? inventory?.find((inv) => inv.id === entry.itemId)
+          : null;
         itemCounts[key] = {
-          ...item,
+          name: entry.name,
+          type: entry.type,
+          itemId: entry.itemId,
+          image: entry.image || inv?.image || null,
           count: 0,
         };
       }
-      itemCounts[key].count += 1;
+      itemCounts[key].count += qty;
+    };
+
+    stagedShow.items.forEach((item) => {
+      if (item.type === 'FUSED_LINE' && Array.isArray(item.steps)) {
+        item.steps.forEach((step) => {
+          // Step's `multiple` is per-step (cake fires N at once on its leg).
+          const qty = Number.isFinite(step.multiple) && step.multiple >= 1 ? step.multiple : 1;
+          addToPack(step, qty);
+        });
+        return;
+      }
+      // `multiple` (>=2) means the cue fires several physical units at once,
+      // so the pack count grows by the multiple — not by 1.
+      const qty = Number.isFinite(item.multiple) && item.multiple >= 1 ? item.multiple : 1;
+      addToPack(item, qty);
     });
 
     return Object.values(itemCounts).sort((a, b) => a.name.localeCompare(b.name));
@@ -809,35 +836,77 @@ function ShowLoadout({ setCurrentTab }) {
                       {/* Item Content */}
                       <div className="flex-1 flex flex-col items-center justify-center text-center">
                         {item ? (
-                          <>
-                            {/* Item Image */}
-                            {item.image && (
-                              <div className="mb-3">
-                                <img
-                                  src={item.image}
-                                  alt={item.name}
-                                  className="w-16 h-16 object-cover rounded-lg border border-gray-600"
-                                />
-                              </div>
-                            )}
-                            
-                            {/* Item Name */}
-                            <h3 className="font-semibold text-gray-100 mb-1 text-lg">
-                              {item.name}
-                            </h3>
-                            
-                            {/* Item Type */}
-                            <p className="text-gray-400 text-sm mb-2">
-                              Type: {item.type}
-                            </p>
-                            
-                            {/* Item Duration */}
-                            {item.duration && (
-                              <p className="text-gray-400 text-sm">
-                                Duration: {item.duration}s
+                          item.type === 'FUSED_LINE' && Array.isArray(item.steps) ? (
+                            <div className="w-full">
+                              {/* Line Label */}
+                              <h3 className="font-semibold text-gray-100 mb-1 text-lg text-center">
+                                {item.name}
+                              </h3>
+                              <p className="text-gray-400 text-xs mb-2 text-center">
+                                {getTypeLabel(item.type)} · {item.steps.length} item{item.steps.length === 1 ? '' : 's'}
                               </p>
-                            )}
-                          </>
+
+                              {/* Step list with per-step delay on the right */}
+                              <ol className="text-left space-y-1">
+                                {item.steps.map((step, sIdx) => {
+                                  const delay = Number(step.fuseDelay) || 0;
+                                  return (
+                                    <li
+                                      key={sIdx}
+                                      className="flex items-baseline justify-between gap-2 text-sm border-b border-gray-700 last:border-b-0 py-0.5"
+                                    >
+                                      <span className="text-gray-100 truncate">
+                                        {sIdx + 1}. {step.name || '(unnamed)'}
+                                        {Number.isFinite(step.multiple) && step.multiple > 1 && (
+                                          <span className="ml-1 text-blue-300 font-bold">
+                                            x{step.multiple}
+                                          </span>
+                                        )}
+                                      </span>
+                                      <span className="text-gray-400 text-xs whitespace-nowrap">
+                                        {sIdx === 0 ? 'cue' : '+prev'} {delay.toFixed(2)}s
+                                      </span>
+                                    </li>
+                                  );
+                                })}
+                              </ol>
+                            </div>
+                          ) : (
+                            <>
+                              {/* Item Image */}
+                              {item.image && (
+                                <div className="mb-3">
+                                  <img
+                                    src={item.image}
+                                    alt={item.name}
+                                    className="w-16 h-16 object-cover rounded-lg border border-gray-600"
+                                  />
+                                </div>
+                              )}
+
+                              {/* Item Name */}
+                              <h3 className="font-semibold text-gray-100 mb-1 text-lg">
+                                {item.name}
+                                {Number.isFinite(item.multiple) && item.multiple > 1 && (
+                                  <span className="ml-2 text-blue-300 font-bold">
+                                    x{item.multiple}
+                                  </span>
+                                )}
+                              </h3>
+
+                              {/* Item Type */}
+                              <p className="text-gray-400 text-sm mb-2">
+                                Type: {getTypeLabel(item.type)}
+                              </p>
+
+                              {/* Item Duration */}
+                              {item.duration && (
+                                <p className="text-gray-400 text-sm">
+                                  Duration: {item.duration}s
+                                </p>
+                              )}
+                            </>
+                          )
                         ) : (
                           <div className="text-gray-500 italic">
                             <p>No item assigned</p>
@@ -1220,7 +1289,7 @@ function ShowLoadout({ setCurrentTab }) {
                     
                     {/* Item Type */}
                     <p className="text-gray-400 text-xs mb-2 text-center">
-                      {item.type}
+                      {getTypeLabel(item.type)}
                     </p>
                     
                     {/* Count Badge */}

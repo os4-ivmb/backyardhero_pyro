@@ -45,6 +45,60 @@ function buildCuesData(ident, count) {
   return { [ident]: Array.from({ length: safe }, (_, i) => i + 1) };
 }
 
+// ---------------------------------------------------------------------------
+// Bilusocn 4ch (BILUSOCN_433_TX_ONLY) helpers.
+//
+// Each Bilusocn module is a 4-channel transmitter dipswitched onto a shared
+// zone. Multiple modules typically share one zone (e.g. zone 1 ⇒ modules
+// covering cues 1-4, 5-8, 9-12). So unlike BYH receivers (where ident ==
+// zone), the user has to set zone and channel range independently per module.
+// ---------------------------------------------------------------------------
+const BILUSOCN_TYPE = 'BILUSOCN_433_TX_ONLY';
+
+// Channel ranges available on a Bilusocn 4ch dipswitch. The `start` is the
+// first cue number, length is always 4 — we render labels like "1-4".
+const BILUSOCN_RANGES = [
+  { label: '1-4', start: 1 },
+  { label: '5-8', start: 5 },
+  { label: '9-12', start: 9 },
+];
+const BILUSOCN_RANGE_LEN = 4;
+const DEFAULT_BILUSOCN_ZONE = 1;
+const DEFAULT_BILUSOCN_RANGE_START = 1;
+
+function isBilusocnType(type) {
+  return type === BILUSOCN_TYPE;
+}
+
+// Pulls { zone, rangeStart } out of a cues_data map. Falls back to the
+// defaults (zone 1, range 1-4) when the map is empty or malformed so the
+// edit UI always has sane initial values.
+function parseBilusocnCues(cuesObj) {
+  if (!cuesObj) {
+    return { zone: DEFAULT_BILUSOCN_ZONE, rangeStart: DEFAULT_BILUSOCN_RANGE_START };
+  }
+  const zoneKey = Object.keys(cuesObj)[0];
+  if (!zoneKey) {
+    return { zone: DEFAULT_BILUSOCN_ZONE, rangeStart: DEFAULT_BILUSOCN_RANGE_START };
+  }
+  const zone = parseInt(zoneKey, 10) || DEFAULT_BILUSOCN_ZONE;
+  const arr = cuesObj[zoneKey];
+  const rangeStart =
+    Array.isArray(arr) && arr.length > 0
+      ? Number(arr[0]) || DEFAULT_BILUSOCN_RANGE_START
+      : DEFAULT_BILUSOCN_RANGE_START;
+  return { zone, rangeStart };
+}
+
+// Build a cues_data payload of the form { "<zone>": [start, start+1, +2, +3] }.
+function buildBilusocnCuesData(zone, rangeStart) {
+  const z = Math.max(1, Math.min(256, parseInt(zone, 10) || DEFAULT_BILUSOCN_ZONE));
+  const start = parseInt(rangeStart, 10) || DEFAULT_BILUSOCN_RANGE_START;
+  return {
+    [String(z)]: Array.from({ length: BILUSOCN_RANGE_LEN }, (_, i) => start + i),
+  };
+}
+
 function SingleReceiver({
   rcv_name,
   receiver,
@@ -182,6 +236,18 @@ function SingleReceiver({
     ? pendingEdit.cueCount
     : cueCountFromCues(receiver.cues);
 
+  // Bilusocn 4ch modules have a shared zone and a fixed 4-cue range
+  // (dipswitched). Surface the zone + range explicitly instead of "# Cues"
+  // since it can never not be 4.
+  const isBilusocn = isBilusocnType(receiver.type);
+  const bilusocnCurrent = isBilusocn ? parseBilusocnCues(receiver.cues) : null;
+  const editBilusocnZone = pendingEdit?.zone !== undefined
+    ? pendingEdit.zone
+    : (bilusocnCurrent?.zone ?? DEFAULT_BILUSOCN_ZONE);
+  const editBilusocnRangeStart = pendingEdit?.rangeStart !== undefined
+    ? pendingEdit.rangeStart
+    : (bilusocnCurrent?.rangeStart ?? DEFAULT_BILUSOCN_RANGE_START);
+
   // The retry button is visible whenever the receiver is enabled — it's the
   // only way to recover a pruned receiver without restarting the daemon.
   const showRetry = isEnabled && typeof onRetry === 'function';
@@ -269,8 +335,14 @@ function SingleReceiver({
         </div>
       )}
 
-      {/* Cues Section */}
-      <b className="text-gray-300 mt-1 mb-1">Cues</b>
+      {/* Cues Section. For Bilusocn the zone is independent of ident, so
+          surface it in the header to disambiguate sibling modules sharing
+          the same zone. */}
+      <b className="text-gray-300 mt-1 mb-1">
+        {isBilusocn && firstZone
+          ? `Zone ${firstZone} • Cues ${bilusocnCurrent.rangeStart}-${bilusocnCurrent.rangeStart + BILUSOCN_RANGE_LEN - 1}`
+          : 'Cues'}
+      </b>
       <div className="flex flex-wrap gap-2 mt-1">
         {firstZone && receiver.cues[firstZone] && receiver.cues[firstZone].map((target, k) => {
           // In the previous version, showMapping was keyed by zone. With a single zone, we assume:
@@ -415,24 +487,65 @@ function SingleReceiver({
               placeholder={rcv_name}
             />
           </label>
-          <label className="flex items-center gap-2">
-            <span className="text-xs text-gray-400 whitespace-nowrap"># Cues</span>
-            <input
-              type="number"
-              min={0}
-              max={256}
-              value={editCueCount}
-              onChange={(e) =>
-                onPendingEditChange?.(rcv_name, {
-                  cueCount: Math.max(0, parseInt(e.target.value, 10) || 0),
-                })
-              }
-              className="w-20 px-2 py-1 rounded bg-gray-900 border border-gray-600 text-white"
-            />
-            <span className="text-xs text-gray-500">
-              writes 1..N under zone "{rcv_name}"
-            </span>
-          </label>
+          {isBilusocn ? (
+            <>
+              <label className="flex items-center gap-2">
+                <span className="text-xs text-gray-400 whitespace-nowrap">Zone</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={256}
+                  value={editBilusocnZone}
+                  onChange={(e) =>
+                    onPendingEditChange?.(rcv_name, {
+                      zone: Math.max(
+                        1,
+                        Math.min(256, parseInt(e.target.value, 10) || 1)
+                      ),
+                    })
+                  }
+                  className="w-20 px-2 py-1 rounded bg-gray-900 border border-gray-600 text-white"
+                />
+                <span className="text-xs text-gray-500">1–256 (shared with sibling modules)</span>
+              </label>
+              <label className="flex items-center gap-2">
+                <span className="text-xs text-gray-400 whitespace-nowrap">Cues</span>
+                <select
+                  value={editBilusocnRangeStart}
+                  onChange={(e) =>
+                    onPendingEditChange?.(rcv_name, {
+                      rangeStart: parseInt(e.target.value, 10) || DEFAULT_BILUSOCN_RANGE_START,
+                    })
+                  }
+                  className="px-2 py-1 rounded bg-gray-900 border border-gray-600 text-white"
+                >
+                  {BILUSOCN_RANGES.map((r) => (
+                    <option key={r.start} value={r.start}>{r.label}</option>
+                  ))}
+                </select>
+                <span className="text-xs text-gray-500">dipswitch range</span>
+              </label>
+            </>
+          ) : (
+            <label className="flex items-center gap-2">
+              <span className="text-xs text-gray-400 whitespace-nowrap"># Cues</span>
+              <input
+                type="number"
+                min={0}
+                max={256}
+                value={editCueCount}
+                onChange={(e) =>
+                  onPendingEditChange?.(rcv_name, {
+                    cueCount: Math.max(0, parseInt(e.target.value, 10) || 0),
+                  })
+                }
+                className="w-20 px-2 py-1 rounded bg-gray-900 border border-gray-600 text-white"
+              />
+              <span className="text-xs text-gray-500">
+                writes 1..N under zone "{rcv_name}"
+              </span>
+            </label>
+          )}
         </div>
       )}
     </div>
@@ -472,6 +585,8 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       label: "",
       type: "",
       cueCount: 8,
+      bilusocnZone: DEFAULT_BILUSOCN_ZONE,
+      bilusocnRangeStart: DEFAULT_BILUSOCN_RANGE_START,
     });
     const [addBusy, setAddBusy] = useState(false);
     const [addError, setAddError] = useState(null);
@@ -574,7 +689,20 @@ export default function ReceiverDisplay({ setCurrentTab }) {
           const noLabelChange = merged.label === undefined || merged.label === currentLabel;
           const noEnabledChange = merged.enabled === undefined || merged.enabled === currentEnabled;
           const noCueChange = merged.cueCount === undefined || merged.cueCount === currentCueCount;
-          if (noLabelChange && noEnabledChange && noCueChange) {
+          // Bilusocn has separate zone+rangeStart fields. For BYH receivers
+          // these stay undefined, so the checks below are no-ops.
+          const bilusocnCurrent = isBilusocnType(def.type) ? parseBilusocnCues(def.cues) : null;
+          const noZoneChange = merged.zone === undefined
+            || (bilusocnCurrent && merged.zone === bilusocnCurrent.zone);
+          const noRangeChange = merged.rangeStart === undefined
+            || (bilusocnCurrent && merged.rangeStart === bilusocnCurrent.rangeStart);
+          if (
+            noLabelChange &&
+            noEnabledChange &&
+            noCueChange &&
+            noZoneChange &&
+            noRangeChange
+          ) {
             delete next[id];
             return next;
           }
@@ -628,7 +756,19 @@ export default function ReceiverDisplay({ setCurrentTab }) {
           if (edit.enabled !== undefined && edit.enabled !== (def.enabled !== false)) {
             patch.enabled = edit.enabled;
           }
-          if (
+          if (isBilusocnType(def.type)) {
+            // Bilusocn rebuilds cues_data from zone + range when either
+            // changes, since both pieces collaborate to form the single
+            // { [zone]: [start..start+3] } entry.
+            const current = parseBilusocnCues(def.cues);
+            const newZone = edit.zone !== undefined ? edit.zone : current.zone;
+            const newRangeStart = edit.rangeStart !== undefined
+              ? edit.rangeStart
+              : current.rangeStart;
+            if (newZone !== current.zone || newRangeStart !== current.rangeStart) {
+              patch.cues_data = buildBilusocnCuesData(newZone, newRangeStart);
+            }
+          } else if (
             edit.cueCount !== undefined &&
             edit.cueCount !== cueCountFromCues(def.cues)
           ) {
@@ -675,7 +815,14 @@ export default function ReceiverDisplay({ setCurrentTab }) {
     const closeAddForm = useCallback(() => {
       setAddFormOpen(false);
       setAddError(null);
-      setAddForm({ id: "", label: "", type: "", cueCount: 8 });
+      setAddForm({
+        id: "",
+        label: "",
+        type: "",
+        cueCount: 8,
+        bilusocnZone: DEFAULT_BILUSOCN_ZONE,
+        bilusocnRangeStart: DEFAULT_BILUSOCN_RANGE_START,
+      });
     }, []);
 
     const openAddForm = useCallback(() => {
@@ -695,7 +842,6 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       const id = (addForm.id || "").trim();
       const label = (addForm.label || "").trim() || id;
       const type = addForm.type;
-      const cueCount = Math.max(0, Math.min(256, parseInt(addForm.cueCount, 10) || 0));
 
       if (!id) { setAddError("ID is required."); return; }
       if (dbReceivers && dbReceivers[id]) {
@@ -714,13 +860,25 @@ export default function ReceiverDisplay({ setCurrentTab }) {
         return;
       }
 
+      // Bilusocn modules carry zone + dipswitch range instead of a free-form
+      // cue count, since each unit is a fixed 4-channel TX.
+      let cuesData;
+      if (isBilusocnType(type)) {
+        const zone = Math.max(1, Math.min(256, parseInt(addForm.bilusocnZone, 10) || DEFAULT_BILUSOCN_ZONE));
+        const rangeStart = parseInt(addForm.bilusocnRangeStart, 10) || DEFAULT_BILUSOCN_RANGE_START;
+        cuesData = buildBilusocnCuesData(zone, rangeStart);
+      } else {
+        const cueCount = Math.max(0, Math.min(256, parseInt(addForm.cueCount, 10) || 0));
+        cuesData = buildCuesData(id, cueCount);
+      }
+
       setAddBusy(true);
       try {
         await createReceiver({
           id,
           label,
           type,
-          cues_data: buildCuesData(id, cueCount),
+          cues_data: cuesData,
           enabled: true,
         });
         // New rows count as a config change; surface the dirty indicator on
@@ -1066,19 +1224,54 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                       ))}
                     </select>
                   </label>
-                  <label className="flex flex-col gap-1">
-                    <span className="text-xs text-gray-400"># Cues</span>
-                    <input
-                      type="number"
-                      min={0}
-                      max={256}
-                      value={addForm.cueCount}
-                      onChange={(e) =>
-                        setAddForm((f) => ({ ...f, cueCount: e.target.value }))
-                      }
-                      className="bg-gray-900 text-white text-sm rounded border border-gray-600 px-2 py-1 w-24"
-                    />
-                  </label>
+                  {isBilusocnType(addForm.type) ? (
+                    <>
+                      <label className="flex flex-col gap-1">
+                        <span className="text-xs text-gray-400">Zone</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={256}
+                          value={addForm.bilusocnZone}
+                          onChange={(e) =>
+                            setAddForm((f) => ({ ...f, bilusocnZone: e.target.value }))
+                          }
+                          className="bg-gray-900 text-white text-sm rounded border border-gray-600 px-2 py-1 w-24"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1">
+                        <span className="text-xs text-gray-400">Cues</span>
+                        <select
+                          value={addForm.bilusocnRangeStart}
+                          onChange={(e) =>
+                            setAddForm((f) => ({
+                              ...f,
+                              bilusocnRangeStart: parseInt(e.target.value, 10) || DEFAULT_BILUSOCN_RANGE_START,
+                            }))
+                          }
+                          className="bg-gray-900 text-white text-sm rounded border border-gray-600 px-2 py-1"
+                        >
+                          {BILUSOCN_RANGES.map((r) => (
+                            <option key={r.start} value={r.start}>{r.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                    </>
+                  ) : (
+                    <label className="flex flex-col gap-1">
+                      <span className="text-xs text-gray-400"># Cues</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={256}
+                        value={addForm.cueCount}
+                        onChange={(e) =>
+                          setAddForm((f) => ({ ...f, cueCount: e.target.value }))
+                        }
+                        className="bg-gray-900 text-white text-sm rounded border border-gray-600 px-2 py-1 w-24"
+                      />
+                    </label>
+                  )}
                   <button
                     type="submit"
                     disabled={addBusy}

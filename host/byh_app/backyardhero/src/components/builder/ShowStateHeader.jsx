@@ -1,8 +1,78 @@
 import React, { useState, useMemo } from "react";
 import useAppStore from '@/store/useAppStore';
 
-export default function ShowStateHeader({ items, showMetadata, setShowMetadata, refreshInventoryFnc , protocols, clearEditor, receiverLabels }) {
-  const { createShow, updateShow, setStagedShow} = useAppStore();
+// Resolve a non-negative number from a unit_cost-like value; returns 0 otherwise.
+const toCost = (val) => {
+  if (val === null || val === undefined || val === "") return 0;
+  const n = typeof val === "number" ? val : parseFloat(val);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+};
+
+// Compute the total cost contribution of a single timeline item.
+const computeItemCost = (item, inventoryById) => {
+  if (!item) return 0;
+  const lookupCost = (shellId) => {
+    if (shellId == null) return 0;
+    const inv = inventoryById?.[shellId];
+    return toCost(inv?.unit_cost);
+  };
+
+  if (item.type === "GENERIC") return 0;
+
+  // Fused item line: a chain of inventory-backed steps fired off one cue.
+  // Walk each step and sum its contribution, honoring per-step `multiple`
+  // for items that fire several physical units per cue (cakes, etc.).
+  if (item.type === "FUSED_LINE" && Array.isArray(item.steps)) {
+    return item.steps.reduce((sum, step) => {
+      if (!step) return sum;
+      if (step.type === "FUSED_SHELL_LINE" && step.fusedShellLine) {
+        const shells = step.fusedShellLine.shells || [];
+        return (
+          sum +
+          shells.reduce(
+            (s, shell) => s + (toCost(shell?.unit_cost) || lookupCost(shell?.id)),
+            0
+          )
+        );
+      }
+      const qty = Number.isFinite(step.multiple) && step.multiple >= 1 ? step.multiple : 1;
+      const stepCost = toCost(step.unit_cost) || lookupCost(step.itemId);
+      return sum + stepCost * qty;
+    }, 0);
+  }
+
+  // Fused shell line: sum each shell's unit_cost.
+  if (Array.isArray(item.shells) && item.shells.length > 0) {
+    return item.shells.reduce(
+      (sum, shell) => sum + (toCost(shell?.unit_cost) || lookupCost(shell?.id)),
+      0
+    );
+  }
+
+  // Rack shells: walk the fireableItem cells and sum each shell's unit_cost.
+  if (item.type === "RACK_SHELLS" && item.fireableItem) {
+    const fi = item.fireableItem;
+    if (fi.type === "single") {
+      const shellId = fi.cellData?.shellId;
+      return lookupCost(shellId);
+    }
+    if (fi.type === "fused" && Array.isArray(fi.cellData)) {
+      return fi.cellData.reduce((sum, cd) => sum + lookupCost(cd?.shellId), 0);
+    }
+    return 0;
+  }
+
+  // Default: a single inventory-backed item (cake, aerial shell, etc).
+  // `multiple` lets one cue fire several physical units; the cost scales 1:1.
+  const qty = Number.isFinite(item.multiple) && item.multiple >= 1 ? item.multiple : 1;
+  if (item.unit_cost != null && item.unit_cost !== "") {
+    return toCost(item.unit_cost) * qty;
+  }
+  return lookupCost(item.itemId) * qty;
+};
+
+export default function ShowStateHeader({ items, showMetadata, setShowMetadata, refreshInventoryFnc , clearEditor, receiverLabels }) {
+  const { createShow, updateShow, setStagedShow, inventoryById } = useAppStore();
 
   const handleUpsertShow = async () => {
     let authorization_code = showMetadata.authorization_code
@@ -11,7 +81,7 @@ export default function ShowStateHeader({ items, showMetadata, setShowMetadata, 
       authorization_code = prompt("Please enter an auth code for this show. It will be used to both edit and launch the show.")
     }
 
-    const allowedAttributes = ["id", "startTime", "itemId", "zone", "target", "type", "name", "duration", "delay", "rackId", "rackCells", "rackName", "rackSpacing", "fireableItem", "fireableItemId", "fuse", "spacing", "leadInInches", "shells"];
+    const allowedAttributes = ["id", "startTime", "itemId", "zone", "target", "type", "name", "duration", "delay", "rackId", "rackCells", "rackName", "rackSpacing", "fireableItem", "fireableItemId", "fuse", "spacing", "leadInInches", "shells", "multiple", "steps", "firstStepFuseDelay"];
 
     const compressedItems = items.map(obj =>
         allowedAttributes.reduce((acc, key) => {
@@ -26,9 +96,11 @@ export default function ShowStateHeader({ items, showMetadata, setShowMetadata, 
         ...showMetadata,
         authorization_code,
         version: (parseInt(showMetadata.version) || 1) + 1,
-        duration: Math.round(Math.max(
-            ...items.map((item) => item.startTime + item.duration)
-        )),
+        duration: items.length > 0
+            ? Math.round(Math.max(
+                ...items.map((item) => item.startTime + item.duration)
+            ))
+            : 0,
         display_payload: JSON.stringify(compressedItems),
         // Include audio file info if present
         audioFile: showMetadata.audioFile || null,
@@ -51,10 +123,6 @@ export default function ShowStateHeader({ items, showMetadata, setShowMetadata, 
     }
   }
 
-  const handleUpdateShowProtocol = (e) => {
-    setShowMetadata((showmd) => ({ ...showmd, protocol: e.target.value }))
-  }
-
   // Calculate show statistics
   const stats = useMemo(() => {
     if (!items.length) {
@@ -66,6 +134,8 @@ export default function ShowStateHeader({ items, showMetadata, setShowMetadata, 
         closestFire: "N/A",
         maxConcurrency: 0,
         showDensity: "N/A",
+        totalCost: 0,
+        costPerMin: 0,
       };
     }
 
@@ -119,6 +189,14 @@ export default function ShowStateHeader({ items, showMetadata, setShowMetadata, 
         ? (totalItemDurations / totalDurationSeconds).toFixed(2)
         : "N/A";
 
+    // Calculate total cost and cost-per-minute
+    const totalCost = items.reduce(
+      (sum, item) => sum + computeItemCost(item, inventoryById),
+      0
+    );
+    const costPerMin =
+      totalDurationSeconds > 0 ? totalCost / (totalDurationSeconds / 60) : 0;
+
     return {
       itemCount,
       usedZones,
@@ -127,8 +205,18 @@ export default function ShowStateHeader({ items, showMetadata, setShowMetadata, 
       closestFire,
       maxConcurrency,
       showDensity,
+      totalCost,
+      costPerMin,
     };
-  }, [items]);
+  }, [items, inventoryById]);
+
+  const formatMoney = (n) => {
+    if (!Number.isFinite(n)) return "$0.00";
+    return `$${n.toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
+  };
 
   return (
     <div className="border border-gray-700 rounded-md p-4 flex items-center justify-between bg-gray-800 mb-3">
@@ -141,18 +229,6 @@ export default function ShowStateHeader({ items, showMetadata, setShowMetadata, 
           onChange={(e) => setShowMetadata((showmd) => ({ ...showmd, name: e.target.value }))}
           className="p-2 border border-gray-300 rounded-md"
         />
-        <select
-            value={showMetadata.protocol}
-            onChange={handleUpdateShowProtocol}
-            name="type"
-            className="block appearance-none w-full border border-gray-400 hover:border-gray-500 px-4 py-2 pr-8 rounded shadow leading-tight focus:outline-none focus:shadow-outline"
-          >
-            {Object.keys(protocols || {}).map((k, i) => (
-              <option key={i} value={k}>
-                {protocols[k].label}
-              </option>
-            ))}
-          </select>
       </div>
 
       {/* Middle Section: Show Details */}
@@ -177,6 +253,12 @@ export default function ShowStateHeader({ items, showMetadata, setShowMetadata, 
       <div className="text-center">
         <div className="text-sm text-gray-400">
           <p>Show Density: <b>{stats.showDensity}</b></p>
+        </div>
+      </div>
+      <div className="text-center">
+        <div className="text-sm text-gray-400">
+          <p>Total Cost: <b>{formatMoney(stats.totalCost)}</b></p>
+          <p>$/min: <b>{formatMoney(stats.costPerMin)}</b></p>
         </div>
       </div>
       <div className="text-center">
