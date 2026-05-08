@@ -1,6 +1,7 @@
 #include <SPI.h>
 #include <RF24.h>
 #include <Adafruit_NeoPixel.h>
+#include <Preferences.h>
 
 // FW_VERSION: Firmware version tracking for os4_receiver
 // v1-v4: Historical versions (not documented, dates unknown)
@@ -58,10 +59,46 @@
 //   * Minimum disconnect threshold increased from 5s to 8s.
 //   * Adaptive threshold increased from 5x to 6x observed poll gap.
 //   * Maximum threshold increased from 60s to 90s.
+// v14: 2026-05-XX - Move NODE_ID + RECEIVER_IDENT out of firmware and into
+//   NVS (flash-backed Preferences). One firmware binary now serves the
+//   whole fleet; per-unit identity is provisioned over USB serial after
+//   the first flash via the host-side `devices/utils/flash_receiver.py`
+//   helper (which sends a `SETID <node_id> <ident>` line and waits for
+//   the chip to reboot). Notes:
+//     * NODE_ID==0 is the unprovisioned sentinel: the receiver does NOT
+//       start the radio, displays a slow magenta breathing pattern on
+//       the status LEDs so the operator can see the unit needs
+//       commissioning, and only services serial. Once provisioned,
+//       ESP.restart() picks up the new identity from NVS like any boot.
+//     * Serial commands accepted at any time (one per line, 115200 8N1):
+//         GETID                  -> prints "NODE_ID=<n> IDENT=<s>"
+//         SETID <n> <ident>      -> writes NVS, prints "OK SETID ..." then resets
+//         WIPEID                 -> clears NVS identity (back to unprovisioned)
+//     * NVS namespace is "byh_rx", keys "node_id" (uchar) and "ident"
+//       (string, max 15 chars + NUL). The host flash workflow preserves
+//       NVS across all flashes: the default partition table puts NVS at
+//       0x9000-0xdfff, in the gap between the partition table and
+//       boot_app0, and `flash_receiver.py` (both default and --full)
+//       only writes regions outside that gap. Identity therefore
+//       survives every firmware update unless someone explicitly
+//       erases the chip (e.g. `esptool.py erase_flash`).
 #define BOARD_VERISON 9
-#define FW_VERSION 13
-#define NODE_ID 146
-const char RECEIVER_IDENT[] = "RX146";
+#define FW_VERSION 14
+
+// Runtime identity, populated from NVS in setup(). 0 / "RX???" are the
+// unprovisioned sentinels -- see loadIdentityFromNVS() and the v14 notes
+// above. Treat these as read-only outside of the provisioning helpers.
+uint8_t NODE_ID = 0;
+char    RECEIVER_IDENT[16] = "RX???";
+
+// True until loadIdentityFromNVS() finds a non-zero NODE_ID. Drives the
+// "skip radio init + flash magenta + serial-only" provisioning loop.
+bool isProvisioned = false;
+
+Preferences identityPrefs;
+static const char* IDENTITY_NS       = "byh_rx";
+static const char* IDENTITY_KEY_ID   = "node_id";
+static const char* IDENTITY_KEY_IDENT = "ident";
 
 const bool RECEIVER_USES_V1_CUES = false;
 
@@ -622,6 +659,131 @@ void notePollContact(uint64_t nowMs) {
   prevPollMs = nowMs;
 }
 
+// ---------------------------------------------------------------------------
+// Identity (NODE_ID + RECEIVER_IDENT) NVS helpers + serial provisioning.
+// ---------------------------------------------------------------------------
+//
+// Pre-v14, NODE_ID and RECEIVER_IDENT were #define / const baked into the
+// firmware -- so every receiver in the fleet needed its own custom build.
+// v14 moves identity into the NVS partition (flash-backed key/value store
+// via the Arduino Preferences wrapper) so one binary serves all units;
+// commissioning is done after-the-fact over USB serial. See FW_VERSION
+// notes at the top of this file for the full design.
+
+void loadIdentityFromNVS() {
+  identityPrefs.begin(IDENTITY_NS, true);  // read-only
+  NODE_ID = identityPrefs.getUChar(IDENTITY_KEY_ID, 0);
+  size_t got = identityPrefs.getString(IDENTITY_KEY_IDENT, RECEIVER_IDENT, sizeof(RECEIVER_IDENT));
+  if (got == 0) {
+    strncpy(RECEIVER_IDENT, "RX???", sizeof(RECEIVER_IDENT));
+  }
+  RECEIVER_IDENT[sizeof(RECEIVER_IDENT) - 1] = '\0';
+  identityPrefs.end();
+  isProvisioned = (NODE_ID != 0);
+}
+
+bool saveIdentityToNVS(uint8_t newId, const char* newIdent) {
+  if (newId == 0) return false;
+  if (newIdent == nullptr) return false;
+  size_t identLen = strnlen(newIdent, sizeof(RECEIVER_IDENT));
+  if (identLen == 0 || identLen >= sizeof(RECEIVER_IDENT)) return false;
+
+  identityPrefs.begin(IDENTITY_NS, false);  // read/write
+  identityPrefs.putUChar(IDENTITY_KEY_ID, newId);
+  identityPrefs.putString(IDENTITY_KEY_IDENT, newIdent);
+  identityPrefs.end();
+  return true;
+}
+
+void wipeIdentityFromNVS() {
+  identityPrefs.begin(IDENTITY_NS, false);
+  identityPrefs.clear();
+  identityPrefs.end();
+}
+
+// Read a single line (CR/LF terminated) from Serial without blocking. Returns
+// true and writes a null-terminated string into `out` (capacity outCap) when
+// a complete line has arrived. Internal state is static to this function.
+bool readSerialLine(char* out, size_t outCap) {
+  static char buf[64];
+  static size_t len = 0;
+  while (Serial.available()) {
+    int c = Serial.read();
+    if (c < 0) break;
+    if (c == '\r') continue;
+    if (c == '\n') {
+      buf[len] = '\0';
+      strncpy(out, buf, outCap);
+      out[outCap - 1] = '\0';
+      len = 0;
+      return true;
+    }
+    if (len + 1 < sizeof(buf)) buf[len++] = (char)c;
+    // Silently drop overflow; the next CR/LF starts a fresh line.
+    else len = 0;
+  }
+  return false;
+}
+
+// Process one serial line if available. Always safe to call from the main
+// loop; it's the host-side hook for `devices/utils/flash_receiver.py`.
+void serviceSerialProvisioning() {
+  char line[64];
+  if (!readSerialLine(line, sizeof(line))) return;
+
+  if (strncmp(line, "GETID", 5) == 0) {
+    Serial.print(F("NODE_ID="));
+    Serial.print(NODE_ID);
+    Serial.print(F(" IDENT="));
+    Serial.println(RECEIVER_IDENT);
+    return;
+  }
+
+  if (strncmp(line, "WIPEID", 6) == 0) {
+    wipeIdentityFromNVS();
+    Serial.println(F("OK WIPEID -- restarting"));
+    delay(100);
+    ESP.restart();
+    return;
+  }
+
+  if (strncmp(line, "SETID ", 6) == 0) {
+    // Format: "SETID <node_id> <ident>"
+    int newId = -1;
+    char newIdent[sizeof(RECEIVER_IDENT)] = {0};
+    int n = sscanf(line + 6, "%d %15s", &newId, newIdent);
+    if (n != 2 || newId < 1 || newId > 254) {
+      Serial.println(F("ERR SETID -- usage: SETID <1-254> <ident>"));
+      return;
+    }
+    if (!saveIdentityToNVS((uint8_t)newId, newIdent)) {
+      Serial.println(F("ERR SETID -- save failed"));
+      return;
+    }
+    Serial.print(F("OK SETID NODE_ID="));
+    Serial.print(newId);
+    Serial.print(F(" IDENT="));
+    Serial.print(newIdent);
+    Serial.println(F(" -- restarting"));
+    delay(100);
+    ESP.restart();
+  }
+}
+
+// Visual cue for the operator that this unit hasn't been provisioned yet.
+// Slow magenta breathing on all three status LEDs. Non-blocking; called
+// every loop iter from the unprovisioned branch.
+void updateUnprovisionedStatusLEDs() {
+  // 2s sine-ish breathing (linear triangle is fine).
+  uint32_t cyc = millis() % 2000;
+  uint8_t b = (cyc < 1000) ? (uint8_t)((cyc * 200) / 1000)
+                           : (uint8_t)(((2000 - cyc) * 200) / 1000);
+  for (int i = 0; i < STATUS_LED_COUNT; i++) {
+    statusStrip.setPixelColor(i, statusStrip.Color(b, 0, b));
+  }
+  statusStrip.show();
+}
+
 void sendToShiftRegister(uint64_t pos1, uint64_t pos2) {}
 
 void runPlayLoop() {
@@ -997,6 +1159,8 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
+  loadIdentityFromNVS();
+
   setBoardCount();
 
   pinMode(SHIFT_IN_CLOCK, OUTPUT);
@@ -1006,6 +1170,7 @@ void setup() {
   Serial.print(F("Board Version: ")); Serial.println(BOARD_VERISON);
   Serial.print(F("FW Version: "));    Serial.println(FW_VERSION);
   Serial.print(F("Ident: "));         Serial.println(RECEIVER_IDENT);
+  Serial.print(F("NODE_ID: "));       Serial.println(NODE_ID);
 
   statusStrip.begin();
   statusStrip.clear();
@@ -1018,6 +1183,15 @@ void setup() {
   strip.updateLength(NUM_LEDS);
 
   testLEDStrip();
+
+  // Bail out before radio init if we have no identity. The main loop will
+  // breathe magenta and service the SETID serial command. Once the host
+  // sends `SETID <n> <ident>` we ESP.restart() and re-enter setup() with
+  // a real NODE_ID.
+  if (!isProvisioned) {
+    Serial.println(F("UNPROVISIONED: send `SETID <node_id> <ident>` over serial."));
+    return;
+  }
 
   if (BOARD_VERISON < 6) SPI.begin(36, 37, 35);
   else                   SPI.begin(35, 33, 34);
@@ -1060,6 +1234,17 @@ void setup() {
 }
 
 void loop() {
+  // Serial provisioning is always live -- this is the only way to recover
+  // a unit whose NODE_ID got wiped, and the only way to re-ID a unit in
+  // the field without re-flashing.
+  serviceSerialProvisioning();
+
+  if (!isProvisioned) {
+    updateUnprovisionedStatusLEDs();
+    delay(10);
+    return;
+  }
+
   runPlayLoop();
 
   uint64_t now = getSynchronizedTime();

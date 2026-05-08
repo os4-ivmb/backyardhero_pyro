@@ -16,19 +16,34 @@ const MAX_BPM = 180;
 const HOP_SEC = 0.01;
 const LOWPASS_HZ = 200;
 
-export async function analyzeAudioFile(file) {
+// Accepts a File / Blob (preferred — fastest path) or a URL string.
+// URL strings are fetched and decoded before analysis, so a re-detect
+// after page reload still works without the user re-picking the file.
+export async function analyzeAudioFile(source) {
   if (typeof window === "undefined") {
     throw new Error("BPM analysis requires a browser environment");
   }
   const Ctor = window.AudioContext || window.webkitAudioContext;
   if (!Ctor) throw new Error("Web Audio API not supported in this browser");
 
-  const arrayBuf = await file.arrayBuffer();
+  let arrayBuf;
+  if (typeof source === "string") {
+    const resp = await fetch(source);
+    if (!resp.ok) {
+      throw new Error(`Failed to fetch audio for analysis: ${resp.status}`);
+    }
+    arrayBuf = await resp.arrayBuffer();
+  } else if (source && typeof source.arrayBuffer === "function") {
+    arrayBuf = await source.arrayBuffer();
+  } else {
+    throw new Error("analyzeAudioFile requires a File/Blob or URL string");
+  }
+
   const ctx = new Ctor();
   let audio;
   try {
-    // Some browsers consume the buffer; pass a copy so downstream consumers
-    // (e.g. wavesurfer) can still decode the original File handle.
+    // Pass a copy so downstream consumers (e.g. wavesurfer) can still
+    // decode the original handle if they share it.
     audio = await ctx.decodeAudioData(arrayBuf.slice(0));
   } finally {
     if (typeof ctx.close === "function") {
@@ -176,6 +191,7 @@ export function analyzeAudioBuffer(audio) {
     bpm: Number(bpm.toFixed(2)),
     firstBeatOffsetSec: Number(firstBeatOffsetSec.toFixed(3)),
     confidence: Number(confidence.toFixed(2)),
+    durationSec: Number((audio.duration || 0).toFixed(3)),
   };
 }
 

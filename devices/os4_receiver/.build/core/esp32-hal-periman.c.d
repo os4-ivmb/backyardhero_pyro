@@ -1,0 +1,19 @@
+/Users/alex/proj/firework/backyardhero/devices/os4_receiver/.build/core/esp32-hal-periman.c.o: \
+ /Users/alex/Library/Arduino15/packages/esp32/hardware/esp32/3.1.1/cores/esp32/esp32-hal-periman.c \
+ /Users/alex/Library/Arduino15/packages/esp32/hardware/esp32/3.1.1/cores/esp32/esp32-hal-log.h \
+ /Users/alex/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-cfea4f7c-v1/esp32s2/qio_qspi/include/sdkconfig.h \
+ /Users/alex/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-cfea4f7c-v1/esp32s2/include/esp_timer/include/esp_timer.h \
+ /Users/alex/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-cfea4f7c-v1/esp32s2/include/esp_common/include/esp_err.h \
+ /Users/alex/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-cfea4f7c-v1/esp32s2/include/esp_common/include/esp_compiler.h \
+ /Users/alex/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-cfea4f7c-v1/esp32s2/include/esp_hw_support/include/esp_etm.h \
+ /Users/alex/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-cfea4f7c-v1/esp32s2/include/esp_rom/include/esp32s2/rom/ets_sys.h \
+ /Users/alex/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-cfea4f7c-v1/esp32s2/include/soc/esp32s2/include/soc/soc.h \
+ /Users/alex/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-cfea4f7c-v1/esp32s2/include/esp_common/include/esp_assert.h \
+ /Users/alex/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-cfea4f7c-v1/esp32s2/include/esp_common/include/esp_bit_defs.h \
+ /Users/alex/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-cfea4f7c-v1/esp32s2/include/soc/esp32s2/include/soc/reg_base.h \
+ /Users/alex/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-cfea4f7c-v1/esp32s2/include/log/include/esp_log.h \
+ /Users/alex/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-cfea4f7c-v1/esp32s2/include/esp_rom/include/esp_rom_sys.h \
+ /Users/alex/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-cfea4f7c-v1/esp32s2/include/soc/esp32s2/include/soc/reset_reasons.h \
+ /Users/alex/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-cfea4f7c-v1/esp32s2/include/log/include/esp_log_internal.h \
+ /Users/alex/Library/Arduino15/packages/esp32/hardware/esp32/3.1.1/cores/esp32/esp32-hal-periman.h \
+ /Users/alex/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-cfea4f7c-v1/esp32s2/include/soc/esp32s2/include/soc/soc_caps.h

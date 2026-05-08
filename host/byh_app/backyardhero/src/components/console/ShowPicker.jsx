@@ -6,6 +6,7 @@ import { FiPlay } from "react-icons/fi";
 import useAppStore from "@/store/useAppStore";
 import { Section, Card, Button, IconButton, Badge } from "@/design";
 import { computeShowStats, formatShowCreatedAt } from "@/util/showStats";
+import { parseAudioField } from "@/utils/audioTracks";
 
 // Empty-state surface for the console: a clean picker for staging shows.
 // Replaces:
@@ -36,11 +37,18 @@ export default function ShowPicker() {
       ...inventoryById[pi.itemId],
       ...pi,
     }));
+    let audioTracks = [];
     let audioFile = null;
+    let audioOffsetMs = 0;
     if (show.audio_file) {
-      try { audioFile = JSON.parse(show.audio_file); } catch { /* tolerated */ }
+      try {
+        const r = parseAudioField(JSON.parse(show.audio_file));
+        audioTracks = r.tracks;
+        audioOffsetMs = r.audioOffsetMs;
+        audioFile = audioTracks[0] || null;
+      } catch { /* tolerated */ }
     }
-    setStagedShow({ ...show, items, audioFile });
+    setStagedShow({ ...show, items, audioFile, audioTracks, audioOffsetMs });
   };
 
   const handleDelete = async (e, show) => {

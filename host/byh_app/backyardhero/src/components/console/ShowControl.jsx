@@ -11,6 +11,10 @@ import useStateAppStore from "@/store/useStateAppStore";
 import useAppMode from "@/design/useAppMode";
 import { Card, Button, Badge, Stat, IconButton, cn } from "@/design";
 import { protoStatusBadge, protoStatusLabel } from "@/util/protoStatus";
+import { audioFieldFromShow } from "@/utils/audioTracks";
+
+// Per-press magnitude of the live audio sync scrubber.
+const SYNC_NUDGE_MS = 50;
 
 // ---------------------------------------------------------------------------
 // ShowControl: the single hero surface that drives a staged show.
@@ -46,13 +50,51 @@ const formatTime = (sec) => {
   return `${Math.floor(v / 60)}:${String(v % 60).padStart(2, "0")}`;
 };
 
-function MiniWave({ audioFile, isPlaying }) {
+// Subdued operator-side preview waveform. Plays the audio for the show
+// preview button AND drives audio playback during a live show. With
+// multi-track shows it sequences through each track's URL: when one
+// finishes we load the next and resume.
+//
+// The show-level audio sync offset is NOT applied here at start-of-
+// play. The parent (ConsolePanel) takes care of that during a live
+// show by scheduling `setAudioIsPlaying(true)` at `sst - offsetMs`,
+// which is far more accurate than anything we can do post-hoc with a
+// wavesurfer seek (the browser's audio-driver startup can vary by
+// tens of ms).
+//
+// MiniWave is responsible for one offset job only: when the operator
+// nudges ±50ms WHILE music is already playing, we seek the active
+// track by the delta so the change is audible immediately.
+function MiniWave({
+  audioTracks,
+  isPlaying,
+  audioOffsetMs,
+}) {
   const ref = useRef(null);
   const ws = useRef(null);
   const [ready, setReady] = useState(false);
+  const [activeIdx, setActiveIdx] = useState(0);
+
+  const playableTracks = useMemo(
+    () => (audioTracks || []).filter((t) => t?.url),
+    [audioTracks]
+  );
+  const activeUrl = playableTracks[activeIdx]?.url || null;
+
+  // Reset to the first track whenever the playable URL list changes.
+  useEffect(() => { setActiveIdx(0); }, [playableTracks.length]);
+
+  // Auto-rewind to track 0 every time the operator (re)starts the
+  // preview from a stopped state, mirroring the original single-track
+  // behavior of seeking back to 0 on pause.
+  const wasPlayingRef = useRef(false);
+  useEffect(() => {
+    if (isPlaying && !wasPlayingRef.current) setActiveIdx(0);
+    wasPlayingRef.current = !!isPlaying;
+  }, [isPlaying]);
 
   useEffect(() => {
-    if (!ref.current || ws.current || !audioFile?.url) return;
+    if (!ref.current || ws.current || !activeUrl) return;
     try {
       ws.current = WaveSurfer.create({
         container: ref.current,
@@ -64,7 +106,22 @@ function MiniWave({ audioFile, isPlaying }) {
       });
       ws.current.on("ready", () => setReady(true));
       ws.current.on("error", () => setReady(false));
-      ws.current.load(audioFile.url);
+      ws.current.on("finish", () => {
+        // Advance to the next track if any. The render's useEffect
+        // below will reload the wavesurfer and resume playback.
+        setActiveIdx((i) => Math.min(i + 1, playableTracks.length));
+      });
+      // ws.load() returns a Promise that rejects with AbortError when
+      // the instance is destroyed mid-load (StrictMode double-mount,
+      // staged-show swap, etc). Catch it explicitly so it doesn't
+      // surface as an unhandled rejection.
+      Promise.resolve()
+        .then(() => ws.current?.load(activeUrl))
+        .catch((err) => {
+          if (err?.name === 'AbortError') return;
+          // eslint-disable-next-line no-console
+          console.error('MiniWave load failed:', err);
+        });
     } catch { /* ignore */ }
     return () => {
       if (ws.current && ready) {
@@ -74,18 +131,127 @@ function MiniWave({ audioFile, isPlaying }) {
       setReady(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audioFile?.url]);
+  }, [activeUrl]);
 
+  // Play / pause / seek. The show-level offset is applied upstream by
+  // ConsolePanel's sst scheduler; here we just play from the head.
   useEffect(() => {
     if (!ws.current || !ready) return;
     try {
-      if (isPlaying) ws.current.play();
-      else { ws.current.pause(); ws.current.seekTo(0); }
+      if (isPlaying && activeIdx < playableTracks.length) {
+        ws.current.play();
+      } else {
+        ws.current.pause();
+        if (!isPlaying) ws.current.seekTo(0);
+      }
     } catch { /* */ }
-  }, [isPlaying, ready]);
+  }, [isPlaying, ready, activeIdx, playableTracks.length]);
 
-  if (!audioFile?.url) return null;
+  // Live nudge while playing: when `audioOffsetMs` changes during
+  // playback, seek the active track by the delta so the operator's
+  // nudge is audible immediately. Convention: positive offset = music
+  // is "ahead" of cues, so an increase in offset means we need to
+  // advance the wavesurfer position by that delta.
+  const appliedOffsetMsRef = useRef(0);
+  useEffect(() => {
+    // Capture the current offset as "applied" each time playback
+    // starts -- the parent already shifted the audio start, and
+    // future nudges should be relative to that baseline.
+    if (isPlaying) appliedOffsetMsRef.current = audioOffsetMs;
+    // We intentionally DON'T re-run this effect on audioOffsetMs
+    // change; the dedicated nudge effect below handles those.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, ready, activeIdx]);
+  useEffect(() => {
+    if (!ws.current || !ready || !isPlaying) return;
+    const applied = appliedOffsetMsRef.current || 0;
+    if (audioOffsetMs === applied) return;
+    const dur = ws.current.getDuration?.() || 0;
+    if (dur <= 0) return;
+    const deltaSec = (audioOffsetMs - applied) / 1000;
+    const newTime = (ws.current.getCurrentTime?.() || 0) + deltaSec;
+    try {
+      ws.current.seekTo(Math.max(0, Math.min(1, newTime / dur)));
+    } catch { /* */ }
+    appliedOffsetMsRef.current = audioOffsetMs;
+  }, [audioOffsetMs, ready, isPlaying]);
+
+  if (!activeUrl) return null;
   return <div ref={ref} className="w-40 rounded-sm bg-surface-inset" aria-hidden />;
+}
+
+// Live audio sync scrubber. One number for the whole show: positive =
+// music is "ahead" of cue 0 (we kick the audio off `+offset` ms before
+// the daemon's start instant); negative = music starts after cue 0.
+// The number reflects the working value, which is the saved value
+// plus any unsaved nudges from this rehearsal pass. Save is only
+// enabled when no playback is happening AND the working value differs
+// from the persisted one.
+function SyncOffsetCluster({
+  liveOffsetMs,
+  savedOffsetMs,
+  isPlaying,
+  onNudge,
+  onSave,
+}) {
+  const fmt = (ms) => {
+    const v = Math.round(ms);
+    if (v === 0) return "0 ms";
+    return `${v > 0 ? "+" : "−"}${Math.abs(v)} ms`;
+  };
+  const dirty = liveOffsetMs !== savedOffsetMs;
+  return (
+    <div
+      className={cn(
+        "inline-flex items-center gap-1 px-2 h-9 rounded border",
+        "border-border bg-surface-inset"
+      )}
+      title="Audio sync for the show. + = music starts before cue 0; − = music starts after."
+    >
+      <span className="eyebrow leading-none">Sync</span>
+      <Button
+        size="xs"
+        variant="subtle"
+        onClick={() => onNudge(-SYNC_NUDGE_MS)}
+        title="Delay the audio 50ms (music starts 50ms later relative to cue 0)"
+      >
+        −{SYNC_NUDGE_MS}
+      </Button>
+      <span
+        className={cn(
+          "tabular-nums text-sm min-w-[64px] text-center",
+          dirty ? "text-warn font-semibold" : "text-fg-primary"
+        )}
+        aria-label={`Audio sync offset ${fmt(liveOffsetMs)}${dirty ? " (unsaved)" : ""}`}
+      >
+        {fmt(liveOffsetMs)}
+      </span>
+      <Button
+        size="xs"
+        variant="subtle"
+        onClick={() => onNudge(SYNC_NUDGE_MS)}
+        title="Advance the audio 50ms (music starts 50ms earlier relative to cue 0)"
+      >
+        +{SYNC_NUDGE_MS}
+      </Button>
+      <Button
+        size="xs"
+        variant="primary"
+        onClick={onSave}
+        disabled={isPlaying || !dirty}
+        className="ml-1"
+        title={
+          isPlaying
+            ? "Stop playback to save the current sync offset"
+            : dirty
+              ? "Persist the current sync offset to this show; future runs will reuse it"
+              : "No changes to save"
+        }
+      >
+        Save
+      </Button>
+    </div>
+  );
 }
 
 // Big countdown widget used in the show-control header during the
@@ -125,10 +291,70 @@ export default function ShowControl({
   isReadyToFire, hasErrors, allReceiversOnline,
   errors,
   playVideos, onPlayVideosChange,
+  // Show-level audio sync offset (ms). Owned by ConsolePanel so the
+  // sst-based start scheduler can read it directly; ShowControl just
+  // exposes the scrubber UI. Convention: positive = music starts
+  // BEFORE cue 0 (audio is "ahead"); negative = music starts after.
+  liveAudioOffsetMs,
+  onLiveAudioOffsetMsChange,
 }) {
-  const { stagedShow, setStagedShow } = useAppStore();
+  const { stagedShow, setStagedShow, updateShow } = useAppStore();
   const { stateData } = useStateAppStore();
   const { mode, isShowLoaded, protoStatus, isArmed, startSwActive } = useAppMode();
+
+  // ---------------------------------------------------------------------
+  // Audio sync offset rendering. The state itself lives in ConsolePanel
+  // so the sst-based start scheduler can read it without prop chains;
+  // here we only need to render the scrubber + Save and compute the
+  // dirty flag against the persisted value.
+  // ---------------------------------------------------------------------
+  const audioTracks = useMemo(() => {
+    if (Array.isArray(stagedShow?.audioTracks)) return stagedShow.audioTracks;
+    if (stagedShow?.audioFile?.url) return [stagedShow.audioFile];
+    return [];
+  }, [stagedShow?.audioTracks, stagedShow?.audioFile]);
+  const hasAnyAudio = audioTracks.some((t) => t?.url);
+
+  const savedAudioOffsetMs = Number.isFinite(stagedShow?.audioOffsetMs)
+    ? stagedShow.audioOffsetMs
+    : 0;
+  const workingOffsetMs = Number.isFinite(liveAudioOffsetMs) ? liveAudioOffsetMs : 0;
+
+  const nudgeSync = (deltaMs) => {
+    onLiveAudioOffsetMsChange?.(workingOffsetMs + deltaMs);
+  };
+
+  // Persist the show-level offset back to the show row. We rebuild the
+  // entire PATCH body (the API requires every field) by spreading the
+  // staged show and overriding the audio blob -- this matches what
+  // ShowStateHeader does when the editor saves.
+  const saveSyncOffset = async () => {
+    if (!stagedShow?.id) return;
+    const apiAudioBlob = audioFieldFromShow({
+      tracks: audioTracks,
+      audioOffsetMs: workingOffsetMs,
+    });
+    const apiShowData = {
+      name: stagedShow.name,
+      duration: stagedShow.duration,
+      version: stagedShow.version,
+      runtime_version: stagedShow.runtime_version,
+      display_payload: stagedShow.display_payload,
+      runtime_payload: stagedShow.runtime_payload,
+      authorization_code: stagedShow.authorization_code,
+      protocol: stagedShow.protocol,
+      audioFile: apiAudioBlob,
+      receiver_locations: stagedShow.receiver_locations || null,
+      receiver_labels: stagedShow.receiver_labels || null,
+    };
+    await updateShow(stagedShow.id, apiShowData);
+    // Mirror the change into the in-memory staged show so the next
+    // playback picks up the new saved offset without a refetch.
+    setStagedShow({
+      ...stagedShow,
+      audioOffsetMs: workingOffsetMs,
+    });
+  };
 
   // ---------------------------------------------------------------------
   // Action derivation. We compute the next primary action exactly once,
@@ -374,7 +600,20 @@ export default function ShowControl({
 
         {/* Preview cluster: subdued, right-justified. */}
         <div className="ml-auto flex items-center gap-2">
-          <MiniWave audioFile={stagedShow?.audioFile} isPlaying={isPlaying || audioIsPlaying} />
+          <MiniWave
+            audioTracks={audioTracks}
+            isPlaying={isPlaying || audioIsPlaying}
+            audioOffsetMs={workingOffsetMs}
+          />
+          {hasAnyAudio ? (
+            <SyncOffsetCluster
+              liveOffsetMs={workingOffsetMs}
+              savedOffsetMs={savedAudioOffsetMs}
+              isPlaying={isPlaying || audioIsPlaying}
+              onNudge={nudgeSync}
+              onSave={saveSyncOffset}
+            />
+          ) : null}
           <label
             className={cn(
               "inline-flex items-center gap-1.5 text-xs select-none",

@@ -2,6 +2,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import axios from 'axios';
+import { parseAudioField } from '@/utils/audioTracks';
 
 const receiverRowToStoreEntry = (row) => ({
   label: row.label,
@@ -27,15 +28,26 @@ const useAppStore = create(persist((set, get) => ({
     try {
       const { data } = await axios.get('/api/shows');
       const showById = data.reduce((acc, show) => {
-        // Parse audio_file JSON string if it exists
+        // Parse audio_file JSON string if it exists. Normalises both the
+        // legacy single-track shape and the new {tracks:[]} shape into a
+        // canonical `audioTracks` array, with `audioFile` kept as a back-
+        // compat alias for the first track.
         if (show.audio_file) {
           try {
-            show.audioFile = JSON.parse(show.audio_file);
+            const parsed = JSON.parse(show.audio_file);
+            const { tracks, audioOffsetMs } = parseAudioField(parsed);
+            show.audioTracks = tracks;
+            show.audioOffsetMs = audioOffsetMs;
+            show.audioFile = tracks[0] || null;
           } catch (e) {
             console.error('Failed to parse audio_file for show:', show.id, e);
+            show.audioTracks = [];
+            show.audioOffsetMs = 0;
             show.audioFile = null;
           }
         } else {
+          show.audioTracks = [];
+          show.audioOffsetMs = 0;
           show.audioFile = null;
         }
         
@@ -162,15 +174,21 @@ const useAppStore = create(persist((set, get) => ({
     } catch (e) {
       console.error('Failed to parse display_payload for staged show:', e);
     }
+    let audioTracks = [];
     let audioFile = null;
+    let audioOffsetMs = 0;
     if (found.audio_file) {
       try {
-        audioFile = JSON.parse(found.audio_file);
+        const parsed = JSON.parse(found.audio_file);
+        const r = parseAudioField(parsed);
+        audioTracks = r.tracks;
+        audioOffsetMs = r.audioOffsetMs;
+        audioFile = audioTracks[0] || null;
       } catch (e) {
         console.error('Failed to parse audio_file for staged show:', e);
       }
     }
-    set({ stagedShow: { ...found, items, audioFile } });
+    set({ stagedShow: { ...found, items, audioFile, audioTracks, audioOffsetMs } });
   },
 
   loadedShow: {},

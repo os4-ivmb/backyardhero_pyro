@@ -1,5 +1,6 @@
 # Python
 venv/
+.venv/
 __pycache__/
 *.pyc
 *.pyo
@@ -37,3 +38,6 @@ out/
 # Thumbs.db (Windows)
 Thumbs.db
 ehthumbs.db
+
+# Receiver firmware build artifacts (produced by devices/utils/build_receiver.sh)
+devices/os4_receiver/bin/*.bin

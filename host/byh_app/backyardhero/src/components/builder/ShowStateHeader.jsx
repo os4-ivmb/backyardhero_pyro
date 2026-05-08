@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
 import useAppStore from '@/store/useAppStore';
+import { audioFieldFromShow } from "@/utils/audioTracks";
 
 // Resolve a non-negative number from a unit_cost-like value; returns 0 otherwise.
 const toCost = (val) => {
@@ -90,7 +91,31 @@ export default function ShowStateHeader({ items, showMetadata, setShowMetadata, 
         }, {})
     );
 
-    const showData = {
+    // Multi-track audio. The API expects `audioFile` to be the JSON blob
+    // that gets written to the `audio_file` column verbatim, so we send
+    // the {tracks:[...], audioOffsetMs} wrapper there. The in-memory
+    // state shape is different: it keeps `audioTracks` (canonical
+    // array) plus `audioFile` aliased to the first track for legacy
+    // consumers, and `audioOffsetMs` as a top-level field.
+    //
+    // The editor doesn't expose UI for `audioOffsetMs` -- that's tuned
+    // from the operator console -- but we read it off `showMetadata`
+    // and re-include it on save so editor saves don't clobber a
+    // previously-tuned offset.
+    const tracksForState = Array.isArray(showMetadata.audioTracks)
+      ? showMetadata.audioTracks
+      : [];
+    const audioOffsetMsForState = Number.isFinite(showMetadata.audioOffsetMs)
+      ? showMetadata.audioOffsetMs
+      : 0;
+    const apiAudioBlob = tracksForState.length
+      ? audioFieldFromShow({
+          tracks: tracksForState,
+          audioOffsetMs: audioOffsetMsForState,
+        })
+      : showMetadata.audioFile || null;
+
+    const apiShowData = {
         runtime_version: "0",
         runtime_payload: "{}",
         ...showMetadata,
@@ -102,24 +127,29 @@ export default function ShowStateHeader({ items, showMetadata, setShowMetadata, 
             ))
             : 0,
         display_payload: JSON.stringify(compressedItems),
-        // Include audio file info if present
-        audioFile: showMetadata.audioFile || null,
+        audioFile: apiAudioBlob,
         // Include receiver locations as JSON if present
         receiver_locations: showMetadata.receiver_locations ? JSON.stringify(showMetadata.receiver_locations) : null,
         // Include receiver labels as JSON if present
         receiver_labels: receiverLabels && Object.keys(receiverLabels).length > 0 ? JSON.stringify(receiverLabels) : null
     }
 
+    const stateShape = {
+        ...apiShowData,
+        audioFile: tracksForState[0] || null,
+        audioTracks: tracksForState,
+        audioOffsetMs: audioOffsetMsForState,
+    };
 
     if(showMetadata.id){
-        updateShow(showMetadata.id, showData)
-        setShowMetadata((showmd) => ({ ...showmd, ...showData }))
-        setStagedShow({...showData, id: showMetadata.id, items })
+        updateShow(showMetadata.id, apiShowData)
+        setShowMetadata((showmd) => ({ ...showmd, ...stateShape }))
+        setStagedShow({...stateShape, id: showMetadata.id, items })
         alert("Updated Successfully!")
     }else{
-        const id = await createShow(showData)
-        setShowMetadata((showmd) => ({ ...showmd, ...showData, id: id }))
-        setStagedShow({...showData, id: id, items })
+        const id = await createShow(apiShowData)
+        setShowMetadata((showmd) => ({ ...showmd, ...stateShape, id: id }))
+        setStagedShow({...stateShape, id: id, items })
     }
   }
 

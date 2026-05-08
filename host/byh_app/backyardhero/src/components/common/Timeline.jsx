@@ -4,7 +4,12 @@ import { FaTrash } from "react-icons/fa6";
 import { FiZoomIn, FiZoomOut } from "react-icons/fi";
 import axios from "axios";
 import { cn } from "@/design";
-import { computeBeatGrid } from "@/utils/bpmAnalyzer";
+import {
+  anyTrackHasBpm,
+  generateMultiTrackBeatGrid,
+  snapShowTimeToBeat,
+  totalShowAudioDuration,
+} from "@/utils/audioTracks";
 
 const Timeline = memo((props) => {
   const [zoom, setZoom] = useState(40); // Zoom level
@@ -185,6 +190,28 @@ const Timeline = memo((props) => {
 
   const maxTime = 60 * 60; // Maximum time (1 hour in seconds)
 
+  // Auto-frame the playhead while time advances. We DON'T smooth-scroll
+  // every frame -- that fights manual scroll and burns layout work at
+  // 10Hz. Instead we only re-frame when the cursor leaves the viewport,
+  // jumping the scroll so the cursor lands ~10% from the left edge.
+  // This costs one scrollLeft assignment per "page-flip" of playback.
+  useEffect(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    const t = props.timeCursor;
+    if (!Number.isFinite(t) || t < 0) return;
+    const w = el.scrollWidth;
+    if (w <= 0) return;
+    const cursorPx = (t / maxTime) * w;
+    const view = el.clientWidth;
+    if (view <= 0) return;
+    const left = el.scrollLeft;
+    const right = left + view;
+    if (cursorPx < left || cursorPx > right) {
+      el.scrollLeft = Math.max(0, cursorPx - view * 0.1);
+    }
+  }, [props.timeCursor, zoom]);
+
   const formatTime = (seconds) => {
     const minutes = Math.floor(seconds / 60);
     const remainingSeconds = seconds % 60;
@@ -338,24 +365,57 @@ const Timeline = memo((props) => {
   // pile-ups at low zoom.
   const tickCount = Math.ceil(maxTime / tickInterval) + 1;
 
-  // Beat grid derived from the show's audio BPM. Cap at the audio
-  // duration when known so a 3-minute song doesn't draw beats out to the
-  // 1-hour timeline edge.
-  const hasBeats = !!(props.bpm && props.bpm > 0);
-  const beatsPerMeasure = props.beatsPerMeasure || 4;
-  const beatPeriodSec = hasBeats ? 60 / props.bpm : 0;
-  const beatGridMaxSec = props.audioDurationSec && props.audioDurationSec > 0
-    ? Math.min(props.audioDurationSec, maxTime)
-    : maxTime;
+  // Beat grid derived from each track's per-song BPM. Tracks play
+  // sequentially with no gap, so each track's beats are anchored at its
+  // cumulative start time within the show. We accept either the new
+  // `audioTracks` array prop or the legacy single-bpm props (synthesising
+  // a one-element tracks array) so older Timeline consumers keep working
+  // until they're migrated.
+  const audioTracks = useMemo(() => {
+    if (Array.isArray(props.audioTracks)) return props.audioTracks;
+    if (props.bpm && props.bpm > 0) {
+      return [
+        {
+          id: "_legacy",
+          url: null,
+          name: "audio",
+          bpm: props.bpm,
+          firstBeatOffsetSec: props.firstBeatOffsetSec || 0,
+          beatsPerMeasure: props.beatsPerMeasure || 4,
+          durationSec: Number.isFinite(props.audioDurationSec)
+            ? props.audioDurationSec
+            : null,
+        },
+      ];
+    }
+    return [];
+  }, [
+    props.audioTracks,
+    props.bpm,
+    props.firstBeatOffsetSec,
+    props.beatsPerMeasure,
+    props.audioDurationSec,
+  ]);
+
+  const hasBeats = anyTrackHasBpm(audioTracks);
+  const totalAudioDur = useMemo(
+    () => totalShowAudioDuration(audioTracks),
+    [audioTracks]
+  );
+  const beatGridMaxSec = useMemo(() => {
+    const cap = Number.isFinite(props.audioDurationSec) && props.audioDurationSec > 0
+      ? props.audioDurationSec
+      : totalAudioDur;
+    return cap > 0 ? Math.min(cap, maxTime) : maxTime;
+  }, [props.audioDurationSec, totalAudioDur]);
+
   const beatGrid = useMemo(() => {
     if (!hasBeats) return [];
-    return computeBeatGrid({
-      bpm: props.bpm,
-      firstBeatOffsetSec: props.firstBeatOffsetSec || 0,
-      beatsPerMeasure,
+    return generateMultiTrackBeatGrid({
+      tracks: audioTracks,
       maxTimeSec: beatGridMaxSec,
     });
-  }, [hasBeats, props.bpm, props.firstBeatOffsetSec, beatsPerMeasure, beatGridMaxSec]);
+  }, [hasBeats, audioTracks, beatGridMaxSec]);
 
   // Grid mode toggle in the toolbar: "seconds" keeps the existing
   // mm:ss grid; "beats" replaces the second-grid with measure/beat
@@ -378,43 +438,65 @@ const Timeline = memo((props) => {
 
   const useBeatsGrid = gridMode === "beats" && hasBeats;
 
-  // Snap-to-beat for drag/drop. Only meaningful in beats mode; held in
-  // local state so it persists across drag operations within a session.
-  const [snapToBeat, setSnapToBeat] = useState(false);
-
-  // Quantise an absolute timeline time (seconds) to the nearest beat.
-  // Returns the input unchanged when the grid isn't on or BPM is missing.
-  const snapTimeToBeat = (sec) => {
-    if (!useBeatsGrid || !snapToBeat || !beatPeriodSec) return sec;
-    const offset = props.firstBeatOffsetSec || 0;
-    const n = Math.round((sec - offset) / beatPeriodSec);
-    const snapped = offset + n * beatPeriodSec;
-    return Math.max(0, snapped);
-  };
-
-  // Density culling for the beat grid. With zoom-aware spacing we hide
-  // off-beat lines when they'd be < ~6px apart, hide all beats below
-  // ~3px, and only emit measure number labels when each label has at
-  // least ~28px to itself.
+  // Density culling for the beat grid. Driven by the *loosest* track --
+  // the one with the slowest tempo (largest beat period, most px per
+  // beat). Picking the loosest gives every track the same visual
+  // treatment: as long as any track is wide enough to show off-beats /
+  // measure labels at this zoom, all tracks do. (If we used a per-track
+  // threshold a faster auto-detected track would silently lose its
+  // off-beats and measure numbers, which made non-first songs look
+  // visually different from the first.)
+  const loosestBeatPeriodSec = useMemo(() => {
+    let max = 0;
+    for (const t of audioTracks) {
+      if (t?.bpm && t.bpm > 0) max = Math.max(max, 60 / t.bpm);
+    }
+    return max;
+  }, [audioTracks]);
+  const beatsPerMeasureRef = useMemo(() => {
+    // Use the largest beatsPerMeasure across tracks so the densest-
+    // measure case drives the label stride; anything smaller will then
+    // certainly fit too.
+    let max = 4;
+    for (const t of audioTracks) {
+      if (t?.beatsPerMeasure && t.beatsPerMeasure > max) max = t.beatsPerMeasure;
+    }
+    return max;
+  }, [audioTracks]);
   const approxPxPerBeat = useMemo(() => {
-    if (!useBeatsGrid) return 0;
-    // The body container width is `100 * zoom` percent of the parent.
-    // We don't know the parent width here so we approximate against a
-    // 1000px reference; the relative comparisons below are what matter.
+    if (!useBeatsGrid || !loosestBeatPeriodSec) return 0;
     const refPx = 1000 * zoom;
-    return (beatPeriodSec / maxTime) * refPx;
-  }, [useBeatsGrid, beatPeriodSec, zoom]);
+    return (loosestBeatPeriodSec / maxTime) * refPx;
+  }, [useBeatsGrid, loosestBeatPeriodSec, zoom]);
   const showOffBeats = useBeatsGrid && approxPxPerBeat >= 6;
-  const showMeasureLabels = useBeatsGrid && approxPxPerBeat * beatsPerMeasure >= 28;
-  // When measures get really tight (say <12 px), drop every other label.
+  const showMeasureLabels =
+    useBeatsGrid && approxPxPerBeat * beatsPerMeasureRef >= 28;
   const measureLabelStride = useMemo(() => {
     if (!showMeasureLabels) return 1;
-    const measurePx = approxPxPerBeat * beatsPerMeasure;
+    const measurePx = approxPxPerBeat * beatsPerMeasureRef;
     if (measurePx >= 80) return 1;
     if (measurePx >= 40) return 2;
     if (measurePx >= 28) return 4;
     return 8;
-  }, [showMeasureLabels, approxPxPerBeat, beatsPerMeasure]);
+  }, [showMeasureLabels, approxPxPerBeat, beatsPerMeasureRef]);
+  const isOffBeatVisible = () => showOffBeats;
+  const isMeasureLabelVisible = (b) => {
+    if (!b.downbeat || b.measure == null) return false;
+    if (!showMeasureLabels) return false;
+    return (b.measure - 1) % measureLabelStride === 0;
+  };
+
+  // Snap-to-beat for drag/drop. Only meaningful in beats mode; held in
+  // local state so it persists across drag operations within a session.
+  const [snapToBeat, setSnapToBeat] = useState(false);
+
+  // Quantise an absolute timeline time (seconds) to the nearest beat in
+  // whichever track contains that time. Returns the input unchanged
+  // when the grid isn't on or no track at that position has BPM set.
+  const snapTimeToBeat = (sec) => {
+    if (!useBeatsGrid || !snapToBeat) return sec;
+    return snapShowTimeToBeat(audioTracks, sec);
+  };
   return (
     <div className="w-full">
       {/* Zoom controls -- compact, consistent with the rest of the chrome. */}
@@ -526,25 +608,25 @@ const Timeline = memo((props) => {
 
           {/* Beat grid on the ruler. Strong cap on each downbeat with a
               measure number; lighter half-height ticks on intermediate
-              beats. */}
+              beats. The first beat of each track (measure === 1) gets a
+              brighter cap to mark the song boundary. Density culling is
+              per-track so a fast song's beats can't suppress a slow
+              song's beats. */}
           {useBeatsGrid && beatGrid.map((b) => {
-            if (!b.downbeat && !showOffBeats) return null;
+            if (!b.downbeat && !isOffBeatVisible(b.trackIndex)) return null;
             const left = `${(b.t / maxTime) * 100}%`;
-            const labelVisible =
-              showMeasureLabels &&
-              b.downbeat &&
-              b.measure != null &&
-              ((b.measure - 1) % measureLabelStride === 0);
+            const labelVisible = isMeasureLabelVisible(b);
+            const isTrackStart = b.downbeat && b.measure === 1;
             return (
               <div
-                key={`r-beat-${b.n}`}
+                key={`r-beat-${b.trackIndex}-${b.n}`}
                 className="absolute top-0 pointer-events-none"
                 style={{ left, height: "100%" }}
               >
                 <div
                   className="absolute top-0"
                   style={{
-                    width: "1px",
+                    width: isTrackStart ? "2px" : "1px",
                     height: b.downbeat ? "100%" : "40%",
                     background: b.downbeat
                       ? "rgb(var(--accent) / 0.85)"
@@ -610,19 +692,24 @@ const Timeline = memo((props) => {
           })}
 
           {/* Beat grid in the body. Strong on the downbeat, light on
-              the intermediate beats. Sits above the surface but below
-              items (zIndex 0) so cue bars stay readable. */}
+              the intermediate beats. The first beat of each track gets
+              a thicker bar so song transitions are visible at a glance.
+              Sits above the surface but below items (zIndex 0) so cue
+              bars stay readable. Density culling is per-track. */}
           {useBeatsGrid && beatGrid.map((b) => {
-            if (!b.downbeat && !showOffBeats) return null;
+            if (!b.downbeat && !isOffBeatVisible(b.trackIndex)) return null;
+            const isTrackStart = b.downbeat && b.measure === 1;
             return (
               <div
-                key={`b-beat-${b.n}`}
+                key={`b-beat-${b.trackIndex}-${b.n}`}
                 className="absolute top-0 bottom-0 pointer-events-none"
                 style={{
                   left: `${(b.t / maxTime) * 100}%`,
-                  width: "1px",
+                  width: isTrackStart ? "2px" : "1px",
                   background: b.downbeat
-                    ? "rgb(var(--accent) / 0.55)"
+                    ? isTrackStart
+                      ? "rgb(var(--accent) / 0.85)"
+                      : "rgb(var(--accent) / 0.55)"
                     : "rgb(var(--accent) / 0.18)",
                   zIndex: 0,
                 }}

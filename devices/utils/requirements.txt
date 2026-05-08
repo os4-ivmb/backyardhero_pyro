@@ -1,0 +1,5 @@
+pyserial>=3.5
+# esptool >=4.9 has the USB-CDC reset fix that ESP32-S2 boards need.
+# brew's esptool 4.8.1 hangs the connect on lolin_s2_mini with
+# "Could not configure port" -- so we install our own.
+esptool>=4.9

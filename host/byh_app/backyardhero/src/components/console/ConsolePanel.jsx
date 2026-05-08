@@ -12,6 +12,7 @@ import Timeline from "../common/Timeline";
 import VideoPreviewPopup from "../common/VideoPreviewPopup";
 import { Card } from "@/design";
 import { isPollableReceiver } from "@/util/receivers";
+import { parseAudioField } from "@/utils/audioTracks";
 
 // ---------------------------------------------------------------------------
 // ConsolePanel — the operational console (replaces homepanel/StatusPanel.jsx).
@@ -43,6 +44,23 @@ export default function ConsolePanel() {
   const [vidItems, setVidItems] = useState([]);
   const [countdownSeconds, setCountdownSeconds] = useState(null);
   const [audioIsPlaying, setAudioIsPlaying] = useState(false);
+  // Working show-level audio sync offset (ms). Positive = music plays
+  // BEFORE cue 0 (audio is "ahead"); negative = music plays after.
+  // Seeded from the saved value when a show is staged; mutated by the
+  // ±50ms scrubber in ShowControl while a rehearsal is going. The
+  // sst-based start scheduler below uses this value to fire the audio
+  // earlier or later than the daemon's start instant so the operator
+  // can dial out the systematic browser/audio-driver startup delay.
+  const [liveAudioOffsetMs, setLiveAudioOffsetMs] = useState(0);
+  useEffect(() => {
+    setLiveAudioOffsetMs(
+      Number.isFinite(stagedShow?.audioOffsetMs) ? stagedShow.audioOffsetMs : 0
+    );
+    // Reset is keyed on the show identity, not the offset value, so a
+    // save round-trip back into stagedShow doesn't clobber whatever the
+    // operator was working on.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stagedShow?.id]);
   // Preview-only setting: whether to pop up the YouTube video previews as
   // cues fire during a local Play preview. Off by default so the preview
   // doesn't autoplay videos every time the operator scrubs the show; the
@@ -96,29 +114,78 @@ export default function ConsolePanel() {
         ...inventoryById[pi.itemId], ...pi,
       }));
     } catch { /* tolerate */ }
+    let audioTracks = [];
     let audioFile = null;
+    let audioOffsetMs = 0;
     if (found.audio_file) {
-      try { audioFile = JSON.parse(found.audio_file); } catch { /* */ }
+      try {
+        const r = parseAudioField(JSON.parse(found.audio_file));
+        audioTracks = r.tracks;
+        audioOffsetMs = r.audioOffsetMs;
+        audioFile = audioTracks[0] || null;
+      } catch { /* */ }
     }
-    const merged = { ...found, items: parsedItems, audioFile };
+    const merged = { ...found, items: parsedItems, audioFile, audioTracks, audioOffsetMs };
     setStagedShow(merged);
     setLoadedShow(merged);
   }, [stateData.fw_state?.loaded_show_id, shows, inventoryById, setStagedShow, setLoadedShow]);
 
   // -------------------------------------------------------------------------
-  // Audio start/stop tracking (preserved).
+  // Audio start/stop tracking.
+  //
+  // The daemon publishes `sst` (laptop wall-clock ms at which cue 0 will
+  // fire) once the proto handler reaches START_CONFIRMED. We schedule
+  // the audio play directly off that timestamp instead of waiting for
+  // the proto_handler_status change to STARTED to round-trip through
+  // the websocket -> store -> render -> effect -> MiniWave -> play()
+  // chain. Sidestepping that chain takes the systematic music-vs-cues
+  // delay from ~50-100ms down to one React commit + wavesurfer's own
+  // play() startup, which is in the noise of the per-song offset
+  // scrubber.
   // -------------------------------------------------------------------------
+  useEffect(() => {
+    const status = stateData.fw_state?.proto_handler_status;
+    const sst = stateData.fw_state?.sst;
+    if (status !== "START_CONFIRMED" || !Number.isFinite(sst)) return;
+    // sign convention: +offset = audio starts BEFORE sst, so the
+    // wake-up time we schedule is `sst - offset`. setTimeout with a
+    // non-positive delay fires immediately, which correctly handles a
+    // mid-countdown nudge that pushes the wake-up into the past.
+    const audioStartMs = sst - liveAudioOffsetMs;
+    const delay = Math.max(0, audioStartMs - Date.now());
+    const timer = setTimeout(() => setAudioIsPlaying(true), delay);
+    // If the operator aborts mid-countdown the status leaves
+    // START_CONFIRMED and this effect re-runs, clearing the timer so
+    // we don't kick off audio after the show has been cancelled. Also
+    // re-runs on offset change so a live nudge during the countdown
+    // re-aims the timer.
+    return () => clearTimeout(timer);
+  }, [stateData.fw_state?.proto_handler_status, stateData.fw_state?.sst, liveAudioOffsetMs]);
+
+  // Fallback / stop. The scheduled timer above is the fast path; the
+  // status-edge effect here covers two cases it doesn't:
+  //   * STARTED arrives without a prior START_CONFIRMED+sst (or after
+  //     a page refresh into a running show), so audio still kicks on.
+  //   * Anything other than STARTED -> stop audio.
   useEffect(() => {
     const cur = stateData.fw_state?.proto_handler_status;
     const prev = prevProtoHandlerStatusRef.current;
-    if (prev === "START_PENDING" && cur === "STARTED") setAudioIsPlaying(true);
+    if (cur === "STARTED" && prev !== "STARTED") setAudioIsPlaying(true);
     if (prev === "STARTED" && cur !== "STARTED") setAudioIsPlaying(false);
     prevProtoHandlerStatusRef.current = cur;
   }, [stateData.fw_state?.proto_handler_status]);
 
+  // We treat the show as "audio-driven" if at least one track has a URL.
+  // The legacy single audioFile alias keeps working for any older shows
+  // that haven't been migrated; the canonical source is audioTracks.
+  const hasAudio =
+    (Array.isArray(stagedShow?.audioTracks) &&
+      stagedShow.audioTracks.some((t) => t?.url)) ||
+    !!stagedShow?.audioFile?.url;
+
   // Audio time → cursor + preview items (preserved).
   const handleAudioTimeUpdate = (time) => {
-    if (isPlaying && stagedShow?.audioFile?.url) {
+    if (isPlaying && hasAudio) {
       setTimeCursor(time);
       useAudioTimeRef.current = true;
       const items = stagedShow.items
@@ -130,7 +197,7 @@ export default function ConsolePanel() {
 
   // Manual cursor tick when audio isn't driving (preserved).
   const updateCursor = (timestamp) => {
-    if (stagedShow?.audioFile?.url && useAudioTimeRef.current) {
+    if (hasAudio && useAudioTimeRef.current) {
       requestRef.current = requestAnimationFrame(updateCursor);
       return;
     }
@@ -216,7 +283,7 @@ export default function ConsolePanel() {
         isPlaying={isPlaying}
         setIsPlaying={(v) => {
           setIsPlaying(v);
-          if (!stagedShow?.audioFile?.url) {
+          if (!hasAudio) {
             useAudioTimeRef.current = false;
             if (v) {
               setTimeCursor(0);
@@ -233,6 +300,8 @@ export default function ConsolePanel() {
         errors={errors}
         playVideos={playVideos}
         onPlayVideosChange={setPlayVideos}
+        liveAudioOffsetMs={liveAudioOffsetMs}
+        onLiveAudioOffsetMsChange={setLiveAudioOffsetMs}
       />
 
       <ShowHealthStrip />
@@ -244,9 +313,7 @@ export default function ConsolePanel() {
           timeCursor={timeCursor}
           readOnly
           timeCapSeconds={stagedShow.duration}
-          bpm={stagedShow.audioFile?.bpm}
-          firstBeatOffsetSec={stagedShow.audioFile?.firstBeatOffsetSec}
-          beatsPerMeasure={stagedShow.audioFile?.beatsPerMeasure}
+          audioTracks={stagedShow.audioTracks}
         />
       </Card>
 

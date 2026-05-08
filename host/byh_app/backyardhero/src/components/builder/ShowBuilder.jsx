@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useMemo } from "react";
 import Timeline from "../common/Timeline";
 import useAppStore from '@/store/useAppStore';
 import FusedLineBuilderModal from "./FusedLineBuilderModal";
@@ -12,6 +12,12 @@ import RackShellsSelector from "./RackShellsSelector";
 import WaveSurfer from 'wavesurfer.js';
 import { analyzeAudioFile, bpmFromTapTimes } from "@/utils/bpmAnalyzer";
 import {
+  newTrackId,
+  totalShowAudioDuration,
+  trackAtShowTime,
+  trackOffsets,
+} from "@/utils/audioTracks";
+import {
   Modal,
   Button,
   Field,
@@ -21,14 +27,6 @@ import {
   Badge,
   cn,
 } from "@/design";
-
-const DEFAULT_BPM_INFO = {
-  bpm: null,
-  firstBeatOffsetSec: 0,
-  beatsPerMeasure: 4,
-  confidence: null,
-  source: null, // "auto" | "tap" | "manual"
-};
 
 // Item type catalogue surfaced in the Add Item modal. Centralised so the
 // dropdown order stays predictable and labels stay in one place.
@@ -1216,195 +1214,459 @@ const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex,
   );
 };
 
-const AudioWaveform = ({
-  onTimeUpdate,
-  currentTime,
-  duration,
-  isPlaying,
-  onPlayPause,
-  onAudioFileChange,
-  bpmInfo,
-  onBpmInfoChange,
-  onAudioDurationChange,
+// Tab strip for the multi-track audio editor. One tab per track, plus
+// a trailing "+ Add track" button. Tabs are draggable horizontally to
+// reorder song playback, and double-click a tab to delete it (deletion
+// is also exposed via the editor card's Delete button).
+const AudioTrackTabs = ({
+  tracks,
+  activeTrackId,
+  audioOffsets,
+  onSelect,
+  onAdd,
+  onRemove,
+  onReorder,
 }) => {
-  const waveformRef = useRef(null);
-  const wavesurferRef = useRef(null);
-  const [audioFile, setAudioFile] = useState(null);
-  // Cache the actual File handle so "Detect BPM" can re-analyse without
-  // re-prompting the user; the parent only stores serialisable metadata.
+  const [dragSrc, setDragSrc] = useState(-1);
+  const [dragOverIdx, setDragOverIdx] = useState(-1);
+
+  const handleDragStart = (e, idx) => {
+    setDragSrc(idx);
+    e.dataTransfer.effectAllowed = "move";
+    // Required for Firefox to actually start the drag.
+    try { e.dataTransfer.setData("text/plain", String(idx)); } catch (_) { /* */ }
+  };
+  const handleDragOver = (e, idx) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (dragOverIdx !== idx) setDragOverIdx(idx);
+  };
+  const handleDrop = (e, idx) => {
+    e.preventDefault();
+    if (dragSrc >= 0 && dragSrc !== idx) onReorder?.(dragSrc, idx);
+    setDragSrc(-1);
+    setDragOverIdx(-1);
+  };
+  const handleDragEnd = () => {
+    setDragSrc(-1);
+    setDragOverIdx(-1);
+  };
+
+  const fmtOffset = (sec) => {
+    if (!Number.isFinite(sec)) return "—";
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${String(s).padStart(2, "0")}`;
+  };
+
+  return (
+    <div className="flex items-end gap-1 -mb-px">
+      {tracks.map((t, idx) => {
+        const isActive = t.id === activeTrackId;
+        const isDropTarget = dragOverIdx === idx && dragSrc !== idx;
+        return (
+          <div
+            key={t.id}
+            draggable
+            onDragStart={(e) => handleDragStart(e, idx)}
+            onDragOver={(e) => handleDragOver(e, idx)}
+            onDrop={(e) => handleDrop(e, idx)}
+            onDragEnd={handleDragEnd}
+            onClick={() => onSelect?.(t.id)}
+            className={cn(
+              "group relative inline-flex items-center gap-2 px-3 h-9 text-sm cursor-pointer select-none",
+              "border border-b-0 rounded-t-md",
+              isActive
+                ? "bg-gray-800 border-gray-700 text-white"
+                : "bg-gray-900 border-gray-800 text-gray-400 hover:text-gray-200",
+              isDropTarget && "ring-2 ring-blue-500"
+            )}
+            title={`${t.name || "Untitled"}${
+              Number.isFinite(t.durationSec)
+                ? ` · ${fmtOffset(t.durationSec)}`
+                : ""
+            } · drag to reorder`}
+          >
+            <span className="text-gray-500 text-xs num">
+              {String(idx + 1).padStart(2, "0")}
+            </span>
+            <span className="max-w-[12rem] truncate">
+              {t.name || "Untitled"}
+            </span>
+            <span className="num text-xs text-gray-500">
+              {fmtOffset(audioOffsets?.[idx] || 0)}
+            </span>
+            {tracks.length > 1 && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRemove?.(t.id);
+                }}
+                className={cn(
+                  "ml-1 rounded-sm w-5 h-5 inline-flex items-center justify-center text-xs",
+                  "text-gray-500 hover:text-red-400 hover:bg-gray-700/60"
+                )}
+                title="Delete this track"
+              >
+                ×
+              </button>
+            )}
+          </div>
+        );
+      })}
+      <button
+        type="button"
+        onClick={onAdd}
+        className={cn(
+          "inline-flex items-center gap-1.5 px-3 h-9 text-sm rounded-t-md",
+          "bg-gray-900 border border-b-0 border-gray-800 text-gray-300",
+          "hover:bg-gray-800 hover:text-white"
+        )}
+        title="Add another song to the show"
+      >
+        + Add track
+      </button>
+    </div>
+  );
+};
+
+// One wavesurfer instance bound to one track. All TrackPlayers in a show
+// stay mounted in the DOM at once -- the inactive ones are hidden but
+// keep their decoded audio + waveform peaks resident, which is the whole
+// point: when playback hands off to the next song there is no fetch /
+// decode / "ready" wait, just a CSS visibility flip plus a play() call
+// on an already-warm wavesurfer.
+//
+// Only the active player forwards audio events (audioprocess, finish,
+// play/pause) up to the parent so we don't double-up on time updates or
+// trigger spurious global play/pause toggles when the *previous* track
+// emits a 'pause' as part of its end-of-stream cleanup.
+const TrackPlayer = ({
+  track,                    // owning track object
+  isActive,                 // is this the currently selected/playing track?
+  isPlayingShow,            // global play state (whole-show)
+  localTime,                // controlled local-time within this track (only meaningful when active)
+  onLocalTimeUpdate,        // (localSec) => void  (active only)
+  onPlayChange,             // (playing) => void   (active only)
+  onTrackEnded,             // () => void          (active only)
+  onTrackReady,             // (trackId, durationSec) => void  (always; signals duration + warm)
+  onTrackUnready,           // (trackId) => void   (e.g. URL change tearing down ws)
+}) => {
+  const containerRef = useRef(null);
+  const wsRef = useRef(null);
+
+  // Sync isActive into a ref BEFORE the active-gate effect runs, so any
+  // ws events fired synchronously by our own pause()/play() calls see the
+  // up-to-date active state and don't bubble back as global toggles.
+  const isActiveRef = useRef(isActive);
+  const isPlayingShowRef = useRef(isPlayingShow);
+  const localTimeRef = useRef(0);
+  useEffect(() => { isActiveRef.current = isActive; }, [isActive]);
+  useEffect(() => { isPlayingShowRef.current = isPlayingShow; }, [isPlayingShow]);
+  useEffect(() => {
+    if (isActive) localTimeRef.current = Number.isFinite(localTime) ? localTime : 0;
+  }, [localTime, isActive]);
+
+  // Callback refs prevent stale closures inside the wavesurfer event
+  // listeners (which are wired once at ws creation).
+  const onLocalTimeUpdateRef = useRef(null);
+  const onPlayChangeRef = useRef(null);
+  const onTrackEndedRef = useRef(null);
+  const onTrackReadyRef = useRef(null);
+  const onTrackUnreadyRef = useRef(null);
+  useEffect(() => { onLocalTimeUpdateRef.current = onLocalTimeUpdate; }, [onLocalTimeUpdate]);
+  useEffect(() => { onPlayChangeRef.current = onPlayChange; }, [onPlayChange]);
+  useEffect(() => { onTrackEndedRef.current = onTrackEnded; }, [onTrackEnded]);
+  useEffect(() => { onTrackReadyRef.current = onTrackReady; }, [onTrackReady]);
+  useEffect(() => { onTrackUnreadyRef.current = onTrackUnready; }, [onTrackUnready]);
+
+  const lastUpdateRef = useRef(0);
+  const throttleInterval = 100;
+
+  const trackUrl = track?.url || null;
+  const trackId = track?.id || null;
+
+  // Build the wavesurfer instance keyed on track URL. We deliberately
+  // don't tear down on isActive flips -- only when the audio source
+  // changes (file replaced) or the track is unmounted (deleted).
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const ws = WaveSurfer.create({
+      container: containerRef.current,
+      waveColor: '#4F46E5',
+      progressColor: '#7C3AED',
+      cursorColor: '#EF4444',
+      barWidth: 2,
+      barRadius: 3,
+      cursorWidth: 1,
+      height: 80,
+      barGap: 3,
+      responsive: true,
+      normalize: true,
+    });
+    wsRef.current = ws;
+
+    ws.on('ready', () => {
+      const dur = ws.getDuration();
+      // Always report ready+duration so the parent can populate
+      // durationSec for off-screen tracks (used by show offsets).
+      onTrackReadyRef.current?.(trackId, dur);
+      if (!isActiveRef.current) return;
+      // Active-track promotion at ready time: align playhead and
+      // resume playback if the show is currently rolling.
+      if (dur > 0) {
+        const t = Math.min(dur, Math.max(0, localTimeRef.current || 0));
+        try { ws.seekTo(t / dur); } catch (_) { /* ignore */ }
+      }
+      if (isPlayingShowRef.current) {
+        try { ws.play(); } catch (_) { /* ignore */ }
+      }
+    });
+
+    ws.on('audioprocess', (t) => {
+      if (!isActiveRef.current) return;
+      const now = Date.now();
+      if (now - lastUpdateRef.current >= throttleInterval) {
+        onLocalTimeUpdateRef.current?.(t);
+        lastUpdateRef.current = now;
+      }
+    });
+
+    ws.on('seek', (progress) => {
+      if (!isActiveRef.current) return;
+      const now = Date.now();
+      if (now - lastUpdateRef.current >= throttleInterval) {
+        const t = progress * ws.getDuration();
+        onLocalTimeUpdateRef.current?.(t);
+        lastUpdateRef.current = now;
+      }
+    });
+
+    ws.on('play', () => {
+      if (!isActiveRef.current) return;
+      onPlayChangeRef.current?.(true);
+    });
+    ws.on('pause', () => {
+      if (!isActiveRef.current) return;
+      // Don't bubble a "pause" that's actually the natural end of the
+      // track -- the 'finish' handler owns that transition and a stray
+      // setIsAudioPlaying(false) here would tear playback down right as
+      // we're about to swap to the next track.
+      const dur = ws.getDuration?.() || 0;
+      const t = ws.getCurrentTime?.() ?? 0;
+      if (dur > 0 && dur - t < 0.1) return;
+      onPlayChangeRef.current?.(false);
+    });
+    ws.on('finish', () => {
+      if (!isActiveRef.current) return;
+      onTrackEndedRef.current?.();
+    });
+    ws.on('error', (err) => console.error('WaveSurfer error:', err));
+
+    if (trackUrl) {
+      // ws.load() returns a Promise that aborts (rejects with
+      // AbortError) when the instance is destroyed mid-load. That
+      // happens routinely under React StrictMode's mount/unmount
+      // double-invoke and whenever the user swaps the audio file or
+      // deletes the track. Swallow that specific case so it doesn't
+      // surface as an unhandled rejection; report anything else.
+      Promise.resolve()
+        .then(() => ws.load(trackUrl))
+        .catch((err) => {
+          if (err?.name === 'AbortError') return;
+          console.error('WaveSurfer load failed:', err);
+        });
+    }
+
+    return () => {
+      try { onTrackUnreadyRef.current?.(trackId); } catch (_) { /* ignore */ }
+      try { ws.destroy(); } catch (_) { /* ignore */ }
+      wsRef.current = null;
+    };
+    // Re-create when the audio source changes; also re-key on trackId so
+    // a removed track's ws is torn down with the component.
+  }, [trackId, trackUrl]);
+
+  // Active gate. When this player becomes inactive, pause it. When it
+  // becomes active, snap to the requested local time and (un)play to
+  // match the global show state. The 'ready' handler covers the case
+  // where this player is still loading at the moment it becomes active.
+  useEffect(() => {
+    const ws = wsRef.current;
+    if (!ws) return;
+    if (!isActive) {
+      try { ws.pause(); } catch (_) { /* ignore */ }
+      return;
+    }
+    const dur = ws.getDuration?.() || 0;
+    if (dur <= 0) return; // 'ready' will sync once decoded
+    const t = Math.min(dur, Math.max(0, localTimeRef.current || 0));
+    try { ws.seekTo(t / dur); } catch (_) { /* ignore */ }
+    if (isPlayingShowRef.current) {
+      try { ws.play(); } catch (_) { /* ignore */ }
+    } else {
+      try { ws.pause(); } catch (_) { /* ignore */ }
+    }
+  }, [isActive]);
+
+  // External play/pause from the show-level button -> ws (active only).
+  useEffect(() => {
+    if (!isActive) return;
+    const ws = wsRef.current;
+    if (!ws) return;
+    if ((ws.getDuration?.() || 0) <= 0) return; // ready handler will sync
+    if (isPlayingShow) {
+      try { ws.play(); } catch (_) { /* ignore */ }
+    } else {
+      try { ws.pause(); } catch (_) { /* ignore */ }
+    }
+  }, [isActive, isPlayingShow]);
+
+  // External seek (timeline click) -> ws (active only). The tolerance
+  // avoids a feedback loop with throttled audioprocess updates.
+  useEffect(() => {
+    if (!isActive) return;
+    const ws = wsRef.current;
+    if (!ws) return;
+    const dur = ws.getDuration?.() || 0;
+    if (dur <= 0) return;
+    if (!isFinite(localTime) || localTime < 0) return;
+    const cur = ws.getCurrentTime?.() ?? 0;
+    if (Math.abs(cur - localTime) < 0.15) return;
+    try { ws.seekTo(Math.min(1, localTime / dur)); } catch (_) { /* ignore */ }
+  }, [isActive, localTime]);
+
+  return (
+    <div
+      ref={containerRef}
+      className="w-full bg-gray-900 rounded min-h-[80px]"
+      style={{ display: isActive ? 'block' : 'none' }}
+    />
+  );
+};
+
+// Multi-track audio editor. Owns the BPM/upload/tap UI bound to the
+// currently active track, and renders one TrackPlayer per track in the
+// show. Only the active player's container is visible; all others stay
+// mounted (and their wavesurfers stay loaded) so transitioning between
+// songs is instant -- no fetch / decode / 'ready' wait.
+const AudioWaveform = ({
+  tracks,                   // full list of tracks in the show
+  activeTrackId,            // id of the active track
+  localTime,                // controlled local-time within the active track
+  isPlaying,                // controlled play/pause state (whole-show level)
+  onLocalTimeUpdate,        // (localSec) => void
+  onPlayChange,             // (playing: boolean) => void
+  onTrackEnded,             // () => void  (active wavesurfer 'finish')
+  onTrackDurationKnown,     // (trackId, durationSec) => void  (per-track 'ready')
+  onAudioFileUploaded,      // (file: File) => void  (parent uploads + updates active track)
+  onBpmInfoChange,          // (patch) => void  (per-track BPM edit)
+  onTrackRemove,            // optional: () => void  (delete the active track)
+  trackLabel,               // string shown in the editor header
+  isUploading,              // whether the parent is currently uploading audio
+  isAutoDetecting,          // whether the parent is auto-detecting BPM in the background
+}) => {
+  const track = tracks?.find((t) => t.id === activeTrackId) || null;
+  // Cache the most recently uploaded File handle so "Detect BPM" can run
+  // without an extra fetch. After a page reload the cache is gone and we
+  // fall back to fetching the persisted URL.
   const lastFileRef = useRef(null);
-  const [isReady, setIsReady] = useState(false);
-  const [localDuration, setLocalDuration] = useState(0);
+  // Tracks which TrackPlayers have hit 'ready' so we can derive the
+  // active player's readiness for the play button. When a track URL
+  // changes its TrackPlayer rebuilds and emits onTrackUnready first.
+  const [readyTrackIds, setReadyTrackIds] = useState(() => new Set());
+  const [trackDurations, setTrackDurations] = useState(() => ({}));
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState(null);
   const tapTimesRef = useRef([]);
   const tapTimeoutRef = useRef(null);
   const [tapCount, setTapCount] = useState(0);
-  const lastUpdateRef = useRef(0);
-  const throttleInterval = 100; // Update every 100ms instead of every frame
 
-  const info = { ...DEFAULT_BPM_INFO, ...(bpmInfo || {}) };
+  const trackUrl = track?.url || null;
+  const isReady = activeTrackId ? readyTrackIds.has(activeTrackId) : false;
+  const localDuration = activeTrackId ? trackDurations[activeTrackId] || 0 : 0;
+
+  const handleTrackReady = (trackId, dur) => {
+    setReadyTrackIds((prev) => {
+      if (prev.has(trackId)) return prev;
+      const next = new Set(prev);
+      next.add(trackId);
+      return next;
+    });
+    if (Number.isFinite(dur) && dur > 0) {
+      setTrackDurations((prev) =>
+        Math.abs((prev[trackId] || 0) - dur) < 0.01 ? prev : { ...prev, [trackId]: dur }
+      );
+      onTrackDurationKnown?.(trackId, dur);
+    }
+  };
+
+  const handleTrackUnready = (trackId) => {
+    setReadyTrackIds((prev) => {
+      if (!prev.has(trackId)) return prev;
+      const next = new Set(prev);
+      next.delete(trackId);
+      return next;
+    });
+  };
+
+  // Per-track BPM info derived from the active track. Falls back to
+  // defaults when the track has no BPM yet.
+  const info = {
+    bpm: Number.isFinite(track?.bpm) ? track.bpm : null,
+    firstBeatOffsetSec: Number.isFinite(track?.firstBeatOffsetSec)
+      ? track.firstBeatOffsetSec
+      : 0,
+    beatsPerMeasure: Number.isFinite(track?.beatsPerMeasure)
+      ? track.beatsPerMeasure
+      : 4,
+    confidence: Number.isFinite(track?.bpmConfidence) ? track.bpmConfidence : null,
+    source: track?.bpmSource || null,
+  };
   const patchBpmInfo = (patch) => {
     if (typeof onBpmInfoChange === "function") {
       onBpmInfoChange({ ...info, ...patch });
     }
   };
 
+  // Reset per-track scratch state (cached File for re-detect, tap-tempo
+  // buffer, analysis error) when the active track switches so a "Detect
+  // BPM" / "Tap" press on the new tab can't be applied to the previous
+  // tab's audio by accident.
   useEffect(() => {
-    if (waveformRef.current && !wavesurferRef.current) {
-      wavesurferRef.current = WaveSurfer.create({
-        container: waveformRef.current,
-        waveColor: '#4F46E5',
-        progressColor: '#7C3AED',
-        cursorColor: '#EF4444',
-        barWidth: 2,
-        barRadius: 3,
-        cursorWidth: 1,
-        height: 80,
-        barGap: 3,
-        responsive: true,
-        normalize: true,
-      });
-
-      // Set up event listeners
-      wavesurferRef.current.on('ready', () => {
-        console.log('WaveSurfer ready');
-        setIsReady(true);
-        const dur = wavesurferRef.current.getDuration();
-        setLocalDuration(dur);
-        if (typeof onAudioDurationChange === "function") {
-          onAudioDurationChange(dur);
-        }
-      });
-
-      wavesurferRef.current.on('audioprocess', (currentTime) => {
-        // Throttle updates to improve performance
-        const now = Date.now();
-        if (now - lastUpdateRef.current >= throttleInterval) {
-          console.log('Audio process:', currentTime);
-          if (onTimeUpdate) {
-            onTimeUpdate(currentTime);
-          }
-          lastUpdateRef.current = now;
-        }
-      });
-
-      wavesurferRef.current.on('seek', (progress) => {
-        // Throttle seek updates
-        const now = Date.now();
-        if (now - lastUpdateRef.current >= throttleInterval) {
-          console.log('Seek:', progress);
-          const time = progress * wavesurferRef.current.getDuration();
-          if (onTimeUpdate) {
-            onTimeUpdate(time);
-          }
-          lastUpdateRef.current = now;
-        }
-      });
-
-      wavesurferRef.current.on('play', () => {
-        console.log('Play event');
-        if (onPlayPause) {
-          onPlayPause(true);
-        }
-      });
-
-      wavesurferRef.current.on('pause', () => {
-        console.log('Pause event');
-        if (onPlayPause) {
-          onPlayPause(false);
-        }
-      });
-
-      wavesurferRef.current.on('finish', () => {
-        console.log('Finish event');
-        if (onPlayPause) {
-          onPlayPause(false);
-        }
-      });
-
-      wavesurferRef.current.on('error', (error) => {
-        console.error('WaveSurfer error:', error);
-      });
+    setAnalysisError(null);
+    lastFileRef.current = null;
+    tapTimesRef.current = [];
+    setTapCount(0);
+    if (tapTimeoutRef.current) {
+      clearTimeout(tapTimeoutRef.current);
+      tapTimeoutRef.current = null;
     }
-
-    return () => {
-      if (wavesurferRef.current) {
-        wavesurferRef.current.destroy();
-        wavesurferRef.current = null;
-      }
-    };
-  }, []); // Remove dependencies to prevent re-creation
-
-  useEffect(() => {
-    if (wavesurferRef.current && isReady) {
-      console.log('Attempting to play/pause:', isPlaying);
-      if (isPlaying) {
-        wavesurferRef.current.play();
-      } else {
-        wavesurferRef.current.pause();
-      }
-    }
-  }, [isPlaying, isReady]);
-
-  useEffect(() => {
-    if (wavesurferRef.current && isReady && currentTime !== undefined) {
-      const duration = wavesurferRef.current.getDuration();
-      if (duration && duration > 0 && isFinite(currentTime) && currentTime >= 0) {
-        // Only seek if audio is not playing to avoid stuttering
-        if (!isPlaying) {
-          const progress = Math.min(1, Math.max(0, currentTime / duration));
-          console.log('Seeking to:', progress, 'at time:', currentTime);
-          wavesurferRef.current.seekTo(progress);
-        }
-      }
-    }
-  }, [currentTime, isReady, isPlaying]);
+  }, [activeTrackId]);
 
   const handleFileUpload = (event) => {
     const file = event.target.files[0];
-    if (file && file.type.startsWith('audio/')) {
-      console.log('Loading file:', file.name);
-      setAudioFile(file);
-      lastFileRef.current = file;
-      setAnalysisError(null);
-      const url = URL.createObjectURL(file);
-      if (wavesurferRef.current) {
-        wavesurferRef.current.load(url);
-      }
-
-      // New audio invalidates any previously detected/edited BPM. Keep the
-      // beatsPerMeasure preference but drop the timing values.
-      if (typeof onBpmInfoChange === "function") {
-        onBpmInfoChange({
-          ...DEFAULT_BPM_INFO,
-          beatsPerMeasure: info.beatsPerMeasure,
-        });
-      }
-
-      // Notify parent component about the audio file
-      if (onAudioFileChange) {
-        onAudioFileChange({
-          name: file.name,
-          size: file.size,
-          type: file.type,
-          lastModified: file.lastModified,
-          file: file // Pass the actual file object for upload
-        });
-      }
+    if (!file || !file.type.startsWith('audio/')) return;
+    lastFileRef.current = file;
+    setAnalysisError(null);
+    if (typeof onAudioFileUploaded === "function") {
+      onAudioFileUploaded(file);
     }
+    // Reset the file input so re-picking the same file fires onChange.
+    try { event.target.value = ""; } catch (_) { /* ignore */ }
   };
 
   const handleDetectBpm = async () => {
-    const file = lastFileRef.current;
-    if (!file) {
+    const source = lastFileRef.current || trackUrl;
+    if (!source) {
       setAnalysisError("Pick an audio file first.");
       return;
     }
     setIsAnalyzing(true);
     setAnalysisError(null);
     try {
-      const result = await analyzeAudioFile(file);
+      const result = await analyzeAudioFile(source);
       patchBpmInfo({
         bpm: result.bpm,
         firstBeatOffsetSec: result.firstBeatOffsetSec,
@@ -1421,8 +1683,6 @@ const AudioWaveform = ({
 
   const handleTap = () => {
     const now = performance.now();
-    // Reset the tap series after ~2.5s of inactivity so a new sequence
-    // doesn't get averaged with stale taps.
     if (tapTimeoutRef.current) clearTimeout(tapTimeoutRef.current);
     tapTimeoutRef.current = setTimeout(() => {
       tapTimesRef.current = [];
@@ -1438,8 +1698,8 @@ const AudioWaveform = ({
   };
 
   const handleSetFirstBeatHere = () => {
-    if (!isFinite(currentTime) || currentTime < 0) return;
-    patchBpmInfo({ firstBeatOffsetSec: Number(currentTime.toFixed(3)), source: "manual" });
+    if (!isFinite(localTime) || localTime < 0) return;
+    patchBpmInfo({ firstBeatOffsetSec: Number(localTime.toFixed(3)), source: "manual" });
   };
 
   const halveBpm = () => {
@@ -1451,11 +1711,39 @@ const AudioWaveform = ({
     patchBpmInfo({ bpm: Number((info.bpm * 2).toFixed(2)), source: "manual" });
   };
 
-  const handlePlayPause = () => {
-    console.log('Play/Pause button clicked');
-    if (wavesurferRef.current && isReady) {
-      wavesurferRef.current.playPause();
-    }
+  // Nudge the first-beat phase by ±50ms. Used by the fine-sync buttons
+  // next to the "First beat (s)" input so the user can shift the grid
+  // by ear while the song is playing.
+  const FIRST_BEAT_NUDGE_SEC = 0.05;
+  const nudgeFirstBeat = (deltaSec) => {
+    const cur = Number.isFinite(info.firstBeatOffsetSec)
+      ? info.firstBeatOffsetSec
+      : 0;
+    patchBpmInfo({
+      firstBeatOffsetSec: Number((cur + deltaSec).toFixed(3)),
+      source: "manual",
+    });
+  };
+
+  // Derive whether the playhead is currently sitting on a downbeat.
+  // Drives the blinking indicator next to the First-Beat controls; the
+  // indicator pulses bright for ~150ms after each measure boundary
+  // (assuming localTime updates ~10x/sec via the audioprocess throttle).
+  // When paused this just reflects whether the static playhead lies on
+  // a downbeat, which is also useful for verifying the offset by eye.
+  const onBeat = (() => {
+    if (!info.bpm || info.bpm <= 0) return false;
+    if (!Number.isFinite(localTime)) return false;
+    const period = 60 / info.bpm;
+    const measureLen = period * (info.beatsPerMeasure || 4);
+    const offset = info.firstBeatOffsetSec || 0;
+    if (localTime < offset - 0.05) return false;
+    const phase = ((localTime - offset) % measureLen + measureLen) % measureLen;
+    return phase < 0.15;
+  })();
+
+  const handlePlayClick = () => {
+    if (typeof onPlayChange === "function") onPlayChange(!isPlaying);
   };
 
   const formatTime = (seconds) => {
@@ -1464,45 +1752,93 @@ const AudioWaveform = ({
     return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
   };
 
+  const hasAudio = !!trackUrl;
+
   return (
-    <div className="mb-4 p-4 bg-gray-800 rounded-lg border border-gray-700">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-lg font-semibold text-white">Audio Timeline</h3>
-        <div className="flex items-center gap-2">
-          <input
-            type="file"
-            accept="audio/*"
-            onChange={handleFileUpload}
-            className="text-sm text-gray-300 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700"
-          />
-          {isReady && (
+    <div className="p-4 bg-gray-800 rounded-b-lg border border-t-0 border-gray-700">
+      <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
+        <div className="min-w-0">
+          <div className="text-[11px] uppercase tracking-wide text-gray-400">
+            Track
+          </div>
+          <h3 className="text-base font-semibold text-white truncate">
+            {trackLabel || track?.name || "Untitled track"}
+          </h3>
+        </div>
+        <div className="flex items-center gap-2 ml-auto">
+          <label
+            className="text-sm text-gray-300 inline-flex items-center"
+            title={hasAudio ? "Replace this track's audio" : "Upload audio for this track"}
+          >
+            <input
+              type="file"
+              accept="audio/*"
+              onChange={handleFileUpload}
+              className="text-sm text-gray-300 file:mr-3 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700"
+            />
+          </label>
+          {isUploading && (
+            <span className="text-xs text-gray-400">Uploading…</span>
+          )}
+          {!isUploading && isAutoDetecting && (
+            <span className="text-xs text-gray-400">Detecting BPM…</span>
+          )}
+          {hasAudio && (
             <>
               <button
-                onClick={handlePlayPause}
+                type="button"
+                onClick={handlePlayClick}
                 className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded"
+                title="Play / pause the show preview"
+                disabled={!isReady}
               >
                 {isPlaying ? 'Pause' : 'Play'}
               </button>
-              <span className="text-sm text-gray-300">
-                {formatTime(currentTime || 0)} / {formatTime(localDuration || 0)}
+              <span className="text-sm text-gray-300 num">
+                {formatTime(localTime || 0)} / {formatTime(localDuration || 0)}
               </span>
             </>
           )}
+          {typeof onTrackRemove === "function" && (
+            <button
+              type="button"
+              onClick={onTrackRemove}
+              className="text-gray-400 hover:text-red-400 text-sm px-2 h-9"
+              title="Delete this track"
+            >
+              Delete
+            </button>
+          )}
         </div>
       </div>
-      
-      <div 
-        ref={waveformRef} 
-        className="w-full bg-gray-900 rounded"
-      />
 
-      {!audioFile && (
+      {/* All TrackPlayers stay mounted; only the active one is visible.
+          Keeping the others warm is the entire reason transitions
+          between songs are gap-free. */}
+      <div>
+        {tracks?.map((t) => (
+          <TrackPlayer
+            key={t.id}
+            track={t}
+            isActive={t.id === activeTrackId}
+            isPlayingShow={!!isPlaying}
+            localTime={t.id === activeTrackId ? localTime : 0}
+            onLocalTimeUpdate={onLocalTimeUpdate}
+            onPlayChange={onPlayChange}
+            onTrackEnded={onTrackEnded}
+            onTrackReady={handleTrackReady}
+            onTrackUnready={handleTrackUnready}
+          />
+        ))}
+      </div>
+
+      {!hasAudio && (
         <div className="text-center text-gray-400 text-sm mt-2">
-          Upload an MP3 file to sync with your timeline
+          Pick an audio file to populate this track.
         </div>
       )}
 
-      {isReady && (
+      {hasAudio && (
         <div className="mt-3 rounded border border-gray-700 bg-gray-900/40 p-3">
           <div className="flex flex-wrap items-end gap-3">
             <div>
@@ -1547,10 +1883,34 @@ const AudioWaveform = ({
             </div>
 
             <div>
-              <label className="block text-[11px] uppercase tracking-wide text-gray-400 mb-1">
+              <label className="block text-[11px] uppercase tracking-wide text-gray-400 mb-1 flex items-center gap-1.5">
+                <span
+                  aria-hidden
+                  className={cn(
+                    "inline-block w-2.5 h-2.5 rounded-full transition-opacity duration-100",
+                    "bg-yellow-400",
+                    onBeat
+                      ? "opacity-100 shadow-[0_0_8px_2px_rgb(250_204_21_/_0.8)]"
+                      : "opacity-25"
+                  )}
+                  title={
+                    info.bpm
+                      ? "Pulses on each downbeat -- play the song and nudge ±50ms until it lines up with what you hear"
+                      : "Detect a BPM to enable downbeat tracking"
+                  }
+                />
                 First beat (s)
               </label>
               <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => nudgeFirstBeat(-FIRST_BEAT_NUDGE_SEC)}
+                  disabled={!info.bpm}
+                  className="h-8 w-8 text-xs bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-white rounded"
+                  title="Shift the first-beat phase 50ms earlier (useful for fine-syncing while the song is playing)"
+                >
+                  −50
+                </button>
                 <input
                   type="number"
                   step="0.01"
@@ -1564,6 +1924,15 @@ const AudioWaveform = ({
                     });
                   }}
                 />
+                <button
+                  type="button"
+                  onClick={() => nudgeFirstBeat(FIRST_BEAT_NUDGE_SEC)}
+                  disabled={!info.bpm}
+                  className="h-8 w-8 text-xs bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-white rounded"
+                  title="Shift the first-beat phase 50ms later"
+                >
+                  +50
+                </button>
                 <button
                   type="button"
                   onClick={handleSetFirstBeatHere}
@@ -1608,7 +1977,7 @@ const AudioWaveform = ({
               <button
                 type="button"
                 onClick={handleDetectBpm}
-                disabled={isAnalyzing || !lastFileRef.current}
+                disabled={isAnalyzing || (!lastFileRef.current && !trackUrl)}
                 className="h-8 px-3 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white rounded"
               >
                 {isAnalyzing ? "Detecting…" : "Detect BPM"}
@@ -1640,10 +2009,6 @@ const AudioWaveform = ({
         </div>
       )}
 
-      {/* Debug info */}
-      <div className="text-xs text-gray-500 mt-2">
-        Ready: {isReady.toString()}, Playing: {isPlaying.toString()}, Duration: {localDuration.toFixed(2)}s
-      </div>
     </div>
   );
 };
@@ -1814,13 +2179,33 @@ const ShowBuilder = (props) => {
   const [selectedItems, setSelectedItems] = useState([]);
   const [isChainTimingModalOpen, setIsChainTimingModalOpen] = useState(false);
   const [isPopupVisible, setPopupVisible] = useState(false);
-  const [audioFile, setAudioFile] = useState(null);
+  // Multi-track audio. The canonical list of tracks for the show; each
+  // entry has its own URL, BPM, duration, etc. Tracks play sequentially
+  // back-to-back with no gap. The "active" track is the one shown in
+  // the per-track editor below the tab strip.
+  const [audioTracks, setAudioTracks] = useState([]);
+  const [activeTrackId, setActiveTrackId] = useState(null);
+  // Show-time cursor across the whole audio: cumulative position
+  // covering all tracks, in seconds. The Timeline + Console mirrors use
+  // this directly. Local time within the active track is derived.
   const [audioCurrentTime, setAudioCurrentTime] = useState(0);
-  const [audioDuration, setAudioDuration] = useState(0);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
-  // BPM/beat-grid info for the loaded audio. Persisted on the show via
-  // showMetadata.audioFile so reopening a saved show restores the grid.
-  const [bpmInfo, setBpmInfo] = useState(DEFAULT_BPM_INFO);
+  const [uploadingForTrackId, setUploadingForTrackId] = useState(null);
+  const [autoDetectingTrackIds, setAutoDetectingTrackIds] = useState(() => new Set());
+
+  const audioOffsets = useMemo(() => trackOffsets(audioTracks), [audioTracks]);
+  const totalAudioDuration = useMemo(
+    () => totalShowAudioDuration(audioTracks),
+    [audioTracks]
+  );
+  const activeTrackIndex = useMemo(() => {
+    if (!activeTrackId) return -1;
+    return audioTracks.findIndex((t) => t.id === activeTrackId);
+  }, [audioTracks, activeTrackId]);
+  const activeTrack = activeTrackIndex >= 0 ? audioTracks[activeTrackIndex] : null;
+  const activeTrackOffset =
+    activeTrackIndex >= 0 ? audioOffsets[activeTrackIndex] : 0;
+  const activeLocalTime = Math.max(0, audioCurrentTime - activeTrackOffset);
   const [availableDevices, setAvailableDevices] = useState({});
   const [receiverLocations, setReceiverLocations] = useState({});
   const [receiverLabels, setReceiverLabels] = useState({});
@@ -1990,33 +2375,16 @@ const ShowBuilder = (props) => {
       const maxId = newItems.reduce((max, obj) => (obj.id > max.id ? obj : max), newItems[0]).id;
       refreshInventory(newItems);
       console.log(`CURRENT INDEX IS ${maxId}`);
-      // If editing a show with audio, set the audio file for the player
-      if (stagedShow.audioFile) {
-        setAudioFile(stagedShow.audioFile);
-        // Hydrate BPM info that was saved alongside the audio file. Older
-        // shows won't have these keys; fall back to defaults.
-        setBpmInfo({
-          ...DEFAULT_BPM_INFO,
-          ...(stagedShow.audioFile.bpm != null
-            ? { bpm: stagedShow.audioFile.bpm }
-            : {}),
-          ...(stagedShow.audioFile.firstBeatOffsetSec != null
-            ? { firstBeatOffsetSec: stagedShow.audioFile.firstBeatOffsetSec }
-            : {}),
-          ...(stagedShow.audioFile.beatsPerMeasure != null
-            ? { beatsPerMeasure: stagedShow.audioFile.beatsPerMeasure }
-            : {}),
-          ...(stagedShow.audioFile.bpmConfidence != null
-            ? { confidence: stagedShow.audioFile.bpmConfidence }
-            : {}),
-          ...(stagedShow.audioFile.bpmSource != null
-            ? { source: stagedShow.audioFile.bpmSource }
-            : {}),
-        });
-      } else {
-        setAudioFile(null);
-        setBpmInfo(DEFAULT_BPM_INFO);
-      }
+      // Multi-track hydration. The store normalises legacy single-track
+      // audioFile payloads into a one-element array, so we just trust
+      // audioTracks here. Each track already carries its own bpm fields.
+      const tracks = Array.isArray(stagedShow.audioTracks)
+        ? stagedShow.audioTracks
+        : [];
+      setAudioTracks(tracks);
+      setActiveTrackId(tracks[0]?.id || null);
+      setAudioCurrentTime(0);
+      setIsAudioPlaying(false);
       
       // Load existing receiver locations from show data
       if (stagedShow.receiver_locations) {
@@ -2060,8 +2428,10 @@ const ShowBuilder = (props) => {
         name: "",
         ...(prev?.protocol ? { protocol: prev.protocol } : {}),
       }));
-      setAudioFile(null);
-      setBpmInfo(DEFAULT_BPM_INFO);
+      setAudioTracks([]);
+      setActiveTrackId(null);
+      setAudioCurrentTime(0);
+      setIsAudioPlaying(false);
       setReceiverLocations({});
       setReceiverLabels({});
     }
@@ -2184,82 +2554,242 @@ const ShowBuilder = (props) => {
     setSelectedItems([]);
   };
 
-  const handleAudioTimeUpdate = (time) => {
-    if (isFinite(time) && time >= 0) {
-      setAudioCurrentTime(time);
-    }
+  // ---- Multi-track audio orchestration -----------------------------------
+
+  // Central writer that updates `audioTracks` AND mirrors the result into
+  // `showMetadata` so the upsert path persists it. Avoid setShowMetadata
+  // calls inline elsewhere — go through this so the two stay in sync.
+  const writeAudioTracks = (next) => {
+    const arr = typeof next === "function" ? next(audioTracks) : next;
+    setAudioTracks(arr);
+    setShowMetadata((prev) => ({
+      ...prev,
+      audioTracks: arr,
+      audioFile: arr[0] || null,
+    }));
   };
 
-  const handleAudioPlayPause = (playing) => {
-    setIsAudioPlaying(playing);
+  const patchTrack = (trackId, patch) => {
+    writeAudioTracks((prev) =>
+      prev.map((t) => (t.id === trackId ? { ...t, ...patch } : t))
+    );
   };
 
-  const handleAudioFileChange = async (fileInfo) => {
-    setAudioFile(fileInfo);
-    
-    // Upload the actual file to get a persistent URL
+  // The user clicked "Choose File" within a track's editor. Upload to
+  // get a persistent URL, then kick off BPM auto-detection in the
+  // background so the timeline beat grid lights up without an extra
+  // click. The auto-detect also captures the audio duration so the
+  // multi-track beat grid can render this song's beats even when its
+  // tab isn't currently visible (i.e. a wavesurfer 'ready' event hasn't
+  // fired for it yet).
+  const handleTrackFileUpload = async (trackId, file) => {
+    if (!file) return;
+    setUploadingForTrackId(trackId);
     try {
       const formData = new FormData();
-      formData.append('audio', fileInfo.file);
-      
-      const response = await fetch('/api/shows/upload-audio', {
-        method: 'POST',
-        body: formData
+      formData.append("audio", file);
+      const response = await fetch("/api/shows/upload-audio", {
+        method: "POST",
+        body: formData,
       });
-      
-      if (response.ok) {
-        const result = await response.json();
-        const audioUrl = result.url;
-        
-        // Update show metadata with audio info and URL
-        console.log("SSM", showMetadata)
-        setShowMetadata(prev => ({
-          ...prev,
-          audioFile: {
-            ...fileInfo,
-            url: audioUrl
-          }
-        }));
-      } else {
-        console.error('Failed to upload audio file');
-      }
+      if (!response.ok) throw new Error("upload failed");
+      const result = await response.json();
+      const audioUrl = result.url;
+      patchTrack(trackId, {
+        url: audioUrl,
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        lastModified: file.lastModified,
+        durationSec: null,
+        bpm: null,
+        firstBeatOffsetSec: 0,
+        bpmConfidence: null,
+        bpmSource: null,
+      });
+      // Background BPM detection. Only applies if the user hasn't
+      // already manually set a BPM in the few seconds we were running.
+      setAutoDetectingTrackIds((prev) => {
+        const next = new Set(prev);
+        next.add(trackId);
+        return next;
+      });
+      analyzeAudioFile(file)
+        .then((res) => {
+          if (!res || !Number.isFinite(res.bpm)) return;
+          setAudioTracks((prev) => {
+            const next = prev.map((t) => {
+              if (t.id !== trackId) return t;
+              if (t.bpm != null) return t;
+              return {
+                ...t,
+                bpm: res.bpm,
+                firstBeatOffsetSec: res.firstBeatOffsetSec,
+                bpmConfidence: res.confidence,
+                bpmSource: "auto",
+                durationSec: Number.isFinite(res.durationSec)
+                  ? res.durationSec
+                  : t.durationSec,
+              };
+            });
+            setShowMetadata((md) => ({
+              ...md,
+              audioTracks: next,
+              audioFile: next[0] || null,
+            }));
+            return next;
+          });
+        })
+        .catch((err) => {
+          console.warn("Auto BPM detection failed:", err);
+        })
+        .finally(() => {
+          setAutoDetectingTrackIds((prev) => {
+            const next = new Set(prev);
+            next.delete(trackId);
+            return next;
+          });
+        });
     } catch (error) {
-      console.error('Error uploading audio file:', error);
-      // Fallback: just save the file info without URL
-      setShowMetadata(prev => ({
-        ...prev,
-        audioFile: fileInfo
-      }));
+      console.error("Failed to upload audio file:", error);
+      alert("Failed to upload audio file. See console for details.");
+    } finally {
+      setUploadingForTrackId(null);
     }
   };
 
-  // Remove audio from show handler
-  const handleRemoveAudio = () => {
-    setShowMetadata(prev => ({ ...prev, audioFile: null }));
-    setAudioFile(null);
-    setBpmInfo(DEFAULT_BPM_INFO);
-    setAudioDuration(0);
+  const handleTrackBpmChange = (trackId, next) => {
+    patchTrack(trackId, {
+      bpm: Number.isFinite(next.bpm) ? next.bpm : null,
+      firstBeatOffsetSec: Number.isFinite(next.firstBeatOffsetSec)
+        ? next.firstBeatOffsetSec
+        : 0,
+      beatsPerMeasure: Number.isFinite(next.beatsPerMeasure)
+        ? next.beatsPerMeasure
+        : 4,
+      bpmConfidence: Number.isFinite(next.confidence) ? next.confidence : null,
+      bpmSource: next.source || null,
+    });
   };
 
-  // Mirror BPM info into showMetadata.audioFile so it round-trips through
-  // updateShow + the staged-show reload path. We avoid bumping audioFile
-  // when there isn't one (otherwise we'd resurrect a deleted audio entry).
-  const handleBpmInfoChange = (next) => {
-    setBpmInfo(next);
-    setShowMetadata((prev) => {
-      if (!prev?.audioFile) return prev;
-      return {
-        ...prev,
-        audioFile: {
-          ...prev.audioFile,
-          bpm: next.bpm,
-          firstBeatOffsetSec: next.firstBeatOffsetSec,
-          beatsPerMeasure: next.beatsPerMeasure,
-          bpmConfidence: next.confidence,
-          bpmSource: next.source,
-        },
-      };
-    });
+  const handleAddTrack = () => {
+    const id = newTrackId();
+    writeAudioTracks((prev) => [
+      ...prev,
+      {
+        id,
+        url: null,
+        name: `Track ${prev.length + 1}`,
+        size: null,
+        type: null,
+        lastModified: null,
+        durationSec: null,
+        bpm: null,
+        firstBeatOffsetSec: 0,
+        beatsPerMeasure: 4,
+        bpmConfidence: null,
+        bpmSource: null,
+      },
+    ]);
+    setActiveTrackId(id);
+    // Don't move the cursor; let the user manually scrub or hit play.
+  };
+
+  const handleRemoveTrack = (trackId) => {
+    const idx = audioTracks.findIndex((t) => t.id === trackId);
+    if (idx === -1) return;
+    if (!window.confirm("Delete this track?")) return;
+    setIsAudioPlaying(false);
+    const isActive = trackId === activeTrackId;
+    const localTimeBefore = activeLocalTime;
+    const nextTracks = audioTracks.filter((t) => t.id !== trackId);
+    writeAudioTracks(nextTracks);
+    if (isActive) {
+      const fallback = nextTracks[idx] || nextTracks[idx - 1] || nextTracks[0];
+      setActiveTrackId(fallback?.id || null);
+      setAudioCurrentTime(0);
+    } else {
+      // Re-anchor the show cursor so the still-active track keeps its
+      // local position in the song; only the offsets shifted.
+      const newIdx = nextTracks.findIndex((t) => t.id === activeTrackId);
+      if (newIdx >= 0) {
+        const newOffsets = trackOffsets(nextTracks);
+        setAudioCurrentTime((newOffsets[newIdx] || 0) + localTimeBefore);
+      }
+    }
+  };
+
+  const handleReorderTracks = (fromIndex, toIndex) => {
+    if (fromIndex === toIndex) return;
+    if (fromIndex < 0 || toIndex < 0) return;
+    if (fromIndex >= audioTracks.length || toIndex >= audioTracks.length) return;
+    const localTimeBefore = activeLocalTime;
+    const reordered = (() => {
+      const next = [...audioTracks];
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, moved);
+      return next;
+    })();
+    writeAudioTracks(reordered);
+    // Same active track, but its show-offset just changed -- shift the
+    // show cursor by the offset delta so the local position is stable.
+    if (activeTrackId) {
+      const newIdx = reordered.findIndex((t) => t.id === activeTrackId);
+      if (newIdx >= 0) {
+        const newOffsets = trackOffsets(reordered);
+        setAudioCurrentTime((newOffsets[newIdx] || 0) + localTimeBefore);
+      }
+    }
+  };
+
+  const handleAudioPlayChange = (playing) => {
+    setIsAudioPlaying(!!playing);
+  };
+
+  // Local-time emit from the active track's wavesurfer -> show-time.
+  const handleLocalTimeUpdate = (localSec) => {
+    if (!isFinite(localSec) || localSec < 0) return;
+    setAudioCurrentTime(activeTrackOffset + localSec);
+  };
+
+  // Per-track duration reported by each TrackPlayer's wavesurfer 'ready'.
+  // Fires for every track regardless of which is active, since all of
+  // them stay mounted. The dedupe avoids a feedback loop through
+  // writeAudioTracks → render → effect when the value hasn't moved.
+  const handleTrackDurationKnown = (trackId, durationSec) => {
+    if (!trackId || !Number.isFinite(durationSec) || durationSec <= 0) return;
+    const cur = audioTracks.find((t) => t.id === trackId);
+    if (cur && Math.abs((cur.durationSec || 0) - durationSec) < 0.05) return;
+    patchTrack(trackId, { durationSec });
+  };
+
+  // Active TrackPlayer's wavesurfer 'finish'. Auto-advance to the next
+  // track. The next TrackPlayer is already mounted and warm (its audio
+  // has been decoded since the song was added), so promoting it to
+  // active immediately starts playback with no fetch / decode wait --
+  // the gap users hear is essentially just one React commit.
+  const handleActiveTrackEnded = () => {
+    if (activeTrackIndex < 0) return;
+    const nextIdx = activeTrackIndex + 1;
+    if (nextIdx >= audioTracks.length) {
+      setIsAudioPlaying(false);
+      return;
+    }
+    setActiveTrackId(audioTracks[nextIdx].id);
+    setAudioCurrentTime(audioOffsets[nextIdx] || 0);
+  };
+
+  // Show cursor moved (e.g. user clicked the timeline). If the new time
+  // falls in a different track, switch to that track. The active
+  // wavesurfer's seek effect handles the local-time delta.
+  const handleShowCursorChange = (showSec) => {
+    if (!isFinite(showSec) || showSec < 0) return;
+    setAudioCurrentTime(showSec);
+    if (audioTracks.length === 0) return;
+    const hit = trackAtShowTime(audioTracks, showSec);
+    if (hit && hit.track.id !== activeTrackId) {
+      setActiveTrackId(hit.track.id);
+    }
   };
 
   // Save receiver locations to show data
@@ -2351,30 +2881,53 @@ const ShowBuilder = (props) => {
       />
       {availableDevices && Object.keys(availableDevices).length > 0 ? (
         <div>
-          {/* Audio Waveform */}
-          <AudioWaveform
-            onTimeUpdate={handleAudioTimeUpdate}
-            currentTime={audioCurrentTime}
-            duration={audioDuration}
-            isPlaying={isAudioPlaying}
-            onPlayPause={handleAudioPlayPause}
-            onAudioFileChange={handleAudioFileChange}
-            bpmInfo={bpmInfo}
-            onBpmInfoChange={handleBpmInfoChange}
-            onAudioDurationChange={setAudioDuration}
-          />
-          {audioFile && (
-            <div className="mb-2 flex justify-end">
-              <Button
-                size="sm"
-                variant="ghost"
-                className="text-fg-muted hover:text-danger"
-                onClick={handleRemoveAudio}
-              >
-                Remove audio
-              </Button>
-            </div>
-          )}
+          {/* Audio editor: tab strip + per-track waveform/BPM card. */}
+          <div className="mb-4">
+            <AudioTrackTabs
+              tracks={audioTracks}
+              activeTrackId={activeTrackId}
+              audioOffsets={audioOffsets}
+              onSelect={(id) => {
+                setActiveTrackId(id);
+                const idx = audioTracks.findIndex((t) => t.id === id);
+                if (idx >= 0) setAudioCurrentTime(audioOffsets[idx] || 0);
+              }}
+              onAdd={handleAddTrack}
+              onRemove={handleRemoveTrack}
+              onReorder={handleReorderTracks}
+            />
+            {audioTracks.length > 0 && activeTrack ? (
+              <AudioWaveform
+                tracks={audioTracks}
+                activeTrackId={activeTrackId}
+                localTime={activeLocalTime}
+                isPlaying={isAudioPlaying}
+                onLocalTimeUpdate={handleLocalTimeUpdate}
+                onPlayChange={handleAudioPlayChange}
+                onTrackEnded={handleActiveTrackEnded}
+                onTrackDurationKnown={handleTrackDurationKnown}
+                onAudioFileUploaded={(file) =>
+                  handleTrackFileUpload(activeTrack.id, file)
+                }
+                onBpmInfoChange={(next) =>
+                  handleTrackBpmChange(activeTrack.id, next)
+                }
+                onTrackRemove={
+                  audioTracks.length > 1
+                    ? () => handleRemoveTrack(activeTrack.id)
+                    : undefined
+                }
+                trackLabel={activeTrack.name}
+                isUploading={uploadingForTrackId === activeTrack.id}
+                isAutoDetecting={autoDetectingTrackIds.has(activeTrack.id)}
+              />
+            ) : (
+              <div className="p-4 bg-gray-800 rounded-b-lg border border-t-0 border-gray-700 text-sm text-gray-400">
+                Click <span className="text-gray-200 font-semibold">+ Add track</span>{" "}
+                above to attach an audio file to this show.
+              </div>
+            )}
+          </div>
 
           {selectedItems.length >= 2 && (
             <Card tone="raised" padding="sm" className="mb-3">
@@ -2430,24 +2983,22 @@ const ShowBuilder = (props) => {
             </Button>
           </div>
 
-          <Timeline 
-            items={items} 
-            setItems={setItems} 
-            openAddModal={openAddModal} 
+          <Timeline
+            items={items}
+            setItems={setItems}
+            openAddModal={openAddModal}
             setSelectedItem={(item) => handleItemSelect(item, false)}
             selectedItems={selectedItems}
             onItemSelect={handleItemSelect}
             clearSelection={clearSelection}
             timeCursor={audioCurrentTime}
-            setTimeCursor={setAudioCurrentTime}
+            setTimeCursor={handleShowCursorChange}
             receiverLabels={receiverLabels}
             copyMode={copyMode}
             onCopySourceClick={handleCopySourceClick}
             onCopyPlaceClick={handleCopyPlaceClick}
-            bpm={bpmInfo.bpm}
-            firstBeatOffsetSec={bpmInfo.firstBeatOffsetSec}
-            beatsPerMeasure={bpmInfo.beatsPerMeasure}
-            audioDurationSec={audioDuration}
+            audioTracks={audioTracks}
+            audioDurationSec={totalAudioDuration}
           />
           
           {/* Tabs Section */}
