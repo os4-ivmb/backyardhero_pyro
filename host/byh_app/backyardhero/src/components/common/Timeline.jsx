@@ -1,9 +1,10 @@
 import { INV_COLOR_CODE } from "@/constants";
-import React, { useState, useRef, memo, useEffect } from "react";
+import React, { useState, useRef, memo, useEffect, useMemo } from "react";
 import { FaTrash } from "react-icons/fa6";
 import { FiZoomIn, FiZoomOut } from "react-icons/fi";
 import axios from "axios";
 import { cn } from "@/design";
+import { computeBeatGrid } from "@/utils/bpmAnalyzer";
 
 const Timeline = memo((props) => {
   const [zoom, setZoom] = useState(40); // Zoom level
@@ -125,12 +126,22 @@ const Timeline = memo((props) => {
       console.log('selectedItems', selectedItems);
       console.log('id', id);
       const isMultiSelectDrag = selectedItems.some(item => item.id === parseInt(id));
-      
+      // Hold Alt while dropping to bypass snap (DAW-style override).
+      const snapActive = useBeatsGrid && snapToBeat && !e.altKey;
+
       if (isMultiSelectDrag && selectedItems.length > 1) {
-        // Handle multi-item drag - maintain relative timing
+        // Handle multi-item drag - maintain relative timing.
         const draggedItem = selectedItems.find(item => item.id === parseInt(id));
-        const timeOffset = xform * 2; // Same calculation as single item
-        
+        let timeOffset = xform * 2; // Same calculation as single item
+        // When snap is on, derive the offset from the dragged item's
+        // snapped landing position so all peers shift by the same amount
+        // and keep their relative timing.
+        if (snapActive && draggedItem) {
+          const targetStart = draggedItem.startTime + timeOffset;
+          const snappedStart = snapTimeToBeat(targetStart);
+          timeOffset = snappedStart - draggedItem.startTime;
+        }
+
         setItems((prevItems) =>
           prevItems.map((item) => {
             if (selectedItems.some(selected => selected.id === item.id)) {
@@ -140,14 +151,15 @@ const Timeline = memo((props) => {
           })
         );
       } else {
-        // Single item drag (existing behavior)
+        // Single item drag.
         console.log(items)
         setItems((prevItems) =>
-          prevItems.map((item) =>
-            item.id === parseInt(id)
-              ? { ...item, startTime: item.startTime + (xform*2) }
-              : item
-          )
+          prevItems.map((item) => {
+            if (item.id !== parseInt(id)) return item;
+            const targetStart = item.startTime + (xform * 2);
+            const newStart = snapActive ? snapTimeToBeat(targetStart) : targetStart;
+            return { ...item, startTime: newStart };
+          })
         );
       }
     }
@@ -325,6 +337,84 @@ const Timeline = memo((props) => {
   // only render at multiples of `tickConfig.major` so we don't have label
   // pile-ups at low zoom.
   const tickCount = Math.ceil(maxTime / tickInterval) + 1;
+
+  // Beat grid derived from the show's audio BPM. Cap at the audio
+  // duration when known so a 3-minute song doesn't draw beats out to the
+  // 1-hour timeline edge.
+  const hasBeats = !!(props.bpm && props.bpm > 0);
+  const beatsPerMeasure = props.beatsPerMeasure || 4;
+  const beatPeriodSec = hasBeats ? 60 / props.bpm : 0;
+  const beatGridMaxSec = props.audioDurationSec && props.audioDurationSec > 0
+    ? Math.min(props.audioDurationSec, maxTime)
+    : maxTime;
+  const beatGrid = useMemo(() => {
+    if (!hasBeats) return [];
+    return computeBeatGrid({
+      bpm: props.bpm,
+      firstBeatOffsetSec: props.firstBeatOffsetSec || 0,
+      beatsPerMeasure,
+      maxTimeSec: beatGridMaxSec,
+    });
+  }, [hasBeats, props.bpm, props.firstBeatOffsetSec, beatsPerMeasure, beatGridMaxSec]);
+
+  // Grid mode toggle in the toolbar: "seconds" keeps the existing
+  // mm:ss grid; "beats" replaces the second-grid with measure/beat
+  // gridlines aligned to the song. Default to seconds, but flip to
+  // beats automatically the first time bpm becomes available so a
+  // freshly-detected song "lights up" the grid without an extra click.
+  const [gridMode, setGridMode] = useState("seconds");
+  const initialBeatsAdoptedRef = useRef(false);
+  useEffect(() => {
+    if (hasBeats && !initialBeatsAdoptedRef.current) {
+      setGridMode("beats");
+      initialBeatsAdoptedRef.current = true;
+    }
+    if (!hasBeats) {
+      // BPM cleared -- fall back to seconds and re-arm the auto-adopt.
+      setGridMode("seconds");
+      initialBeatsAdoptedRef.current = false;
+    }
+  }, [hasBeats]);
+
+  const useBeatsGrid = gridMode === "beats" && hasBeats;
+
+  // Snap-to-beat for drag/drop. Only meaningful in beats mode; held in
+  // local state so it persists across drag operations within a session.
+  const [snapToBeat, setSnapToBeat] = useState(false);
+
+  // Quantise an absolute timeline time (seconds) to the nearest beat.
+  // Returns the input unchanged when the grid isn't on or BPM is missing.
+  const snapTimeToBeat = (sec) => {
+    if (!useBeatsGrid || !snapToBeat || !beatPeriodSec) return sec;
+    const offset = props.firstBeatOffsetSec || 0;
+    const n = Math.round((sec - offset) / beatPeriodSec);
+    const snapped = offset + n * beatPeriodSec;
+    return Math.max(0, snapped);
+  };
+
+  // Density culling for the beat grid. With zoom-aware spacing we hide
+  // off-beat lines when they'd be < ~6px apart, hide all beats below
+  // ~3px, and only emit measure number labels when each label has at
+  // least ~28px to itself.
+  const approxPxPerBeat = useMemo(() => {
+    if (!useBeatsGrid) return 0;
+    // The body container width is `100 * zoom` percent of the parent.
+    // We don't know the parent width here so we approximate against a
+    // 1000px reference; the relative comparisons below are what matter.
+    const refPx = 1000 * zoom;
+    return (beatPeriodSec / maxTime) * refPx;
+  }, [useBeatsGrid, beatPeriodSec, zoom]);
+  const showOffBeats = useBeatsGrid && approxPxPerBeat >= 6;
+  const showMeasureLabels = useBeatsGrid && approxPxPerBeat * beatsPerMeasure >= 28;
+  // When measures get really tight (say <12 px), drop every other label.
+  const measureLabelStride = useMemo(() => {
+    if (!showMeasureLabels) return 1;
+    const measurePx = approxPxPerBeat * beatsPerMeasure;
+    if (measurePx >= 80) return 1;
+    if (measurePx >= 40) return 2;
+    if (measurePx >= 28) return 4;
+    return 8;
+  }, [showMeasureLabels, approxPxPerBeat, beatsPerMeasure]);
   return (
     <div className="w-full">
       {/* Zoom controls -- compact, consistent with the rest of the chrome. */}
@@ -349,6 +439,47 @@ const Timeline = memo((props) => {
           >
             <FiZoomIn aria-hidden />
           </button>
+          {/* Grid mode toggle: only relevant once BPM is known. We still
+              render it when not available so the affordance is visible,
+              just disabled with a tooltip explaining why. */}
+          <span className="ml-2 inline-flex items-center gap-1.5">
+            <span className="eyebrow">Grid</span>
+            <select
+              value={gridMode}
+              onChange={(e) => setGridMode(e.target.value)}
+              disabled={!hasBeats}
+              title={
+                hasBeats
+                  ? "Switch the grid lines between seconds and song beats"
+                  : "Detect a BPM on the audio to enable beat gridlines"
+              }
+              className={cn(
+                "h-7 rounded-sm bg-surface-2 border border-border-subtle text-xs text-fg-primary",
+                "px-1.5 pr-5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              )}
+            >
+              <option value="seconds">Seconds</option>
+              <option value="beats" disabled={!hasBeats}>
+                Beats
+              </option>
+            </select>
+          </span>
+          {/* Snap-to-beat toggle. Only meaningful in beats mode and only
+              shown to non-readonly users. Hold Alt during a drop to
+              bypass the snap for fine adjustments. */}
+          {useBeatsGrid && !isReadOnly && (
+            <label
+              className="ml-1 inline-flex items-center gap-1.5 text-xs text-fg-secondary cursor-pointer select-none"
+              title="When on, dragged items snap their start time to the nearest beat. Hold Alt while dropping to bypass."
+            >
+              <input
+                type="checkbox"
+                checked={snapToBeat}
+                onChange={(e) => setSnapToBeat(e.target.checked)}
+              />
+              Snap to beat
+            </label>
+          )}
         </div>
         {!isReadOnly && (
           <div
@@ -363,13 +494,13 @@ const Timeline = memo((props) => {
         )}
       </div>
 
-      {/* Ruler -- thin, single-line, only major-tick labels. */}
+      {/* Ruler -- thin, single-line. Switches between seconds and beats. */}
       <div
         ref={ticksRef}
         className="relative w-full h-7 overflow-hidden bg-surface-inset border-b border-border-subtle"
       >
         <div className="relative h-full" style={{ width: `${100 * zoom}%` }}>
-          {Array.from({ length: tickCount }, (_, i) => {
+          {!useBeatsGrid && Array.from({ length: tickCount }, (_, i) => {
             const t = i * tickInterval;
             const isMajor = (t % tickConfig.major) === 0;
             return (
@@ -389,6 +520,45 @@ const Timeline = memo((props) => {
                     {formatTime(t)}
                   </span>
                 ) : null}
+              </div>
+            );
+          })}
+
+          {/* Beat grid on the ruler. Strong cap on each downbeat with a
+              measure number; lighter half-height ticks on intermediate
+              beats. */}
+          {useBeatsGrid && beatGrid.map((b) => {
+            if (!b.downbeat && !showOffBeats) return null;
+            const left = `${(b.t / maxTime) * 100}%`;
+            const labelVisible =
+              showMeasureLabels &&
+              b.downbeat &&
+              b.measure != null &&
+              ((b.measure - 1) % measureLabelStride === 0);
+            return (
+              <div
+                key={`r-beat-${b.n}`}
+                className="absolute top-0 pointer-events-none"
+                style={{ left, height: "100%" }}
+              >
+                <div
+                  className="absolute top-0"
+                  style={{
+                    width: "1px",
+                    height: b.downbeat ? "100%" : "40%",
+                    background: b.downbeat
+                      ? "rgb(var(--accent) / 0.85)"
+                      : "rgb(var(--accent) / 0.30)",
+                  }}
+                />
+                {labelVisible && (
+                  <span
+                    className="absolute top-1 left-1 text-[10px] font-mono num leading-none whitespace-nowrap"
+                    style={{ color: "rgb(var(--accent))" }}
+                  >
+                    {b.measure}
+                  </span>
+                )}
               </div>
             );
           })}
@@ -418,9 +588,9 @@ const Timeline = memo((props) => {
         onClick={handleTimelineClick}
       >
         <div className="relative h-full" style={{ width: `${100 * zoom}%` }}>
-          {/* Major/minor grid behind items. Drawn as 1-px columns so they
-              don't overlap into a "wall" the way border-left did. */}
-          {Array.from({ length: tickCount }, (_, i) => {
+          {/* Major/minor seconds grid behind items. Drawn as 1-px columns
+              so they don't overlap into a "wall" the way border-left did. */}
+          {!useBeatsGrid && Array.from({ length: tickCount }, (_, i) => {
             const t = i * tickInterval;
             const isMajor = (t % tickConfig.major) === 0;
             // At very low zoom we'd otherwise get hundreds of minor ticks
@@ -435,6 +605,27 @@ const Timeline = memo((props) => {
                   isMajor ? "bg-border-subtle/80" : "bg-border-subtle/30"
                 )}
                 style={{ left: `${(t / maxTime) * 100}%` }}
+              />
+            );
+          })}
+
+          {/* Beat grid in the body. Strong on the downbeat, light on
+              the intermediate beats. Sits above the surface but below
+              items (zIndex 0) so cue bars stay readable. */}
+          {useBeatsGrid && beatGrid.map((b) => {
+            if (!b.downbeat && !showOffBeats) return null;
+            return (
+              <div
+                key={`b-beat-${b.n}`}
+                className="absolute top-0 bottom-0 pointer-events-none"
+                style={{
+                  left: `${(b.t / maxTime) * 100}%`,
+                  width: "1px",
+                  background: b.downbeat
+                    ? "rgb(var(--accent) / 0.55)"
+                    : "rgb(var(--accent) / 0.18)",
+                  zIndex: 0,
+                }}
               />
             );
           })}

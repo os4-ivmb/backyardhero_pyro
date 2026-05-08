@@ -10,6 +10,7 @@ import SpatialLayoutMap from "./SpatialLayoutMap";
 import RacksTab from "./RacksTab";
 import RackShellsSelector from "./RackShellsSelector";
 import WaveSurfer from 'wavesurfer.js';
+import { analyzeAudioFile, bpmFromTapTimes } from "@/utils/bpmAnalyzer";
 import {
   Modal,
   Button,
@@ -20,6 +21,14 @@ import {
   Badge,
   cn,
 } from "@/design";
+
+const DEFAULT_BPM_INFO = {
+  bpm: null,
+  firstBeatOffsetSec: 0,
+  beatsPerMeasure: 4,
+  confidence: null,
+  source: null, // "auto" | "tap" | "manual"
+};
 
 // Item type catalogue surfaced in the Add Item modal. Centralised so the
 // dropdown order stays predictable and labels stay in one place.
@@ -1207,14 +1216,39 @@ const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex,
   );
 };
 
-const AudioWaveform = ({ onTimeUpdate, currentTime, duration, isPlaying, onPlayPause, onAudioFileChange }) => {
+const AudioWaveform = ({
+  onTimeUpdate,
+  currentTime,
+  duration,
+  isPlaying,
+  onPlayPause,
+  onAudioFileChange,
+  bpmInfo,
+  onBpmInfoChange,
+  onAudioDurationChange,
+}) => {
   const waveformRef = useRef(null);
   const wavesurferRef = useRef(null);
   const [audioFile, setAudioFile] = useState(null);
+  // Cache the actual File handle so "Detect BPM" can re-analyse without
+  // re-prompting the user; the parent only stores serialisable metadata.
+  const lastFileRef = useRef(null);
   const [isReady, setIsReady] = useState(false);
   const [localDuration, setLocalDuration] = useState(0);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisError, setAnalysisError] = useState(null);
+  const tapTimesRef = useRef([]);
+  const tapTimeoutRef = useRef(null);
+  const [tapCount, setTapCount] = useState(0);
   const lastUpdateRef = useRef(0);
   const throttleInterval = 100; // Update every 100ms instead of every frame
+
+  const info = { ...DEFAULT_BPM_INFO, ...(bpmInfo || {}) };
+  const patchBpmInfo = (patch) => {
+    if (typeof onBpmInfoChange === "function") {
+      onBpmInfoChange({ ...info, ...patch });
+    }
+  };
 
   useEffect(() => {
     if (waveformRef.current && !wavesurferRef.current) {
@@ -1236,7 +1270,11 @@ const AudioWaveform = ({ onTimeUpdate, currentTime, duration, isPlaying, onPlayP
       wavesurferRef.current.on('ready', () => {
         console.log('WaveSurfer ready');
         setIsReady(true);
-        setLocalDuration(wavesurferRef.current.getDuration());
+        const dur = wavesurferRef.current.getDuration();
+        setLocalDuration(dur);
+        if (typeof onAudioDurationChange === "function") {
+          onAudioDurationChange(dur);
+        }
       });
 
       wavesurferRef.current.on('audioprocess', (currentTime) => {
@@ -1328,11 +1366,22 @@ const AudioWaveform = ({ onTimeUpdate, currentTime, duration, isPlaying, onPlayP
     if (file && file.type.startsWith('audio/')) {
       console.log('Loading file:', file.name);
       setAudioFile(file);
+      lastFileRef.current = file;
+      setAnalysisError(null);
       const url = URL.createObjectURL(file);
       if (wavesurferRef.current) {
         wavesurferRef.current.load(url);
       }
-      
+
+      // New audio invalidates any previously detected/edited BPM. Keep the
+      // beatsPerMeasure preference but drop the timing values.
+      if (typeof onBpmInfoChange === "function") {
+        onBpmInfoChange({
+          ...DEFAULT_BPM_INFO,
+          beatsPerMeasure: info.beatsPerMeasure,
+        });
+      }
+
       // Notify parent component about the audio file
       if (onAudioFileChange) {
         onAudioFileChange({
@@ -1344,6 +1393,62 @@ const AudioWaveform = ({ onTimeUpdate, currentTime, duration, isPlaying, onPlayP
         });
       }
     }
+  };
+
+  const handleDetectBpm = async () => {
+    const file = lastFileRef.current;
+    if (!file) {
+      setAnalysisError("Pick an audio file first.");
+      return;
+    }
+    setIsAnalyzing(true);
+    setAnalysisError(null);
+    try {
+      const result = await analyzeAudioFile(file);
+      patchBpmInfo({
+        bpm: result.bpm,
+        firstBeatOffsetSec: result.firstBeatOffsetSec,
+        confidence: result.confidence,
+        source: "auto",
+      });
+    } catch (err) {
+      console.error("BPM analysis failed:", err);
+      setAnalysisError(err?.message || "BPM analysis failed");
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  const handleTap = () => {
+    const now = performance.now();
+    // Reset the tap series after ~2.5s of inactivity so a new sequence
+    // doesn't get averaged with stale taps.
+    if (tapTimeoutRef.current) clearTimeout(tapTimeoutRef.current);
+    tapTimeoutRef.current = setTimeout(() => {
+      tapTimesRef.current = [];
+      setTapCount(0);
+    }, 2500);
+
+    tapTimesRef.current = [...tapTimesRef.current, now].slice(-8);
+    setTapCount(tapTimesRef.current.length);
+    const bpm = bpmFromTapTimes(tapTimesRef.current);
+    if (bpm && bpm >= 30 && bpm <= 300) {
+      patchBpmInfo({ bpm, source: "tap" });
+    }
+  };
+
+  const handleSetFirstBeatHere = () => {
+    if (!isFinite(currentTime) || currentTime < 0) return;
+    patchBpmInfo({ firstBeatOffsetSec: Number(currentTime.toFixed(3)), source: "manual" });
+  };
+
+  const halveBpm = () => {
+    if (!info.bpm) return;
+    patchBpmInfo({ bpm: Number((info.bpm / 2).toFixed(2)), source: "manual" });
+  };
+  const doubleBpm = () => {
+    if (!info.bpm) return;
+    patchBpmInfo({ bpm: Number((info.bpm * 2).toFixed(2)), source: "manual" });
   };
 
   const handlePlayPause = () => {
@@ -1390,13 +1495,151 @@ const AudioWaveform = ({ onTimeUpdate, currentTime, duration, isPlaying, onPlayP
         ref={waveformRef} 
         className="w-full bg-gray-900 rounded"
       />
-      
+
       {!audioFile && (
         <div className="text-center text-gray-400 text-sm mt-2">
           Upload an MP3 file to sync with your timeline
         </div>
       )}
-      
+
+      {isReady && (
+        <div className="mt-3 rounded border border-gray-700 bg-gray-900/40 p-3">
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-gray-400 mb-1">
+                BPM
+              </label>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={halveBpm}
+                  disabled={!info.bpm}
+                  className="px-2 h-8 text-xs bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-white rounded"
+                  title="Halve BPM"
+                >
+                  ÷2
+                </button>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  className="w-24 h-8 px-2 text-sm bg-gray-700 text-white rounded"
+                  value={info.bpm ?? ""}
+                  placeholder="—"
+                  onChange={(e) => {
+                    const v = parseFloat(e.target.value);
+                    patchBpmInfo({
+                      bpm: Number.isFinite(v) && v > 0 ? v : null,
+                      source: "manual",
+                    });
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={doubleBpm}
+                  disabled={!info.bpm}
+                  className="px-2 h-8 text-xs bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-white rounded"
+                  title="Double BPM"
+                >
+                  ×2
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-gray-400 mb-1">
+                First beat (s)
+              </label>
+              <div className="flex items-center gap-1">
+                <input
+                  type="number"
+                  step="0.01"
+                  className="w-24 h-8 px-2 text-sm bg-gray-700 text-white rounded"
+                  value={info.firstBeatOffsetSec ?? 0}
+                  onChange={(e) => {
+                    const v = parseFloat(e.target.value);
+                    patchBpmInfo({
+                      firstBeatOffsetSec: Number.isFinite(v) ? v : 0,
+                      source: "manual",
+                    });
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={handleSetFirstBeatHere}
+                  className="h-8 px-2 text-xs bg-gray-700 hover:bg-gray-600 text-white rounded whitespace-nowrap"
+                  title="Use the playhead position as the first downbeat"
+                >
+                  Use playhead
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-gray-400 mb-1">
+                Beats / measure
+              </label>
+              <select
+                className="h-8 px-2 text-sm bg-gray-700 text-white rounded"
+                value={info.beatsPerMeasure}
+                onChange={(e) =>
+                  patchBpmInfo({
+                    beatsPerMeasure: parseInt(e.target.value, 10) || 4,
+                  })
+                }
+              >
+                {[2, 3, 4, 5, 6, 7, 8].map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex items-center gap-2 ml-auto">
+              <button
+                type="button"
+                onClick={handleTap}
+                className="h-8 px-3 text-sm bg-gray-700 hover:bg-gray-600 text-white rounded"
+                title="Tap in time with the music to set BPM (resets after 2.5s of inactivity)"
+              >
+                Tap{tapCount > 1 ? ` (${tapCount})` : ""}
+              </button>
+              <button
+                type="button"
+                onClick={handleDetectBpm}
+                disabled={isAnalyzing || !lastFileRef.current}
+                className="h-8 px-3 text-sm bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white rounded"
+              >
+                {isAnalyzing ? "Detecting…" : "Detect BPM"}
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-2 flex items-center gap-3 text-[11px] text-gray-400">
+            {info.source && (
+              <span>
+                source: <span className="text-gray-300">{info.source}</span>
+              </span>
+            )}
+            {info.confidence != null && info.source === "auto" && (
+              <span>
+                confidence:{" "}
+                <span className="text-gray-300">
+                  {(info.confidence * 100).toFixed(0)}%
+                </span>
+              </span>
+            )}
+            {analysisError && (
+              <span className="text-red-400">{analysisError}</span>
+            )}
+            <span className="text-gray-500 ml-auto">
+              Tip: if Detect comes back at half/double the right tempo, hit ×2 or ÷2.
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Debug info */}
       <div className="text-xs text-gray-500 mt-2">
         Ready: {isReady.toString()}, Playing: {isPlaying.toString()}, Duration: {localDuration.toFixed(2)}s
@@ -1575,6 +1818,9 @@ const ShowBuilder = (props) => {
   const [audioCurrentTime, setAudioCurrentTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
+  // BPM/beat-grid info for the loaded audio. Persisted on the show via
+  // showMetadata.audioFile so reopening a saved show restores the grid.
+  const [bpmInfo, setBpmInfo] = useState(DEFAULT_BPM_INFO);
   const [availableDevices, setAvailableDevices] = useState({});
   const [receiverLocations, setReceiverLocations] = useState({});
   const [receiverLabels, setReceiverLabels] = useState({});
@@ -1747,8 +1993,29 @@ const ShowBuilder = (props) => {
       // If editing a show with audio, set the audio file for the player
       if (stagedShow.audioFile) {
         setAudioFile(stagedShow.audioFile);
+        // Hydrate BPM info that was saved alongside the audio file. Older
+        // shows won't have these keys; fall back to defaults.
+        setBpmInfo({
+          ...DEFAULT_BPM_INFO,
+          ...(stagedShow.audioFile.bpm != null
+            ? { bpm: stagedShow.audioFile.bpm }
+            : {}),
+          ...(stagedShow.audioFile.firstBeatOffsetSec != null
+            ? { firstBeatOffsetSec: stagedShow.audioFile.firstBeatOffsetSec }
+            : {}),
+          ...(stagedShow.audioFile.beatsPerMeasure != null
+            ? { beatsPerMeasure: stagedShow.audioFile.beatsPerMeasure }
+            : {}),
+          ...(stagedShow.audioFile.bpmConfidence != null
+            ? { confidence: stagedShow.audioFile.bpmConfidence }
+            : {}),
+          ...(stagedShow.audioFile.bpmSource != null
+            ? { source: stagedShow.audioFile.bpmSource }
+            : {}),
+        });
       } else {
         setAudioFile(null);
+        setBpmInfo(DEFAULT_BPM_INFO);
       }
       
       // Load existing receiver locations from show data
@@ -1794,6 +2061,7 @@ const ShowBuilder = (props) => {
         ...(prev?.protocol ? { protocol: prev.protocol } : {}),
       }));
       setAudioFile(null);
+      setBpmInfo(DEFAULT_BPM_INFO);
       setReceiverLocations({});
       setReceiverLabels({});
     }
@@ -1969,6 +2237,29 @@ const ShowBuilder = (props) => {
   const handleRemoveAudio = () => {
     setShowMetadata(prev => ({ ...prev, audioFile: null }));
     setAudioFile(null);
+    setBpmInfo(DEFAULT_BPM_INFO);
+    setAudioDuration(0);
+  };
+
+  // Mirror BPM info into showMetadata.audioFile so it round-trips through
+  // updateShow + the staged-show reload path. We avoid bumping audioFile
+  // when there isn't one (otherwise we'd resurrect a deleted audio entry).
+  const handleBpmInfoChange = (next) => {
+    setBpmInfo(next);
+    setShowMetadata((prev) => {
+      if (!prev?.audioFile) return prev;
+      return {
+        ...prev,
+        audioFile: {
+          ...prev.audioFile,
+          bpm: next.bpm,
+          firstBeatOffsetSec: next.firstBeatOffsetSec,
+          beatsPerMeasure: next.beatsPerMeasure,
+          bpmConfidence: next.confidence,
+          bpmSource: next.source,
+        },
+      };
+    });
   };
 
   // Save receiver locations to show data
@@ -2068,6 +2359,9 @@ const ShowBuilder = (props) => {
             isPlaying={isAudioPlaying}
             onPlayPause={handleAudioPlayPause}
             onAudioFileChange={handleAudioFileChange}
+            bpmInfo={bpmInfo}
+            onBpmInfoChange={handleBpmInfoChange}
+            onAudioDurationChange={setAudioDuration}
           />
           {audioFile && (
             <div className="mb-2 flex justify-end">
@@ -2150,6 +2444,10 @@ const ShowBuilder = (props) => {
             copyMode={copyMode}
             onCopySourceClick={handleCopySourceClick}
             onCopyPlaceClick={handleCopyPlaceClick}
+            bpm={bpmInfo.bpm}
+            firstBeatOffsetSec={bpmInfo.firstBeatOffsetSec}
+            beatsPerMeasure={bpmInfo.beatsPerMeasure}
+            audioDurationSec={audioDuration}
           />
           
           {/* Tabs Section */}

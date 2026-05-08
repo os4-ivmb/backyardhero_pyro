@@ -124,6 +124,7 @@ export default function ShowControl({
   countdownSeconds,
   isReadyToFire, hasErrors, allReceiversOnline,
   errors,
+  playVideos, onPlayVideosChange,
 }) {
   const { stagedShow, setStagedShow } = useAppStore();
   const { stateData } = useStateAppStore();
@@ -374,6 +375,24 @@ export default function ShowControl({
         {/* Preview cluster: subdued, right-justified. */}
         <div className="ml-auto flex items-center gap-2">
           <MiniWave audioFile={stagedShow?.audioFile} isPlaying={isPlaying || audioIsPlaying} />
+          <label
+            className={cn(
+              "inline-flex items-center gap-1.5 text-xs select-none",
+              previewDisabled
+                ? "text-fg-muted cursor-not-allowed"
+                : "text-fg-secondary cursor-pointer"
+            )}
+            title="Pop up YouTube previews as cues fire during preview playback"
+          >
+            <input
+              type="checkbox"
+              className="cursor-inherit"
+              checked={!!playVideos}
+              disabled={previewDisabled}
+              onChange={(e) => onPlayVideosChange?.(e.target.checked)}
+            />
+            Play videos
+          </label>
           <IconButton
             label={isPlaying ? "Pause preview" : "Play preview"}
             variant="outline"

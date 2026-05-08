@@ -43,6 +43,11 @@ export default function ConsolePanel() {
   const [vidItems, setVidItems] = useState([]);
   const [countdownSeconds, setCountdownSeconds] = useState(null);
   const [audioIsPlaying, setAudioIsPlaying] = useState(false);
+  // Preview-only setting: whether to pop up the YouTube video previews as
+  // cues fire during a local Play preview. Off by default so the preview
+  // doesn't autoplay videos every time the operator scrubs the show; the
+  // operator opts in via the checkbox in ShowControl.
+  const [playVideos, setPlayVideos] = useState(false);
   const lastUpdateTimeRef = useRef(null);
   const requestRef = useRef(null);
   const countdownIntervalRef = useRef(null);
@@ -226,6 +231,8 @@ export default function ConsolePanel() {
         hasErrors={hasErrors}
         allReceiversOnline={allReceiversOnline}
         errors={errors}
+        playVideos={playVideos}
+        onPlayVideosChange={setPlayVideos}
       />
 
       <ShowHealthStrip />
@@ -237,6 +244,9 @@ export default function ConsolePanel() {
           timeCursor={timeCursor}
           readOnly
           timeCapSeconds={stagedShow.duration}
+          bpm={stagedShow.audioFile?.bpm}
+          firstBeatOffsetSec={stagedShow.audioFile?.firstBeatOffsetSec}
+          beatsPerMeasure={stagedShow.audioFile?.beatsPerMeasure}
         />
       </Card>
 
@@ -245,7 +255,7 @@ export default function ConsolePanel() {
         protoHandlerStatus={stateData.fw_state?.proto_handler_status}
       />
 
-      {vidItems.length ? (
+      {playVideos && vidItems.length ? (
         <VideoPreviewPopup items={vidItems} isVisible={isPlaying && vidItems.length} />
       ) : null}
     </div>
