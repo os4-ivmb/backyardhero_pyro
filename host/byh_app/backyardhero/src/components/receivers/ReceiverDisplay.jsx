@@ -27,7 +27,9 @@ import { isPollableReceiver } from "@/util/receivers";
 // v1.3.0: Added latency scale bar (1s=100%/green, 10s=0%/red) with smooth animations, moved health bar to bottom with percentage text
 // v1.4.0: DB-backed receivers; lock-toggle edit mode (label, enable, cue count); per-receiver retry button; daemon reload on save
 // v1.5.0: Drop the analog freshness bar in favour of a 3-tone status (green/orange/red) keyed off raw seconds, plus a top-level segmented bar with one segment per enabled receiver.
-const FW_VERSION = "1.5.0";
+// v1.5.1: Tighten cue chip sizing and force a 5-wide cue grid on receiver cards.
+// v1.5.2: Use px-3 cue chip padding for a little more breathing room inside the 5-wide grid.
+const FW_VERSION = "1.5.2";
 
 // Discrete freshness tones. Operators were misreading the analog bar as
 // "the radio is laggy" when it was just polling cadence; the discrete
@@ -338,7 +340,7 @@ function SingleReceiver({
           ? `Zone ${firstZone} • Cues ${bilusocnCurrent.rangeStart}-${bilusocnCurrent.rangeStart + BILUSOCN_RANGE_LEN - 1}`
           : 'Cues'}
       </b>
-      <div className="flex flex-wrap gap-2 mt-1">
+      <div className="grid grid-cols-5 gap-2 mt-1">
         {firstZone && receiver.cues[firstZone] && receiver.cues[firstZone].map((target, k) => {
           // In the previous version, showMapping was keyed by zone. With a single zone, we assume:
           const item = showMapping?.[firstZone]?.[target]
@@ -361,7 +363,7 @@ function SingleReceiver({
           return (
             <div
               key={k}
-              className={`px-4 py-2 rounded-lg text-sm text-black ${bgClass} cursor-pointer ${borderClass}`}
+              className={`min-w-0 h-10 px-3 rounded-lg text-sm text-black flex items-center justify-center ${bgClass} cursor-pointer ${borderClass}`}
               onClick={(e) => handleTargetClick(target, item, e)}
             >
               {target}
