@@ -10,6 +10,8 @@ import json
 from enum import Enum
 from led_control import *
 
+from .OtaFlashDriver import OtaFlashDriver
+
 # Path for the full per-channel RF scan dump. Kept separate from
 # /data/state because it's bulky (~3KB JSON for 126 channels) and
 # infrequent (only updated on operator-initiated scans).
@@ -92,6 +94,12 @@ class BYHProtocolHandler:
         # deque(maxlen=20) gives us O(1) append + automatic eviction instead of
         # O(n) list.pop(0).
         self.latency_samples = {}  # Key: receiver ident, Value: deque of values
+
+        # OTA flash driver (firmware push from host -> dongle -> receiver).
+        # Single in-flight job at a time; the driver thread enforces this
+        # internally. Lives on the protocol handler so it can share the
+        # dongle's serial connection and pipe events from process_serial_in.
+        self.ota_driver = OtaFlashDriver(parent)
 
         self.load_initial_receiver_cfg()
         print(f"Initialized Protocol {self.protocol}")
@@ -263,6 +271,56 @@ class BYHProtocolHandler:
         )
         return {'registered': registered, 'forgotten': forgotten,
                 'total': len(new_map)}
+
+    # ----- OTA flashing ------------------------------------------------
+    def start_ota_flash(self, ident, image_path, rate=2):
+        """Kick off an OTA flash job for the given receiver.
+
+        image_path is a host filesystem path (typically dropped under
+        /tmp/ota_staging by the Next.js upload handler). We read the
+        bytes here so the driver doesn't need to do filesystem I/O on
+        a worker thread that's also driving real-time radio I/O.
+
+        Refuses if a show is loaded or the system is armed -- the dongle
+        monopolizes the radio during OTA, and any in-flight or queued
+        normal commands would be silently dropped (`scrubQueueForNode`)
+        when the dongle enters flash mode.
+        """
+        if self.show_loaded:
+            return False, "OTA refused: a show is currently loaded."
+        if self.parent.is_armed:
+            return False, "OTA refused: system is armed. Disarm first."
+        if ident not in self.receivers:
+            return False, f"OTA refused: unknown receiver '{ident}'."
+        if self.receivers[ident].get('type') == 'BILUSOCN_433_TX_ONLY':
+            return False, f"OTA refused: '{ident}' is a one-way TX device."
+        if not self.receiver_is_connected(ident):
+            return False, f"OTA refused: '{ident}' is not online."
+
+        try:
+            with open(image_path, 'rb') as f:
+                image = f.read()
+        except (FileNotFoundError, IOError) as e:
+            return False, f"OTA refused: could not read image: {e}"
+
+        ok, msg = self.ota_driver.start_job(
+            ident=ident,
+            image_bytes=image,
+            rate=int(rate),
+            file_name=os.path.basename(image_path),
+        )
+        if ok:
+            self.parent.mark_state_dirty()
+        return ok, msg
+
+    def abort_ota_flash(self):
+        ok, msg = self.ota_driver.abort()
+        if ok:
+            self.parent.mark_state_dirty()
+        return ok, msg
+
+    def get_ota_state(self):
+        return self.ota_driver.snapshot()
 
     def retry_receiver(self, ident):
         """Re-issue registration for a single receiver. Use this when a
@@ -543,8 +601,93 @@ class BYHProtocolHandler:
 
     def process_serial_in(self, msg):
         if(self.parent.debug_mode):
-            print("BYH handler got message to look at")
-            print(msg)
+            if not (msg.startswith('OA ') or msg.startswith('ON ')
+                    or msg.startswith('OS ') or msg.startswith('OP ')):
+                print("BYH handler got message to look at")
+                print(msg)
+        if msg.startswith('OA '):
+            # Compact OTA ACK from dongle hot path:
+            #   OA <idx> <state> <bytes> <attempts>
+            # Avoids JSON overhead for 13k+ per-chunk events.
+            try:
+                _, idx, state, bytes_received, attempts = msg.split()
+                self.ota_driver.feed_event({
+                    'type': 'ota',
+                    'phase': 'ack',
+                    'idx': int(idx),
+                    'state': int(state),
+                    'bytes': int(bytes_received),
+                    'att': int(attempts),
+                })
+            except Exception as e:
+                print(f"OTA: bad compact ack {msg!r}: {e}")
+            return True
+        if msg.startswith('ON '):
+            # Compact OTA NACK:
+            #   ON <idx> <rf_ok> <got_ack> <state> <err> <last> <bytes> <fatal>
+            try:
+                _, idx, rf_ok, got_ack, state, err, last, bytes_received, fatal = msg.split()
+                evt = {
+                    'type': 'ota',
+                    'phase': 'nack',
+                    'idx': int(idx),
+                    'rf_ok': bool(int(rf_ok)),
+                    'got_ack': bool(int(got_ack)),
+                    'state': int(state),
+                    'err': int(err),
+                    'last': int(last),
+                    'bytes': int(bytes_received),
+                }
+                if int(fatal):
+                    evt['fatal'] = 'rx_dropped_ota'
+                self.ota_driver.feed_event(evt)
+            except Exception as e:
+                print(f"OTA: bad compact nack {msg!r}: {e}")
+            return True
+        if msg.startswith('OS '):
+            # Compact OTA per-second heartbeat (FW v14+):
+            #   v14: OS <attempted> <acked> <retries> <last> <bytes_acked> <phase>
+            #   v15: ... <dropped>    -- # serial lines dropped due to
+            #                            USB-CDC TX backpressure
+            # Replaces the full status JSON during OTA so the dongle's
+            # ~256B USB-CDC TX ring buffer doesn't choke under a slow
+            # host. We use it only as a liveness signal -- per-chunk
+            # OA/ON acks are still authoritative for progress.
+            try:
+                parts = msg.split()
+                hb = {
+                    'attempted': int(parts[1]),
+                    'acked':     int(parts[2]),
+                    'retries':   int(parts[3]),
+                    'last':      int(parts[4]),
+                    'bytes':     int(parts[5]) if len(parts) > 5 else 0,
+                    'phase':     int(parts[6]) if len(parts) > 6 else 0,
+                    'dropped':   int(parts[7]) if len(parts) > 7 else 0,
+                }
+                self.ota_driver.feed_heartbeat(hb)
+            except Exception as e:
+                print(f"OTA: bad heartbeat {msg!r}: {e}")
+            return True
+        if msg.startswith('OP '):
+            # Compact OTA pong reply to flash_ping (FW v14+):
+            #   v14: OP <millis> <attempted> <acked> <retries> <last>
+            #   v15: ... <dropped>
+            # Used by OtaFlashDriver to detect a wedged dongle before
+            # escalating recovery levels.
+            try:
+                parts = msg.split()
+                pong = {
+                    'millis':    int(parts[1]),
+                    'att':       int(parts[2]) if len(parts) > 2 else 0,
+                    'acked':     int(parts[3]) if len(parts) > 3 else 0,
+                    'retries':   int(parts[4]) if len(parts) > 4 else 0,
+                    'last':      int(parts[5]) if len(parts) > 5 else 0,
+                    'dropped':   int(parts[6]) if len(parts) > 6 else 0,
+                }
+                self.ota_driver.feed_pong(pong)
+            except Exception as e:
+                print(f"OTA: bad pong {msg!r}: {e}")
+            return True
         if(msg[0] == '{'):
             try:
                 msg_obj = json.loads(msg)
@@ -591,6 +734,17 @@ class BYHProtocolHandler:
                     self.parent.mark_state_dirty()
                 elif(msg_type == 'scan_result'):
                     self._handle_scan_result(msg_obj)
+                elif(msg_type == 'ota'):
+                    # Per-chunk ack/nack and lifecycle events from the
+                    # dongle's flash mode. The driver thread is parked
+                    # on these for synchronization; mark_state_dirty so
+                    # the UI's progress bar advances in real time.
+                    try:
+                        self.ota_driver.feed_event(msg_obj)
+                    except Exception as e:
+                        print(f"OTA: feed_event failed: {e}")
+                    if msg_obj.get('phase') not in ('ack', 'nack'):
+                        self.parent.mark_state_dirty()
             except json.JSONDecodeError as e:
                 print("Bad JSON status")
 

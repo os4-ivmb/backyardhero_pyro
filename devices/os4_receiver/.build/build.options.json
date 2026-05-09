@@ -1,9 +1,0 @@
-{
-  "additionalFiles": "../..,../../..",
-  "compiler.optimization_flags": "-Os",
-  "customBuildProperties": "",
-  "fqbn": "esp32:esp32:lolin_s2_mini:CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,PartitionScheme=default,DebugLevel=none,EraseFlash=none",
-  "hardwareFolders": "/Users/alex/Library/Arduino15/packages/esp32/hardware/esp32/3.1.1,/Users/alex/Library/Arduino15/packages/esp32/hardware/esp32/3.1.1",
-  "otherLibrariesFolders": "/Users/alex/Documents/Arduino/libraries",
-  "sketchLocation": "/Users/alex/proj/firework/backyardhero/devices/os4_receiver"
-}

@@ -2,6 +2,7 @@
 #include <RF24.h>
 #include <Adafruit_NeoPixel.h>
 #include <Preferences.h>
+#include <Update.h>
 
 // FW_VERSION: Firmware version tracking for os4_receiver
 // v1-v4: Historical versions (not documented, dates unknown)
@@ -59,6 +60,58 @@
 //   * Minimum disconnect threshold increased from 5s to 8s.
 //   * Adaptive threshold increased from 5x to 6x observed poll gap.
 //   * Maximum threshold increased from 60s to 90s.
+// v15: 2026-05-XX - OTA flash mode (paired with dongle FW v10+):
+//   * New message types OTA_BEGIN(13) / OTA_DATA(14) / OTA_END(15) /
+//     OTA_ABORT(16) and a piggy-back ACK status RECEIVER_OTA_STATUS(17).
+//   * On OTA_BEGIN we call Update.begin(totalSize), switch the radio to
+//     the high data rate the dongle requested (1Mbps or 2Mbps), and
+//     start streaming chunks straight into the OTA partition via
+//     Update.write(). Each chunk is up to 29 bytes (32B nRF payload -
+//     1B type - 2B chunkIdx); the dongle's auto-retry handles loss.
+//   * On OTA_END we Update.end(true), accept-the-image, and ESP.restart()
+//     -- the bootloader picks the new partition next boot. NVS is
+//     untouched so identity (NODE_ID + RECEIVER_IDENT) survives.
+//   * On OTA_ABORT or any local error, Update.abort() runs and the
+//     radio switches back to the standard 250kbps so the receiver can
+//     resume normal polling without a reboot.
+//   * While the OTA state machine is active, runPlayLoop / animation /
+//     status-LED updates are suspended; the status strip shows a slow
+//     dim-white breathe so the operator can see the unit is being
+//     reflashed. We keep refreshing the ACK payload on every chunk so
+//     the dongle gets up-to-date `bytesReceived` / `lastChunk` /
+//     `state` / `errorCode` for progress reporting up to the host.
+// v16: 2026-05-XX - Boot-time status-LED sequence now encodes FW_VERSION
+//   and NODE_ID as 3-digit decimal numbers across the 3 status LEDs:
+//   * The boot sequence is now three flashes:
+//       1. FW_VERSION (digit-color, breath in/out)
+//       2. Battery level (existing behavior, unchanged: bar count + color)
+//       3. NODE_ID     (digit-color, breath in/out)
+//     The 1st and 3rd used to be a single fixed-purple breath and a
+//     fixed-white fade respectively, neither of which carried any per-
+//     unit information. That made it impossible to tell at a glance
+//     which firmware or which receiver had just powered up -- a real
+//     problem during incremental rollouts and during fleet bring-up.
+//   * For both the version and node-id flashes, each status LED shows
+//     one decimal digit:
+//       LED 0 = hundreds digit
+//       LED 1 = tens digit
+//       LED 2 = ones digit
+//     For example FW v20 -> LED0 red(0), LED1 yellow(2), LED2 red(0);
+//     FW v16 -> LED0 red(0), LED1 red(0), LED2 orange(6). NODE_ID 137
+//     -> LED0 blue(1), LED1 green(3), LED2 white(7).
+//   * Each digit 0..9 maps to a fixed, vivid color chosen so consecutive
+//     digits are maximally distinct (so 1 vs 2 or 7 vs 8 are obvious at
+//     a glance, even if 2 vs 5 could be confused at a distance):
+//       0 red    1 blue   2 yellow 3 green  4 purple
+//       5 cyan   6 orange 7 white  8 pink   9 lime
+//     The LEDs all breathe in/out together at the same brightness curve
+//     the old purple breath used, so the boot "feel" is unchanged --
+//     just informative.
+//   * Only the boot flashes change. The unprovisioned magenta breath, the
+//     show-time animations, and the OTA white breathe are untouched --
+//     those carry distinct semantics that shouldn't be repurposed.
+//     Unprovisioned units (NODE_ID==0) will show all-red(0) on the
+//     node-id flash, then transition into the magenta breath as usual.
 // v14: 2026-05-XX - Move NODE_ID + RECEIVER_IDENT out of firmware and into
 //   NVS (flash-backed Preferences). One firmware binary now serves the
 //   whole fleet; per-unit identity is provisioned over USB serial after
@@ -83,7 +136,7 @@
 //       survives every firmware update unless someone explicitly
 //       erases the chip (e.g. `esptool.py erase_flash`).
 #define BOARD_VERISON 9
-#define FW_VERSION 14
+#define FW_VERSION 21
 
 // Runtime identity, populated from NVS in setup(). 0 / "RX???" are the
 // unprovisioned sentinels -- see loadIdentityFromNVS() and the v14 notes
@@ -106,6 +159,17 @@ const bool RECEIVER_USES_V1_CUES = false;
 #define DEBUG_PRINT 0
 #define DBG_PRINT(x)   do { if (DEBUG_PRINT) Serial.print(x);   } while (0)
 #define DBG_PRINTLN(x) do { if (DEBUG_PRINT) Serial.println(x); } while (0)
+
+// OTA-specific debug logging. Independent from DEBUG_PRINT because OTA
+// flash mode is the most common thing operators want serial visibility
+// into (the radio link is opaque from the UI), but it's also useless
+// chatter during normal show operation. Defaults ON in this build so
+// that anyone watching a USB serial console while OTA-flashing this
+// receiver gets a per-event trace of state, errors, and progress
+// without recompiling. Set to 0 if you want a quieter receiver.
+#define OTA_DEBUG 1
+#define OTA_LOG(x)   do { if (OTA_DEBUG) Serial.print(x);   } while (0)
+#define OTA_LOGLN(x) do { if (OTA_DEBUG) Serial.println(x); } while (0)
 
 #if BOARD_VERISON >= 6
   #define RF24_CE_PIN 37
@@ -193,18 +257,93 @@ uint32_t COLOR_FIRING = strip.Color(200, 200, 0);
 uint32_t COLOR_FIRED = strip.Color(0, 0, 255);
 
 enum MessageType {
-  MANUAL_FIRE     = 1,
-  CLOCK_SYNC      = 2,
-  START_LOAD      = 3,
-  SHOW_LOAD       = 4,
-  GENERIC_PLAY    = 5,
-  GENERIC_STOP    = 6,
-  GENERIC_RESET   = 7,
-  GENERIC_PAUSE   = 8,
-  SHOW_START      = 9,
-  RECEIVER_STATUS = 10,
-  SHOW_LOADN      = 11,
-  RESET_DVC       = 12
+  MANUAL_FIRE         = 1,
+  CLOCK_SYNC          = 2,
+  START_LOAD          = 3,
+  SHOW_LOAD           = 4,
+  GENERIC_PLAY        = 5,
+  GENERIC_STOP        = 6,
+  GENERIC_RESET       = 7,
+  GENERIC_PAUSE       = 8,
+  SHOW_START          = 9,
+  RECEIVER_STATUS     = 10,
+  SHOW_LOADN          = 11,
+  RESET_DVC           = 12,
+  OTA_BEGIN           = 13,
+  OTA_DATA            = 14,
+  OTA_END             = 15,
+  OTA_ABORT           = 16,
+  RECEIVER_OTA_STATUS = 17
+};
+
+// ---------------------------------------------------------------------------
+// OTA flash protocol structs. All wire payloads sit comfortably under the
+// 32-byte nRF24 max so they fit a single radio frame. Both sides must
+// match the dongle copy of these structs (see os4_dongle.ino).
+// ---------------------------------------------------------------------------
+
+// dongle -> receiver: enter flash mode. Switching the radio to the
+// requested data rate is deferred until *after* we send the ACK for this
+// frame (the ACK still goes out at the previous rate so the dongle hears
+// it cleanly). dataRate is encoded as: 0 = stay at 250kbps,
+// 1 = RF24_1MBPS, 2 = RF24_2MBPS.
+struct OtaBeginMessage {
+  uint8_t  type;         // OTA_BEGIN
+  uint32_t totalSize;    // bytes in firmware image (Update.begin gets this)
+  uint16_t totalChunks;  // number of OTA_DATA frames the dongle plans to send
+  uint8_t  dataRate;     // 0=250k, 1=1M, 2=2M
+  uint32_t crc32;        // expected CRC32 of the entire image (end-to-end check)
+} __attribute__((packed));
+
+// dongle -> receiver: one slice of firmware. Followed by `len` raw payload
+// bytes (where len = msgSize - sizeof(OtaDataMessage)). chunkIdx is
+// monotonic-increasing across the transfer; receivers reject anything that
+// isn't strictly the next slot to keep the OTA partition write order
+// deterministic (Update.write() is append-only, no seek).
+struct OtaDataMessage {
+  uint8_t  type;       // OTA_DATA
+  uint16_t chunkIdx;   // 0-based index of this chunk within the transfer
+  // Followed by up to (32 - sizeof(this)) bytes of raw firmware data.
+} __attribute__((packed));
+
+struct OtaEndMessage {
+  uint8_t type;        // OTA_END
+} __attribute__((packed));
+
+struct OtaAbortMessage {
+  uint8_t type;        // OTA_ABORT
+} __attribute__((packed));
+
+// receiver -> dongle: fits in the same ACK FIFO as the normal status
+// payload (see refreshAckPayload). The dongle picks the parser based on
+// the leading type byte, so OTA mode and normal mode can interleave
+// without a separate transport.
+struct ReceiverOtaStatusMessage {
+  uint8_t  type;             // RECEIVER_OTA_STATUS
+  uint8_t  state;            // OtaState below
+  uint16_t lastChunk;        // last chunkIdx successfully written
+  uint32_t bytesReceived;    // running total of bytes accepted by Update.write
+  uint8_t  errorCode;        // OtaError below; 0 = none
+  uint8_t  nodeID;           // echoed for sanity
+} __attribute__((packed));
+
+enum OtaState : uint8_t {
+  OTA_STATE_IDLE     = 0,  // not in flash mode
+  OTA_STATE_PREP_OK  = 1,  // OTA_BEGIN accepted, ready to receive chunks
+  OTA_STATE_RUNNING  = 2,  // streaming chunks
+  OTA_STATE_DONE     = 3,  // OTA_END accepted, will reboot
+  OTA_STATE_ERROR    = 4   // aborted, see errorCode
+};
+
+enum OtaError : uint8_t {
+  OTA_ERR_NONE             = 0,
+  OTA_ERR_BEGIN_FAILED     = 1,  // Update.begin() rejected (e.g. no partition / oversize)
+  OTA_ERR_WRITE_FAILED     = 2,  // Update.write() returned short
+  OTA_ERR_OVERSIZE         = 3,  // chunk pushed bytesReceived past totalSize
+  OTA_ERR_END_FAILED       = 4,  // Update.end(true) failed (CRC / signature)
+  OTA_ERR_OOB_CHUNK        = 5,  // chunkIdx not the expected next slot
+  OTA_ERR_HOST_ABORT       = 6,  // host sent OTA_ABORT
+  OTA_ERR_BAD_BEGIN        = 7   // OTA_BEGIN was malformed (bad size / rate)
 };
 
 struct ManualFireMessage {
@@ -270,6 +409,26 @@ struct ReceiverStatusMessage {
 enum AnimType { ANIM_NONE = 0, ANIM_PULSING_YELLOW, ANIM_FLASHING_PURPLE, ANIM_SMOOTH_WAVE, ANIM_SMOOTHER_SWEEP };
 AnimType currentAnim = ANIM_NONE;
 uint32_t animStartMs = 0;
+
+// ---------------------------------------------------------------------------
+// OTA runtime state. Populated on OTA_BEGIN, consumed by OTA_DATA / OTA_END.
+// Only PREP_OK/RUNNING/DONE are active flash-mode states. ERROR is just the
+// last failure we report in logs/ACK payloads before returning to normal
+// 250kbps polling.
+// ---------------------------------------------------------------------------
+uint8_t  otaState        = OTA_STATE_IDLE;
+uint8_t  otaError        = OTA_ERR_NONE;
+uint32_t otaTotalSize    = 0;
+uint16_t otaTotalChunks  = 0;
+uint16_t otaLastChunk    = 0xFFFF;     // 0xFFFF = no chunk yet
+uint32_t otaBytesReceived = 0;
+uint32_t otaCrc32Expected = 0;
+uint8_t  otaPendingDataRate = 0;       // applied after we ACK OTA_BEGIN
+uint64_t otaLastActivityMs = 0;
+// Watchdog for stuck OTA: if we go this long without any inbound radio
+// activity in flash mode, abort and return to normal operation so a
+// hung host doesn't strand the receiver.
+#define OTA_INACTIVITY_TIMEOUT_MS 30000UL
 
 RF24 radio(RF24_CE_PIN, RF24_CSN_PIN);
 
@@ -562,6 +721,370 @@ void getBatteryColorRGB(uint8_t batteryLevel, uint8_t *r, uint8_t *g, uint8_t *b
     *g = 255;
     *b = 0;
   }
+}
+
+// ---------------------------------------------------------------------------
+// OTA helpers.
+// ---------------------------------------------------------------------------
+
+// Forward declarations so the inter-OTA-helper call graph compiles in any
+// order Arduino's auto-prototype generator picks. (The serviceOtaLoopIteration
+// driver calls back into updateOtaStatusLEDs which is defined further down.)
+void updateOtaStatusLEDs();
+void serviceOtaLoopIteration();
+
+// Map a wire dataRate byte to the RF24 enum. 0 / unknown -> 250kbps so a
+// malformed OTA_BEGIN can't push the radio into a state we can't recover
+// from over the air.
+rf24_datarate_e otaWireRate(uint8_t b) {
+  if (b == 1) return RF24_1MBPS;
+  if (b == 2) return RF24_2MBPS;
+  return RF24_250KBPS;
+}
+
+bool otaIsActive() {
+  return otaState == OTA_STATE_PREP_OK
+      || otaState == OTA_STATE_RUNNING
+      || otaState == OTA_STATE_DONE;
+}
+
+// Build the OTA-mode ACK payload. Same FIFO slot as buildStatus(), but
+// with a different leading type byte so the dongle's status parser can
+// dispatch on it. We deliberately do not include any of the normal
+// telemetry here; the dongle is operator-pinned to this receiver during
+// OTA and only cares about transfer progress.
+void buildOtaStatus(ReceiverOtaStatusMessage* msg) {
+  msg->type          = RECEIVER_OTA_STATUS;
+  msg->state         = otaState;
+  msg->lastChunk     = otaLastChunk;
+  msg->bytesReceived = otaBytesReceived;
+  msg->errorCode     = otaError;
+  msg->nodeID        = NODE_ID;
+}
+
+// Refresh the ACK payload while we're in flash mode. Mirrors the normal
+// refreshAckPayload() flow: flush the TX FIFO so a stale entry doesn't
+// land on the dongle, then write exactly one fresh status frame so the
+// next inbound command's auto-ACK carries up-to-the-millisecond OTA
+// progress.
+void refreshOtaAckPayload() {
+  ReceiverOtaStatusMessage msg;
+  buildOtaStatus(&msg);
+  radio.flush_tx();
+  radio.writeAckPayload(0, &msg, sizeof(msg));
+  lastAckPayloadRefresh = millis();
+}
+
+// Tear down OTA state on either explicit OTA_ABORT or a local error. We
+// switch the radio back to 250kbps so the receiver re-joins the normal
+// fleet polling without needing a reboot. Update.abort() rolls back the
+// in-progress write so the OTA partition stays in a known state.
+void otaTeardown(uint8_t err) {
+  // Log BEFORE we tear down so the operator can see WHY a transfer
+  // suddenly stopped working from the receiver's side. The dongle has
+  // no visibility into receiver-side errors -- by the time it sees
+  // no_rf_ack, the receiver has already hopped back to 250kbps and
+  // the dongle is stranded.
+  OTA_LOG(F("[OTA] teardown err="));
+  OTA_LOG(err);
+  OTA_LOG(F(" state="));
+  OTA_LOG(otaState);
+  OTA_LOG(F(" lastChunk="));
+  OTA_LOG(otaLastChunk);
+  OTA_LOG(F(" bytes="));
+  OTA_LOGLN(otaBytesReceived);
+
+  if (otaState == OTA_STATE_RUNNING || otaState == OTA_STATE_PREP_OK) {
+    Update.abort();
+  }
+  // Do not leave the receiver parked in OTA_STATE_ERROR. The main loop gates
+  // normal show/radio handling on "active OTA", and if ERROR remains active
+  // the unit never rejoins normal fleet polling. Preserve otaError for logs /
+  // the next ACK payload, but return to IDLE immediately.
+  otaState = OTA_STATE_IDLE;
+  otaError = err;
+  // Restore the standard data rate. The dongle does the same on its
+  // side after timing out / aborting, so the channel is symmetric again.
+  radio.setDataRate(RF24_250KBPS);
+  refreshOtaAckPayload();
+}
+
+// OTA_BEGIN: configure Update for `totalSize` bytes and ready the receiver
+// to ingest chunks. We DO NOT switch the radio data rate here -- the ACK
+// for this very command still has to ride the previous rate so the dongle
+// hears it. Caller (the dispatch loop) hops the rate after refreshing the
+// ACK payload.
+void handleOtaBegin(OtaBeginMessage* msg) {
+  // Reject blatantly bad inputs early. Update.begin() will catch oversize
+  // separately, but a totalSize=0 or totalChunks=0 means the host wire
+  // protocol is wrong and there's nothing to do.
+  if (msg->totalSize == 0 || msg->totalChunks == 0) {
+    otaTeardown(OTA_ERR_BAD_BEGIN);
+    return;
+  }
+  // Idempotent fast-path: the dongle's OTA_BEGIN handshake intentionally
+  // sends OTA_BEGIN twice (once at 250kbps, once at the target rate) so
+  // it can read a fresh PREP_OK ACK out of the second auto-ACK. If we're
+  // already in PREP_OK with matching params, just bump the watchdog --
+  // re-running Update.abort+begin would burn ~10ms of flash erase work
+  // for nothing.
+  if (otaState == OTA_STATE_PREP_OK
+      && otaTotalSize == msg->totalSize
+      && otaTotalChunks == msg->totalChunks
+      && otaCrc32Expected == msg->crc32) {
+    otaPendingDataRate = msg->dataRate;
+    otaLastActivityMs = (uint64_t)millis();
+    return;
+  }
+  // If we were already in OTA mode (different params, or further along),
+  // abort the in-flight write before starting fresh. Lets the operator
+  // re-trigger an OTA without a reboot.
+  if (otaState != OTA_STATE_IDLE) {
+    Update.abort();
+  }
+  otaTotalSize     = msg->totalSize;
+  otaTotalChunks   = msg->totalChunks;
+  otaCrc32Expected = msg->crc32;
+  otaPendingDataRate = msg->dataRate;
+  otaLastChunk     = 0xFFFF;
+  otaBytesReceived = 0;
+  otaError         = OTA_ERR_NONE;
+
+  if (!Update.begin(otaTotalSize)) {
+    OTA_LOG(F("[OTA] Update.begin FAILED size="));
+    OTA_LOG(otaTotalSize);
+    OTA_LOG(F(" UpdateErr="));
+    OTA_LOGLN(Update.getError());
+    otaTeardown(OTA_ERR_BEGIN_FAILED);
+    return;
+  }
+  // Optional: feed the expected CRC to Update so end() can verify. The
+  // ESP32 Update class accepts it via setMD5; we don't have an MD5
+  // handy, but the trailing CRC32 we compute in software still serves
+  // as an end-to-end check.
+  otaState = OTA_STATE_PREP_OK;
+  otaLastActivityMs = (uint64_t)millis();
+  OTA_LOG(F("[OTA] BEGIN ok size="));
+  OTA_LOG(otaTotalSize);
+  OTA_LOG(F(" chunks="));
+  OTA_LOG(otaTotalChunks);
+  OTA_LOG(F(" rate="));
+  OTA_LOGLN(otaPendingDataRate);
+}
+
+// OTA_DATA: append `dataLen` bytes from `data` to the OTA partition.
+// dataLen = msgSize - sizeof(OtaDataMessage). We require chunks to arrive
+// strictly in order (Update.write is append-only); the dongle's RF auto-
+// retry plus its own flash-mode bookkeeping make in-order delivery the
+// natural happy path.
+void handleOtaData(OtaDataMessage* hdr, uint8_t* data, uint8_t dataLen) {
+  if (otaState != OTA_STATE_PREP_OK && otaState != OTA_STATE_RUNNING) {
+    // Got data without a BEGIN -- stale frame, ignore.
+    OTA_LOG(F("[OTA] DATA in wrong state idx="));
+    OTA_LOG(hdr->chunkIdx);
+    OTA_LOG(F(" state="));
+    OTA_LOGLN(otaState);
+    return;
+  }
+
+  uint16_t expectedIdx = (otaLastChunk == 0xFFFF) ? 0 : (uint16_t)(otaLastChunk + 1);
+  if (hdr->chunkIdx != expectedIdx) {
+    // Out-of-order: most likely a duplicate from a retry that we already
+    // applied. Silently re-ack the previous slot rather than tearing
+    // down the whole transfer.
+    if (hdr->chunkIdx == otaLastChunk) {
+      otaLastActivityMs = (uint64_t)millis();
+      return;
+    }
+    OTA_LOG(F("[OTA] OOB_CHUNK got="));
+    OTA_LOG(hdr->chunkIdx);
+    OTA_LOG(F(" expected="));
+    OTA_LOG(expectedIdx);
+    OTA_LOG(F(" lastApplied="));
+    OTA_LOGLN(otaLastChunk);
+    otaTeardown(OTA_ERR_OOB_CHUNK);
+    return;
+  }
+
+  if ((uint32_t)otaBytesReceived + dataLen > otaTotalSize) {
+    OTA_LOG(F("[OTA] OVERSIZE bytes="));
+    OTA_LOG(otaBytesReceived);
+    OTA_LOG(F(" + dataLen="));
+    OTA_LOG(dataLen);
+    OTA_LOG(F(" > totalSize="));
+    OTA_LOGLN(otaTotalSize);
+    otaTeardown(OTA_ERR_OVERSIZE);
+    return;
+  }
+
+  size_t wrote = Update.write(data, dataLen);
+  if (wrote != dataLen) {
+    OTA_LOG(F("[OTA] WRITE_FAILED idx="));
+    OTA_LOG(hdr->chunkIdx);
+    OTA_LOG(F(" wrote="));
+    OTA_LOG((uint32_t)wrote);
+    OTA_LOG(F(" want="));
+    OTA_LOG(dataLen);
+    OTA_LOG(F(" UpdateErr="));
+    OTA_LOGLN(Update.getError());
+    otaTeardown(OTA_ERR_WRITE_FAILED);
+    return;
+  }
+
+  otaBytesReceived += dataLen;
+  otaLastChunk = hdr->chunkIdx;
+  otaState = OTA_STATE_RUNNING;
+  otaLastActivityMs = (uint64_t)millis();
+
+  // Periodic progress. Every 256 chunks (~7KB) is light enough not to
+  // dominate the serial bandwidth even at 2Mbps OTA throughput.
+  if ((hdr->chunkIdx & 0xFF) == 0) {
+    OTA_LOG(F("[OTA] progress idx="));
+    OTA_LOG(hdr->chunkIdx);
+    OTA_LOG(F(" bytes="));
+    OTA_LOG(otaBytesReceived);
+    OTA_LOG(F("/"));
+    OTA_LOGLN(otaTotalSize);
+  }
+}
+
+// OTA_END: commit the image and reboot. After ESP.restart() the bootloader
+// jumps to the freshly-written app partition (Update.end(true) flips the
+// OTA-data sector to point at it). NVS is untouched, so identity carries
+// across the boot.
+void handleOtaEnd() {
+  if (otaState != OTA_STATE_RUNNING && otaState != OTA_STATE_PREP_OK) {
+    OTA_LOG(F("[OTA] END in wrong state state="));
+    OTA_LOGLN(otaState);
+    return;
+  }
+  if (otaBytesReceived != otaTotalSize) {
+    OTA_LOG(F("[OTA] END short bytes="));
+    OTA_LOG(otaBytesReceived);
+    OTA_LOG(F(" want="));
+    OTA_LOGLN(otaTotalSize);
+    otaTeardown(OTA_ERR_END_FAILED);
+    return;
+  }
+  if (!Update.end(true)) {
+    OTA_LOG(F("[OTA] Update.end FAILED UpdateErr="));
+    OTA_LOGLN(Update.getError());
+    otaTeardown(OTA_ERR_END_FAILED);
+    return;
+  }
+  OTA_LOGLN(F("[OTA] END ok -- rebooting"));
+  otaState = OTA_STATE_DONE;
+  otaError = OTA_ERR_NONE;
+  // Refresh the ACK payload so the dongle sees state=DONE on its next
+  // poll, then reboot. We give the radio a beat to drain the in-flight
+  // ACK before pulling the trigger.
+  refreshOtaAckPayload();
+  delay(80);
+  ESP.restart();
+}
+
+// Operator-initiated abort: tear down and resume normal polling at 250kbps
+// without rebooting.
+void handleOtaAbort() {
+  otaTeardown(OTA_ERR_HOST_ABORT);
+}
+
+// Hot-path tick called from loop() while otaState != IDLE. We service
+// the radio aggressively (most frames are OTA_DATA), refresh the OTA
+// ACK after each one, and skip every other expensive thing the normal
+// loop does.
+void serviceOtaLoopIteration() {
+  bool sawAny = false;
+  while (radio.available()) {
+    uint8_t buf[32];
+    uint8_t msgSize = radio.getDynamicPayloadSize();
+    if (msgSize == 0 || msgSize > sizeof(buf)) {
+      radio.flush_rx();
+      break;
+    }
+    radio.read(&buf, msgSize);
+    sawAny = true;
+    uint8_t mType = buf[0];
+    switch (mType) {
+      case OTA_BEGIN:
+        if (msgSize >= sizeof(OtaBeginMessage)) {
+          handleOtaBegin((OtaBeginMessage*)buf);
+          refreshOtaAckPayload();
+          if (otaState == OTA_STATE_PREP_OK) {
+            delay(2);
+            radio.setDataRate(otaWireRate(otaPendingDataRate));
+          }
+        }
+        break;
+      case OTA_DATA: {
+        if (msgSize > sizeof(OtaDataMessage)) {
+          uint8_t dataLen = msgSize - sizeof(OtaDataMessage);
+          handleOtaData((OtaDataMessage*)buf,
+                        buf + sizeof(OtaDataMessage),
+                        dataLen);
+          refreshOtaAckPayload();
+        }
+        break;
+      }
+      case OTA_END:
+        // handleOtaEnd refreshes the ACK and reboots if successful.
+        // If it fails we drop into the error branch and resume normal
+        // operation on the next iteration.
+        handleOtaEnd();
+        if (otaState != OTA_STATE_DONE) {
+          // Update.end failed -- restore radio so we can be polled
+          // normally and the operator can see the failure code.
+          radio.setDataRate(RF24_250KBPS);
+        }
+        refreshOtaAckPayload();
+        break;
+      case OTA_ABORT:
+        handleOtaAbort();
+        refreshOtaAckPayload();
+        break;
+      default:
+        // While OTA is active we ignore non-OTA frames to avoid
+        // half-applying a normal command in the middle of a flash.
+        // The dongle is operator-pinned to us during this window
+        // anyway, so nothing else should be coming in.
+        break;
+    }
+  }
+  if (sawAny) {
+    otaLastActivityMs = (uint64_t)millis();
+  }
+
+  // Watchdog: if the host wedges mid-transfer we don't want to be
+  // permanently parked at 2Mbps with no fleet polling. Tear down
+  // gracefully and resume normal operation.
+  if (otaState == OTA_STATE_PREP_OK || otaState == OTA_STATE_RUNNING) {
+    if ((uint64_t)millis() - otaLastActivityMs > OTA_INACTIVITY_TIMEOUT_MS) {
+      otaTeardown(OTA_ERR_HOST_ABORT);
+    }
+  }
+
+  updateOtaStatusLEDs();
+  // Tight wait so we don't busy-spin the CPU while idle between chunks.
+  delay(1);
+}
+
+// Driven from the main loop while otaState != IDLE: paints all three
+// status LEDs at a low pulsing white so the operator can see the unit
+// is being reflashed, with a green tinge once we've committed.
+void updateOtaStatusLEDs() {
+  uint32_t cyc = millis() % 1500;
+  uint8_t b = (cyc < 750) ? (uint8_t)((cyc * 90) / 750)
+                          : (uint8_t)(((1500 - cyc) * 90) / 750);
+  uint32_t color = statusStrip.Color(b, b, b);
+  if (otaState == OTA_STATE_DONE) {
+    color = statusStrip.Color(0, b, 0);
+  } else if (otaState == OTA_STATE_ERROR) {
+    color = statusStrip.Color(b, 0, 0);
+  }
+  for (int i = 0; i < STATUS_LED_COUNT; i++) {
+    statusStrip.setPixelColor(i, color);
+  }
+  statusStrip.show();
 }
 
 // Build a fresh ReceiverStatusMessage capturing current state. This is the
@@ -880,25 +1403,74 @@ void testLEDStrip_pulsingGreen() {
   strip.show();
 }
 
-void statusLEDStartupSequence() {
-  int purpleSteps = 50;
-  int purpleDelay = 15;
-  for (int j = 0; j <= purpleSteps; j++) {
-    uint8_t b = (j * 255) / purpleSteps;
-    for (int i = 0; i < STATUS_LED_COUNT; i++) statusStrip.setPixelColor(i, statusStrip.Color(b, 0, b));
+// Fixed palette mapping decimal digits 0..9 -> a vivid NeoPixel color.
+// Ordering chosen so that consecutive digits are maximally distinct
+// (red->blue->yellow->green->purple->cyan->orange->white->pink->lime),
+// which is what matters when reading FW_VERSION off the 3 status LEDs
+// (see v16 history note). Stored in {R, G, B} order; converted to a
+// packed 32-bit color at use time so STATUS_LED_COUNT can change without
+// touching this table.
+static const uint8_t FW_DIGIT_COLORS[10][3] = {
+  {255,   0,   0},  // 0 red
+  {  0,   0, 255},  // 1 blue
+  {255, 200,   0},  // 2 yellow
+  {  0, 255,   0},  // 3 green
+  {180,   0, 255},  // 4 purple
+  {  0, 255, 255},  // 5 cyan
+  {255,  80,   0},  // 6 orange
+  {255, 255, 255},  // 7 white
+  {255,   0, 120},  // 8 pink
+  {160, 255,   0},  // 9 lime
+};
+
+// Display a 0..999 number as 3 decimal digits across the 3 status LEDs
+// (LED 0 = hundreds, LED 1 = tens, LED 2 = ones) with a slow breath in
+// and out. Each digit is colored from FW_DIGIT_COLORS so consecutive
+// values are easy to tell apart at a glance. Used by the boot sequence
+// to flash both FW_VERSION and NODE_ID; see v16 history note.
+void breatheStatusDigits(uint16_t value) {
+  uint16_t v = value % 1000;
+  uint8_t digits[STATUS_LED_COUNT];
+  digits[0] = (uint8_t)((v / 100) % 10);   // LED 0: hundreds
+  digits[1] = (uint8_t)((v /  10) % 10);   // LED 1: tens
+  digits[2] = (uint8_t)( v        % 10);   // LED 2: ones
+
+  const int breathSteps = 50;
+  const int breathDelay = 15;
+  for (int j = 0; j <= breathSteps; j++) {
+    uint16_t bb = (j * 255) / breathSteps;
+    for (int i = 0; i < STATUS_LED_COUNT; i++) {
+      const uint8_t* c = FW_DIGIT_COLORS[digits[i]];
+      uint8_t r = (uint8_t)((c[0] * bb) / 255);
+      uint8_t g = (uint8_t)((c[1] * bb) / 255);
+      uint8_t b = (uint8_t)((c[2] * bb) / 255);
+      statusStrip.setPixelColor(i, statusStrip.Color(r, g, b));
+    }
     statusStrip.show();
-    delay(purpleDelay);
+    delay(breathDelay);
   }
-  for (int j = purpleSteps; j >= 0; j--) {
-    uint8_t b = (j * 255) / purpleSteps;
-    for (int i = 0; i < STATUS_LED_COUNT; i++) statusStrip.setPixelColor(i, statusStrip.Color(b, 0, b));
+  for (int j = breathSteps; j >= 0; j--) {
+    uint16_t bb = (j * 255) / breathSteps;
+    for (int i = 0; i < STATUS_LED_COUNT; i++) {
+      const uint8_t* c = FW_DIGIT_COLORS[digits[i]];
+      uint8_t r = (uint8_t)((c[0] * bb) / 255);
+      uint8_t g = (uint8_t)((c[1] * bb) / 255);
+      uint8_t b = (uint8_t)((c[2] * bb) / 255);
+      statusStrip.setPixelColor(i, statusStrip.Color(r, g, b));
+    }
     statusStrip.show();
-    delay(purpleDelay);
+    delay(breathDelay);
   }
   statusStrip.clear();
   statusStrip.show();
+}
+
+void statusLEDStartupSequence() {
+  // 1st flash: FW_VERSION as 3 decimal digits in the digit-color palette.
+  breatheStatusDigits((uint16_t)FW_VERSION);
   delay(100);
 
+  // 2nd flash: battery level (number of lit LEDs = bars; color = level).
   uint8_t batteryLevel = calculateBatteryLevel();
   uint8_t threshold1 = 5 + 82;
   uint8_t threshold2 = 5 + 165;
@@ -924,17 +1496,11 @@ void statusLEDStartupSequence() {
 
   delay(1500);
 
-  int whiteSteps = 50;
-  int whiteDelay = 30;
-  for (int j = 0; j <= whiteSteps; j++) {
-    uint8_t b = (j * 255) / whiteSteps;
-    for (int i = 0; i < STATUS_LED_COUNT; i++) statusStrip.setPixelColor(i, statusStrip.Color(b, b, b));
-    statusStrip.show();
-    delay(whiteDelay);
-  }
-
-  statusStrip.clear();
-  statusStrip.show();
+  // 3rd flash: NODE_ID as 3 decimal digits in the same digit-color palette.
+  // Unprovisioned units (NODE_ID==0) display all-red(0). The full
+  // unprovisioned magenta-breathe pattern still kicks in afterwards from
+  // the main loop, so this is just a heads-up, not the only signal.
+  breatheStatusDigits((uint16_t)NODE_ID);
 }
 
 void updateStatusLEDs() {
@@ -1156,7 +1722,14 @@ void setup() {
   if (BOARD_VERISON >= 8) digitalWrite(SHIFT_OUT_OE, HIGH);
   else                    digitalWrite(SHIFT_OUT_OE, LOW);
 
+  // Same TX-timeout reasoning as the dongle: prevent any Serial.print
+  // (incl. OTA_LOGLN inside the OTA hot path) from blocking the main
+  // loop indefinitely when the host isn't draining USB CDC. 50ms is
+  // long enough to never drop bytes in normal operation, short enough
+  // to keep the radio responsive even if the operator pulled the
+  // serial cable mid-OTA.
   Serial.begin(115200);
+  Serial.setTxTimeoutMs(50);
   delay(1000);
 
   loadIdentityFromNVS();
@@ -1228,6 +1801,9 @@ void setup() {
   Serial.print(F("My name is "));
   Serial.println(RECEIVER_IDENT);
 
+  Serial.print(F("FW Version: "));
+  Serial.println(FW_VERSION);
+
   // Pre-load an initial ACK payload so the very first command we receive can
   // ACK back with current status.
   refreshAckPayload();
@@ -1242,6 +1818,17 @@ void loop() {
   if (!isProvisioned) {
     updateUnprovisionedStatusLEDs();
     delay(10);
+    return;
+  }
+
+  // While we're in OTA flash mode, run a tight inner loop dedicated to
+  // ingesting OTA frames + repainting the OTA status LEDs. Skip the
+  // normal show / poll-gap / disconnect machinery -- if a show was
+  // running it stays running on its loaded schedule (see runPlayLoop
+  // notes in v12), and the operator already gated this off "no show
+  // loaded" on the host side anyway.
+  if (otaIsActive()) {
+    serviceOtaLoopIteration();
     return;
   }
 
@@ -1294,6 +1881,24 @@ void loop() {
         break;
       case RESET_DVC:
         resetSystem();
+        break;
+      case OTA_BEGIN:
+        if (msgSize >= sizeof(OtaBeginMessage)) {
+          handleOtaBegin((OtaBeginMessage*)buf);
+          // Refresh the ACK payload right now so the dongle's read of
+          // this very command carries the OTA prep status. Then hop the
+          // radio data rate to whatever the dongle asked for -- the
+          // ACK has already gone out at the previous (negotiated) rate.
+          refreshOtaAckPayload();
+          if (otaState == OTA_STATE_PREP_OK) {
+            delay(2);  // let the radio drain the ACK before we hop
+            radio.setDataRate(otaWireRate(otaPendingDataRate));
+          }
+          // Skip the normal status refresh / disconnect bookkeeping
+          // below; we're now in OTA mode for the next iteration.
+          lastCmdReceivedMs = (uint64_t)millis();
+          continue;
+        }
         break;
       default:
         DBG_PRINT("Unknown message type: ");

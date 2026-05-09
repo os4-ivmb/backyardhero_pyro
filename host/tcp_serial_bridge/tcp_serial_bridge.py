@@ -16,6 +16,62 @@ TCP_PORT = 9000
 serial_conn = None
 serial_lock = threading.Lock()
 
+# Auto-reconnect bookkeeping. The dongle may reboot during operation
+# (e.g. its hardware task watchdog firing during a hostile OTA RF link,
+# or the operator unplug/replug). On macOS, the /dev/tty.usbmodem* path
+# usually stays the same across a reboot -- we just need to wait ~1-3s
+# for re-enumeration and re-open it. Without this, every dongle reboot
+# turned into "bridge spams 'Errno 6: Device not configured' until
+# someone restarts the bridge", and the OTA driver had no path back to
+# the dongle.
+RECONNECT_BACKOFF_S      = 1.0   # initial delay between reconnect attempts
+RECONNECT_BACKOFF_MAX_S  = 5.0   # cap so we keep retrying briskly
+_last_reconnect_attempt  = 0.0   # monotonic timestamp of last attempt
+_consecutive_failures    = 0
+
+def _try_auto_reopen():
+    """Attempt to re-open the serial port using the last-known config.
+
+    Throttled so we don't spin in a tight loop while the dongle is
+    physically gone. Safe to call from either the read or write thread;
+    the serial_lock + idempotent close serialize concurrent calls.
+    """
+    global serial_conn, _last_reconnect_attempt, _consecutive_failures
+
+    now = time.monotonic()
+    backoff = min(RECONNECT_BACKOFF_MAX_S,
+                  RECONNECT_BACKOFF_S * (1 + _consecutive_failures))
+    if now - _last_reconnect_attempt < backoff:
+        return False
+    _last_reconnect_attempt = now
+
+    with serial_lock:
+        if serial_conn:
+            try:
+                serial_conn.close()
+            except Exception:
+                pass
+            serial_conn = None
+        try:
+            serial_conn = serial.Serial(
+                SERIAL_CONFIG['port'],
+                SERIAL_CONFIG['baud'],
+                timeout=1,
+            )
+            print(f"Serial auto-reconnected: {SERIAL_CONFIG['port']} "
+                  f"after {_consecutive_failures} failed attempt(s)")
+            _consecutive_failures = 0
+            return True
+        except Exception as e:
+            _consecutive_failures += 1
+            # Log first failure + one every ~10s so the operator can
+            # see something but the log isn't flooded.
+            if _consecutive_failures == 1 or (_consecutive_failures % 10) == 0:
+                print(f"Serial auto-reconnect attempt "
+                      f"{_consecutive_failures} failed: {e}")
+            serial_conn = None
+            return False
+
 def reconnect_serial(client_socket):
     """Reconnect to the serial port with current settings"""
     global serial_conn
@@ -95,18 +151,74 @@ def process_command(command_data, client_socket):
         return False
 
 def serial_to_tcp(client):
-    """Forward data from serial to TCP client"""
+    """Forward data from serial to TCP client.
+
+    NOTE: We deliberately read only what's already in pyserial's input buffer
+    (`in_waiting`) instead of `serial_conn.read(N)` with a long timeout.
+
+    pyserial's `read(N)` on POSIX loops on `select+os.read` until either N
+    bytes accumulate or the configured `serial_conn.timeout` expires. With
+    `timeout=1` and small messages (e.g. an 80-byte OTA ack), a single
+    `read(8192)` will hold the lock for nearly a full second waiting for the
+    buffer to fill. While we hold `serial_lock`, `tcp_to_serial` cannot
+    write the next outbound command -- that turned the OTA chunk loop into
+    a ~2 Hz round-trip.
+
+    By polling `in_waiting` we hold the lock for microseconds per iteration,
+    which lets the OTA path (and high-rate command bursts in general) run
+    at the dongle's actual radio cadence.
+    """
     global serial_conn
-    
+    POLL_INTERVAL_S = 0.001   # 1ms idle poll -- plenty fast for full-speed USB CDC
+    last_disconnect_log = 0.0
     try:
         while True:
-            if serial_conn and serial_conn.is_open:
+            if not (serial_conn and serial_conn.is_open):
+                # Try to auto-reopen instead of just waiting passively
+                # for a config_serial command to revive us. The dongle
+                # may have rebooted (WDT, panic, operator replug) and
+                # we want to be back online as soon as it re-enumerates.
+                _try_auto_reopen()
+                time.sleep(0.05)
+                continue
+
+            try:
                 with serial_lock:
-                    data = serial_conn.read(8192)
-                if data:
+                    if not (serial_conn and serial_conn.is_open):
+                        continue
+                    n = serial_conn.in_waiting
+                    if n > 0:
+                        data = serial_conn.read(n)
+                    else:
+                        data = b''
+            except (OSError, serial.SerialException) as e:
+                # Disconnected mid-read. Drop the dead handle, kick off
+                # the auto-reconnect path. Throttle the log line so a
+                # multi-second outage doesn't flood the daemon log.
+                now = time.monotonic()
+                if now - last_disconnect_log > 2.0:
+                    print(f"serial_to_tcp: read error ({e}); "
+                          f"will auto-reconnect")
+                    last_disconnect_log = now
+                with serial_lock:
+                    if serial_conn:
+                        try:
+                            serial_conn.close()
+                        except Exception:
+                            pass
+                        serial_conn = None
+                _try_auto_reopen()
+                time.sleep(0.05)
+                continue
+
+            if data:
+                try:
                     client.sendall(data)
+                except OSError as e:
+                    print(f"serial_to_tcp: client gone: {e}")
+                    return
             else:
-                time.sleep(0.05)  # Don't busy-wait if serial is disconnected
+                time.sleep(POLL_INTERVAL_S)
     except Exception as e:
         print(f"Error in serial_to_tcp: {e}")
 
@@ -132,13 +244,38 @@ def tcp_to_serial(client):
             
             # Not a command or command processing failed, send to serial
             if serial_conn and serial_conn.is_open:
-                with serial_lock:
-                    print(f"Write to conn '{buffer}'")
-                    serial_conn.write(buffer)
-                buffer = b''
+                try:
+                    with serial_lock:
+                        if serial_conn and serial_conn.is_open:
+                            serial_conn.write(buffer)
+                        else:
+                            # Race: closed by serial_to_tcp between
+                            # the outer check and lock acquisition.
+                            raise serial.SerialException("closed mid-write")
+                    buffer = b''
+                except (OSError, serial.SerialException) as e:
+                    # Dongle disappeared between checks. Drop this
+                    # outbound buffer (host will retry the OTA chunk
+                    # via timeout) and let serial_to_tcp's auto-
+                    # reconnect bring the link back.
+                    print(f"tcp_to_serial: write error ({e}); "
+                          f"dropping {len(buffer)}B and continuing")
+                    with serial_lock:
+                        if serial_conn:
+                            try:
+                                serial_conn.close()
+                            except Exception:
+                                pass
+                            serial_conn = None
+                    buffer = b''
             else:
-                # Can't send now, keep in buffer
-                pass
+                # Can't send now -- drop the buffer rather than letting
+                # it grow unbounded while the dongle is offline. Host-
+                # side OTA retry will resend whatever we lose.
+                if buffer:
+                    print(f"tcp_to_serial: serial offline, "
+                          f"dropping {len(buffer)}B")
+                    buffer = b''
                 
     except Exception as e:
         print(f"Error in tcp_to_serial: {e}")

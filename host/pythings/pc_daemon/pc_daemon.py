@@ -486,7 +486,14 @@ class FireworkDaemon:
                 wd=(data + '\n').encode('utf-8')
                 self.tcp_socket.sendall((data + '\n').encode('utf-8'))
                 if(self.debug_enabled()):
-                    print(f"Sent to serial via TCP: '{wd}'")
+                    # Skip echoing OTA chunk bodies to stdout -- a single
+                    # transfer is 13K+ lines of opaque hex which buries
+                    # the rest of the log and (depending on the docker
+                    # log driver) backpressures the daemon's read loop
+                    # enough to wedge serial flow control. The OTA
+                    # driver already emits structured progress events.
+                    if not data.startswith("flash_data "):
+                        print(f"Sent to serial via TCP: '{wd}'")
                 self.last_serial_sent = datetime.now()
                 self.led_handler.update("tx_active", TX_ACTIVE_STATE.TRANSMITTING.value)
             except Exception as e:
@@ -764,6 +771,41 @@ class FireworkDaemon:
                 else:
                     self.send_serial_command(json.dumps({"rf_channel": new_ch}))
                     print(f"set_rf_channel: requested ch={new_ch}")
+            elif command['type'] == 'ota_flash_start':
+                # Operator-initiated OTA firmware flash for a single
+                # receiver. The Next.js upload handler stages the .bin
+                # file at `image_path` (typically under /tmp/ota_staging)
+                # and drops this command. The protocol handler enforces
+                # show-not-loaded / disarmed / receiver-online gating so
+                # the dongle isn't monopolized at a bad time.
+                ident = command.get('ident')
+                image_path = command.get('image_path')
+                rate = int(command.get('rate', 2))
+                if not ident or not image_path:
+                    self.write_error(
+                        "ota_flash_start refused: missing ident or image_path"
+                    )
+                elif not (self.protocol_handler and hasattr(
+                    self.protocol_handler, 'start_ota_flash'
+                )):
+                    self.write_error("ota_flash_start: protocol handler not ready.")
+                else:
+                    ok, msg = self.protocol_handler.start_ota_flash(
+                        ident=ident, image_path=image_path, rate=rate
+                    )
+                    if not ok:
+                        self.write_error(f"ota_flash_start: {msg}")
+                    else:
+                        print(f"ota_flash_start: queued ({msg})")
+            elif command['type'] == 'ota_flash_abort':
+                if not (self.protocol_handler and hasattr(
+                    self.protocol_handler, 'abort_ota_flash'
+                )):
+                    print("ota_flash_abort: protocol handler not ready.")
+                else:
+                    ok, msg = self.protocol_handler.abort_ota_flash()
+                    if not ok:
+                        self.write_error(f"ota_flash_abort: {msg}")
             elif command['type'] == 'scan_radio':
                 # Operator-initiated RF spectrum scan. We refuse if a show
                 # is loaded or the system is armed because the dongle blocks
@@ -1058,6 +1100,15 @@ class FireworkDaemon:
             "sst": self.protocol_handler is not None and self.protocol_handler.show_start_time,
             "receivers": self.protocol_handler is not None and self.protocol_handler.receivers,
             "waiting_for_client_start": self.waiting_for_client_start,
+            # OTA flash mode state (None when no job has ever run).
+            # Mirrors the OtaState snapshot from OtaFlashDriver so the
+            # UI can render a progress bar without a separate fetch.
+            "ota": (
+                self.protocol_handler.get_ota_state()
+                if self.protocol_handler is not None
+                and hasattr(self.protocol_handler, 'get_ota_state')
+                else None
+            ),
             "settings": {
                 "led_brightness": self.led_brightness,
                 "fire_repeat_ct": self.fire_repetition,

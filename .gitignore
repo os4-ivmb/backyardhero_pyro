@@ -16,6 +16,8 @@ host/data/webactstate
 
 **/.DS_Store
 host/byh_app/backyardhero/public/uploads/
+devices/os4_receiver/.build/
+devices/os4_dongle/.build/
 
 
 # Next.js

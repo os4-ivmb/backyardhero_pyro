@@ -13,6 +13,7 @@ import DaemonSettings from "./DaemonSettings";
 import DebugModeToggle from "./DebugModeToggle";
 import ProtocolConfig from "./ProtocolConfig";
 import RFScanPanel from "./RFScanPanel";
+import OtaFlashPanel from "./OtaFlashPanel";
 
 // Settings page. Three top-level tabs:
 //   Dongle    — physical box knobs: LEDs, retransmit count, serial
@@ -139,6 +140,14 @@ function DebugTab() {
         eyebrow="Network heartbeat"
       >
         <DaemonSettings />
+      </SettingCard>
+
+      <SettingCard
+        title="OTA firmware flash"
+        eyebrow="Receiver update"
+        className="lg:col-span-2"
+      >
+        <OtaFlashPanel />
       </SettingCard>
     </div>
   );
