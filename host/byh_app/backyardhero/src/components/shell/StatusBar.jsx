@@ -1,11 +1,18 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import axios from "axios";
 import useStateAppStore from "@/store/useStateAppStore";
 import useAppStore from "@/store/useAppStore";
 import useAppMode from "@/design/useAppMode";
 import { cn, Stat, Dot, IconButton, Badge } from "@/design";
-import { MdRefresh, MdCloseFullscreen, MdOpenInFull, MdSignalWifi4Bar, MdSignalWifiOff } from "react-icons/md";
+import { MdRefresh, MdCloseFullscreen, MdOpenInFull, MdSignalWifi4Bar, MdSignalWifiOff, MdRestartAlt } from "react-icons/md";
 import Toast from "../common/Toast";
 import { isPollableReceiver } from "@/util/receivers";
+
+const DONGLE_DEFAULTS = {
+  addr: "/dev/tty.usbmodem01",
+  baud: 115200,
+  protocol: "BKYD_TS_HYBRID",
+};
 
 // ---------------------------------------------------------------------------
 // StatusBar — single source of truth for "what is the system doing right now"
@@ -106,6 +113,7 @@ export default function StatusBar() {
   const intentionalDisconnectRef = useRef(false);
   const [toasts, setToasts] = useState([]);
   const previousErrorsRef = useRef(new Set());
+  const [restartingDongle, setRestartingDongle] = useState(false);
 
   const scheduleReconnect = useCallback(() => {
     if (intentionalDisconnectRef.current) return;
@@ -255,6 +263,39 @@ export default function StatusBar() {
     }
   }
 
+  // Force-restart the dongle's serial connection on the daemon. This is
+  // the same path TxConfig.jsx's "Apply" button takes -- re-issuing
+  // `select_serial` with the current rf settings causes the daemon to
+  // tear down and re-open the USB serial port and re-init the protocol
+  // (msync, channel sync, etc). Useful when the dongle has gone silent
+  // because USB hiccupped or the firmware crashed and the host hasn't
+  // noticed yet. We surface it inline next to the "Silent" label so the
+  // operator doesn't have to dig into TxConfig and click through Apply.
+  const rfSettings = stateData.fw_state?.settings?.rf || {};
+  const restartDongle = useCallback(async () => {
+    if (restartingDongle) return;
+    setRestartingDongle(true);
+    const payload = {
+      type: "select_serial",
+      device: rfSettings.addr || DONGLE_DEFAULTS.addr,
+      baud: parseInt(rfSettings.baud || DONGLE_DEFAULTS.baud, 10),
+      protocol: rfSettings.protocol || DONGLE_DEFAULTS.protocol,
+    };
+    try {
+      await axios.post("/api/system/cmd_daemon", payload, {
+        headers: { "Content-Type": "application/json" },
+      });
+    } catch (err) {
+      const msg = err?.response?.data?.error || err?.message || "Failed to restart dongle";
+      setToasts((prev) => {
+        const next = [...prev, { id: Date.now() + Math.random(), message: `Dongle restart failed: ${msg}` }];
+        return next.length > MAX_TOASTS ? next.slice(next.length - MAX_TOASTS) : next;
+      });
+    } finally {
+      setRestartingDongle(false);
+    }
+  }, [restartingDongle, rfSettings.addr, rfSettings.baud, rfSettings.protocol]);
+
   // Dongle command-queue saturation. The dongle reports `q`/`qmax` once
   // per second; we render it next to the dongle stat so an operator can
   // tell at a glance "is the radio falling behind on outbound commands?"
@@ -369,18 +410,39 @@ export default function StatusBar() {
                 </span>
               ) : null}
             </div>
-            <span
-              className={cn(
-                "truncate font-medium font-mono text-sm",
-                dongleTone === "danger" && "text-danger-fg",
-                dongleTone === "warn" && "text-warn-fg",
-                dongleTone === "ok" && "text-fg-primary",
-                dongleTone === "neutral" && "text-fg-muted"
-              )}
-              title={dongleLabel}
-            >
-              {dongleLabel}
-            </span>
+            <div className="flex items-center gap-2">
+              <span
+                className={cn(
+                  "truncate font-medium font-mono text-sm",
+                  dongleTone === "danger" && "text-danger-fg",
+                  dongleTone === "warn" && "text-warn-fg",
+                  dongleTone === "ok" && "text-fg-primary",
+                  dongleTone === "neutral" && "text-fg-muted"
+                )}
+                title={dongleLabel}
+              >
+                {dongleLabel}
+              </span>
+              {dongleTone === "danger" && dongleLabel === "Silent" ? (
+                <button
+                  type="button"
+                  onClick={restartDongle}
+                  disabled={restartingDongle}
+                  className={cn(
+                    "inline-flex items-center gap-1 px-1.5 h-5 rounded-sm border text-2xs font-medium transition-colors",
+                    "border-danger/50 text-danger-fg bg-danger-bg hover:bg-danger/20",
+                    "disabled:opacity-60 disabled:cursor-not-allowed"
+                  )}
+                  title={`Re-issue select_serial on ${rfSettings.addr || DONGLE_DEFAULTS.addr} @ ${rfSettings.baud || DONGLE_DEFAULTS.baud}`}
+                >
+                  <MdRestartAlt
+                    className={cn("text-sm", restartingDongle && "animate-spin")}
+                    aria-hidden
+                  />
+                  {restartingDongle ? "Restarting…" : "Restart"}
+                </button>
+              ) : null}
+            </div>
           </div>
           {/* Command-queue saturation -- only shown when the dongle has
               actually reported. While the dongle is silent / unbound the
