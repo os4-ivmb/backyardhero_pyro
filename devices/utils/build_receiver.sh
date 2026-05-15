@@ -10,10 +10,16 @@
 #                                       for first-time / recovery flashes.
 #   os4_receiver_v<N>.partitions.bin -- partition table. Flashed at 0x8000
 #                                       for first-time / recovery flashes.
-#   os4_receiver_v<N>.boot_app0.bin  -- OTA "next-app" pointer. Flashed at
-#                                       0xe000 for first-time / recovery
-#                                       flashes. Static, copied from the
-#                                       arduino-esp32 install.
+#   os4_receiver_v<N>.boot_app0.bin  -- OTA "next-app" pointer. Flashed
+#                                       at 0xe000 on EVERY flash (default
+#                                       and --full) so the chip always
+#                                       boots app0 -- otherwise an
+#                                       app-only flash following an OTA
+#                                       would silently keep booting the
+#                                       OTA'd image in app1. Static,
+#                                       copied from the arduino-esp32
+#                                       install -- byte-identical across
+#                                       FW_VERSIONs.
 #
 # This is exactly the file set the Arduino IDE flashes -- the default
 # ESP32-S2 partition table puts NVS at 0x9000-0xdfff, sandwiched between

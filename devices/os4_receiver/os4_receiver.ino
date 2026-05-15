@@ -112,6 +112,35 @@
 //     those carry distinct semantics that shouldn't be repurposed.
 //     Unprovisioned units (NODE_ID==0) will show all-red(0) on the
 //     node-id flash, then transition into the magenta breath as usual.
+// v22: 2026-05-XX - Receiver-side configuration query/set protocol (paired
+//   with dongle FW v16+):
+//   * Two new message types:
+//       RECEIVER_CONFIG_QUERY    (18) -- dongle -> receiver
+//       RECEIVER_CONFIG_RESPONSE (19) -- receiver -> dongle (ACK payload)
+//   * The query carries a `flags` byte plus per-config fields. Today the
+//     only knob is `fire_duration_ms` (gated by CFG_FLAG_SET_FIRE_DURATION);
+//     more knobs will land in the same struct's reserved space without a
+//     wire-protocol bump. flags=0 is a pure fetch (no settings written).
+//   * The response is a fixed-size 17-byte struct carrying NODE_ID, FW /
+//     board version, NUM_BOARDS / noBoardsDetected / cuesAvailable, and the
+//     persisted fire_duration_ms (plus 8 bytes reserved for future fields).
+//   * cuesAvailable = 0 when no cue boards are detected (noBoardsDetected
+//     true), otherwise NUM_BOARDS * 8 (NUM_LEDS). Reported authoritatively
+//     here so the host UI no longer has to guess from operator-edited cue
+//     counts.
+//   * fire_duration_ms is now persisted in the same NVS namespace as the
+//     identity ("byh_rx", key "fire_dur"), defaulting to 1000ms on a fresh
+//     unit. Replaces the compile-time #define FIRE_MS_DURATION 1000 -- the
+//     host can tune fire pulse width per-receiver without a reflash.
+//   * ACK choreography mirrors the OTA_BEGIN handshake: a query's auto-ACK
+//     fires before the receiver CPU runs (so it carries stale status), then
+//     the receiver loads the CONFIG_RESPONSE into the FIFO and sets a
+//     `configResponsePending` flag. The flag suppresses periodic /
+//     post-command status refreshes from clobbering the response, so any
+//     subsequent inbound command (the dongle queues a CLOCK_SYNC right
+//     after the query) carries the response in its auto-ACK. The flag
+//     auto-clears on the first non-config inbound command, restoring
+//     normal RECEIVER_STATUS piggybacking thereafter.
 // v14: 2026-05-XX - Move NODE_ID + RECEIVER_IDENT out of firmware and into
 //   NVS (flash-backed Preferences). One firmware binary now serves the
 //   whole fleet; per-unit identity is provisioned over USB serial after
@@ -136,7 +165,7 @@
 //       survives every firmware update unless someone explicitly
 //       erases the chip (e.g. `esptool.py erase_flash`).
 #define BOARD_VERISON 9
-#define FW_VERSION 21
+#define FW_VERSION 23
 
 // Runtime identity, populated from NVS in setup(). 0 / "RX???" are the
 // unprovisioned sentinels -- see loadIdentityFromNVS() and the v14 notes
@@ -152,6 +181,27 @@ Preferences identityPrefs;
 static const char* IDENTITY_NS       = "byh_rx";
 static const char* IDENTITY_KEY_ID   = "node_id";
 static const char* IDENTITY_KEY_IDENT = "ident";
+// FW v22: persisted runtime config lives in the same NVS namespace so
+// existing flash/wipe tooling keeps working. Add new keys here as more
+// per-receiver knobs land (kept short -- NVS keys cap at 15 chars).
+static const char* CONFIG_KEY_FIRE_DUR = "fire_dur";
+
+// Default fire-pulse width if NVS is empty (matches the legacy
+// FIRE_MS_DURATION #define so unflashed-config receivers behave
+// identically to older firmware).
+#define DEFAULT_FIRE_DURATION_MS 1000
+// Sanity bounds for incoming fire_duration_ms set requests. Anything
+// shorter than 50ms is unlikely to reliably fire an e-match; anything
+// longer than 5s holds the cue line in the firing state long enough
+// that subsequent cues on the same module won't see it as "available
+// for the next shot" within a typical show. Out-of-range values get
+// clamped before NVS.
+#define FIRE_DURATION_MS_MIN  50
+#define FIRE_DURATION_MS_MAX  5000
+
+// Runtime fire-pulse width. Loaded from NVS in setup(); writable via
+// the RECEIVER_CONFIG_QUERY message (see v22 history note above).
+uint16_t fireDurationMs = DEFAULT_FIRE_DURATION_MS;
 
 const bool RECEIVER_USES_V1_CUES = false;
 
@@ -179,7 +229,9 @@ const bool RECEIVER_USES_V1_CUES = false;
   #define RF24_CSN_PIN 33
 #endif
 
-#define FIRE_MS_DURATION 1000
+// FIRE pulse width is now a runtime value (`fireDurationMs`) backed by NVS
+// instead of the old compile-time #define FIRE_MS_DURATION 1000. See the v22
+// FW_VERSION note up top.
 
 #define LED_PIN 11
 #define STATUS_LED_PIN 17
@@ -188,6 +240,7 @@ const bool RECEIVER_USES_V1_CUES = false;
 #define BOARD_CT_PIN 2
 int NUM_BOARDS = 1;
 int NUM_LEDS = (8 * NUM_BOARDS);
+bool noBoardsDetected = false;
 
 #define SHIFT_OUT_CLOCK 10
 #define SHIFT_OUT_LATCH 9
@@ -257,24 +310,32 @@ uint32_t COLOR_FIRING = strip.Color(200, 200, 0);
 uint32_t COLOR_FIRED = strip.Color(0, 0, 255);
 
 enum MessageType {
-  MANUAL_FIRE         = 1,
-  CLOCK_SYNC          = 2,
-  START_LOAD          = 3,
-  SHOW_LOAD           = 4,
-  GENERIC_PLAY        = 5,
-  GENERIC_STOP        = 6,
-  GENERIC_RESET       = 7,
-  GENERIC_PAUSE       = 8,
-  SHOW_START          = 9,
-  RECEIVER_STATUS     = 10,
-  SHOW_LOADN          = 11,
-  RESET_DVC           = 12,
-  OTA_BEGIN           = 13,
-  OTA_DATA            = 14,
-  OTA_END             = 15,
-  OTA_ABORT           = 16,
-  RECEIVER_OTA_STATUS = 17
+  MANUAL_FIRE              = 1,
+  CLOCK_SYNC               = 2,
+  START_LOAD               = 3,
+  SHOW_LOAD                = 4,
+  GENERIC_PLAY             = 5,
+  GENERIC_STOP             = 6,
+  GENERIC_RESET            = 7,
+  GENERIC_PAUSE            = 8,
+  SHOW_START               = 9,
+  RECEIVER_STATUS          = 10,
+  SHOW_LOADN               = 11,
+  RESET_DVC                = 12,
+  OTA_BEGIN                = 13,
+  OTA_DATA                 = 14,
+  OTA_END                  = 15,
+  OTA_ABORT                = 16,
+  RECEIVER_OTA_STATUS      = 17,
+  RECEIVER_CONFIG_QUERY    = 18,
+  RECEIVER_CONFIG_RESPONSE = 19
 };
+
+// Bit flags for ReceiverConfigSetMessage.flags. flags == 0 is the
+// "pure fetch" case -- the receiver applies nothing and only emits a
+// CONFIG_RESPONSE on the next ACK. New knobs go here as new bit slots so
+// the host can update an arbitrary subset in one frame.
+#define CFG_FLAG_SET_FIRE_DURATION 0x01
 
 // ---------------------------------------------------------------------------
 // OTA flash protocol structs. All wire payloads sit comfortably under the
@@ -403,6 +464,33 @@ struct ReceiverStatusMessage {
   uint64_t cont64_1;
 } __attribute__((packed));
 
+// dongle -> receiver: fetch config (and optionally set values). flags == 0
+// is a no-op write, response-only fetch; bits in `flags` request specific
+// per-field writes. New writable knobs add new flag bits and new field
+// slots; the wire layout stays append-only so older firmware just ignores
+// trailing bytes (msgSize-checked at dispatch time).
+struct ReceiverConfigSetMessage {
+  uint8_t  type;              // RECEIVER_CONFIG_QUERY
+  uint8_t  flags;             // bit 0: SET_FIRE_DURATION (apply fire_duration_ms)
+  uint16_t fire_duration_ms;  // applied when flags & CFG_FLAG_SET_FIRE_DURATION
+} __attribute__((packed));
+
+// receiver -> dongle: piggybacks in the same ACK FIFO as RECEIVER_STATUS.
+// The dongle parses on the leading type byte (RECEIVER_STATUS vs.
+// RECEIVER_CONFIG_RESPONSE) and routes to the right ingestor. `reserved`
+// is intentionally zero-padded for future fields without a wire bump.
+struct ReceiverConfigResponseMessage {
+  uint8_t  type;              // RECEIVER_CONFIG_RESPONSE
+  uint8_t  nodeID;
+  uint8_t  fwVersion;         // FW_VERSION
+  uint8_t  boardVersion;      // BOARD_VERISON
+  uint8_t  numBoards;         // 0 if noBoardsDetected, else detected NUM_BOARDS
+  uint8_t  noBoardsDetected;  // 0 or 1
+  uint8_t  cuesAvailable;     // 0 if noBoardsDetected, else NUM_BOARDS * 8
+  uint16_t fireDurationMs;    // currently-effective fire pulse width (ms)
+  uint8_t  reserved[8];       // future fields; zero-padded for now
+} __attribute__((packed));
+
 // Non-blocking show-time LED animation state machine. Declared near the top
 // of the file so Arduino's auto-prototype generator sees the enum before it
 // emits prototypes for functions that reference it.
@@ -425,6 +513,16 @@ uint32_t otaBytesReceived = 0;
 uint32_t otaCrc32Expected = 0;
 uint8_t  otaPendingDataRate = 0;       // applied after we ACK OTA_BEGIN
 uint64_t otaLastActivityMs = 0;
+
+// True between handling a RECEIVER_CONFIG_QUERY and the next inbound
+// command. While set, refreshAckPayload() and the periodic 250ms
+// refresh both keep the CONFIG_RESPONSE loaded in the ACK FIFO instead
+// of the regular RECEIVER_STATUS, so the dongle's follow-up command
+// (it queues a CLOCK_SYNC right after the query for exactly this
+// reason) carries the response in its auto-ACK. Cleared on the first
+// non-config inbound command -- whatever ACK that command rode away
+// with was the response, and we should resume normal status piggyback.
+bool configResponsePending = false;
 // Watchdog for stuck OTA: if we go this long without any inbound radio
 // activity in flash mode, abort and return to normal operation so a
 // hung host doesn't strand the receiver.
@@ -1126,11 +1224,70 @@ void buildStatus(ReceiverStatusMessage* msg) {
 // flush_tx() on the receiver side affects only outgoing payloads (the
 // auto-ACK queue) and is safe to call any time we own the radio.
 void refreshAckPayload() {
+  // FW v22: while a CONFIG_RESPONSE is sitting in the ACK FIFO waiting
+  // to ride out on the dongle's follow-up command, leave it alone.
+  // Overwriting with RECEIVER_STATUS here would cause the response to
+  // be silently dropped (the dongle would just see a stale status and
+  // never learn about the receiver's NUM_BOARDS / fire_duration / etc).
+  // The flag clears on the first non-config inbound command (see the
+  // dispatch loop), at which point the next refresh restores normal
+  // status piggybacking.
+  if (configResponsePending) return;
+
   ReceiverStatusMessage msg;
   buildStatus(&msg);
   radio.flush_tx();
   radio.writeAckPayload(0, &msg, sizeof(msg));
   lastAckPayloadRefresh = millis();
+}
+
+// FW v22: build the receiver-side configuration snapshot. cuesAvailable
+// is the *physically usable* cue count -- 0 when no boards detected,
+// otherwise NUM_BOARDS * 8. numBoards mirrors that: when no boards are
+// detected we report 0 even though setBoardCount() clamps the runtime
+// NUM_BOARDS to 1 internally for buffer-sizing safety. The host should
+// never have to know about that internal clamp.
+void buildConfigResponse(ReceiverConfigResponseMessage* msg) {
+  memset(msg, 0, sizeof(*msg));
+  msg->type             = RECEIVER_CONFIG_RESPONSE;
+  msg->nodeID           = NODE_ID;
+  msg->fwVersion        = FW_VERSION;
+  msg->boardVersion     = BOARD_VERISON;
+  msg->numBoards        = noBoardsDetected ? 0 : (uint8_t)NUM_BOARDS;
+  msg->noBoardsDetected = noBoardsDetected ? 1 : 0;
+  msg->cuesAvailable    = noBoardsDetected ? 0 : (uint8_t)(NUM_BOARDS * 8);
+  msg->fireDurationMs   = fireDurationMs;
+  // reserved[8] already zeroed by memset above.
+}
+
+// FW v22: load the CONFIG_RESPONSE into the ACK TX FIFO so the dongle's
+// next inbound command (it deliberately queues a CLOCK_SYNC right after
+// the query) carries the response in its auto-ACK. Sets
+// configResponsePending so refreshAckPayload() / the periodic 250ms
+// refresh won't clobber it before the dongle pulls it.
+void loadConfigResponseIntoAck() {
+  ReceiverConfigResponseMessage msg;
+  buildConfigResponse(&msg);
+  radio.flush_tx();
+  radio.writeAckPayload(0, &msg, sizeof(msg));
+  configResponsePending = true;
+  lastAckPayloadRefresh = millis();
+}
+
+// FW v22: handle an incoming RECEIVER_CONFIG_QUERY. flags == 0 is a
+// pure fetch -- we apply nothing and only emit the response. Each set
+// bit in flags requests a corresponding write; today the only knob is
+// SET_FIRE_DURATION. saveFireDurationToNVS() clamps to
+// [FIRE_DURATION_MS_MIN, FIRE_DURATION_MS_MAX] before persisting, so
+// the response always reports the actually-applied (clamped) value
+// rather than what the host requested.
+void handleConfigQuery(ReceiverConfigSetMessage* m) {
+  if (m->flags & CFG_FLAG_SET_FIRE_DURATION) {
+    saveFireDurationToNVS(m->fire_duration_ms);
+    Serial.print(F("Config: fire_duration_ms set to "));
+    Serial.println(fireDurationMs);
+  }
+  loadConfigResponseIntoAck();
 }
 
 // Push one inter-poll gap sample into the ring and return a stability-
@@ -1222,6 +1379,35 @@ void wipeIdentityFromNVS() {
   identityPrefs.begin(IDENTITY_NS, false);
   identityPrefs.clear();
   identityPrefs.end();
+}
+
+// FW v22: persisted runtime config. Lives in the same IDENTITY_NS so
+// `flash_receiver.py` and the WIPEID serial helper continue to work
+// without surgery -- WIPEID intentionally clears these too, matching
+// the existing "factory reset" semantics for a unit. Defaults are
+// applied (in setup()) when the key is missing, so legacy units that
+// have never been configured behave exactly like the old #define.
+
+void loadFireDurationFromNVS() {
+  identityPrefs.begin(IDENTITY_NS, true);  // read-only
+  uint16_t fromNvs = identityPrefs.getUShort(CONFIG_KEY_FIRE_DUR, 0);
+  identityPrefs.end();
+  if (fromNvs >= FIRE_DURATION_MS_MIN && fromNvs <= FIRE_DURATION_MS_MAX) {
+    fireDurationMs = fromNvs;
+  } else {
+    fireDurationMs = DEFAULT_FIRE_DURATION_MS;
+  }
+}
+
+bool saveFireDurationToNVS(uint16_t value) {
+  if (value < FIRE_DURATION_MS_MIN) value = FIRE_DURATION_MS_MIN;
+  if (value > FIRE_DURATION_MS_MAX) value = FIRE_DURATION_MS_MAX;
+  identityPrefs.begin(IDENTITY_NS, false);
+  size_t wrote = identityPrefs.putUShort(CONFIG_KEY_FIRE_DUR, value);
+  identityPrefs.end();
+  if (wrote == 0) return false;
+  fireDurationMs = value;
+  return true;
 }
 
 // Read a single line (CR/LF terminated) from Serial without blocking. Returns
@@ -1324,7 +1510,7 @@ void runPlayLoop() {
             targetFired[i] = true;
             fireChanged = true;
           } else if (targetFiring[i]) {
-            if (millis() - fireStartTime[i] >= FIRE_MS_DURATION) {
+            if (millis() - fireStartTime[i] >= fireDurationMs) {
               targetFiring[i] = false;
               fireChanged = true;
             }
@@ -1578,21 +1764,25 @@ void updateStatusLEDs() {
 
 void setBoardCount() {
   int targetY = analogRead(BOARD_CT_PIN);
-  if (targetY > 8000) {
+  if      (targetY < 1100) NUM_BOARDS = 1;
+  else if (targetY < 1900) NUM_BOARDS = 2;
+  else if (targetY < 2500) NUM_BOARDS = 3;
+  else if (targetY < 3150) NUM_BOARDS = 4;
+  else if (targetY < 3500) NUM_BOARDS = 5;
+  else if (targetY < 4000) NUM_BOARDS = 6;
+  else if (targetY < 4400) NUM_BOARDS = 7;
+  else if (targetY < 5000) NUM_BOARDS = 8;
+  else NUM_BOARDS = 0;
+
+  if(NUM_BOARDS == 0) {
     NUM_BOARDS = 1;
-    NUM_LEDS = (8 * NUM_BOARDS);
+    noBoardsDetected = true;
     DBG_PRINTLN("No Cue board detected. Defaulting to 1");
-  } else {
-    if      (targetY < 1000) NUM_BOARDS = 1;
-    else if (targetY < 1900) NUM_BOARDS = 2;
-    else if (targetY < 2500) NUM_BOARDS = 3;
-    else if (targetY < 3150) NUM_BOARDS = 4;
-    else if (targetY < 3500) NUM_BOARDS = 5;
-    else if (targetY < 4000) NUM_BOARDS = 6;
-    else if (targetY < 4400) NUM_BOARDS = 7;
-    else                     NUM_BOARDS = 8;
-    NUM_LEDS = (8 * NUM_BOARDS);
+  }else{
+    noBoardsDetected = false;
   }
+  NUM_LEDS = (8 * NUM_BOARDS);
+  
 }
 
 void myShiftOut(uint8_t dataPin, uint8_t clockPin, uint8_t bitOrder, uint8_t val) {
@@ -1733,6 +1923,7 @@ void setup() {
   delay(1000);
 
   loadIdentityFromNVS();
+  loadFireDurationFromNVS();
 
   setBoardCount();
 
@@ -1744,6 +1935,7 @@ void setup() {
   Serial.print(F("FW Version: "));    Serial.println(FW_VERSION);
   Serial.print(F("Ident: "));         Serial.println(RECEIVER_IDENT);
   Serial.print(F("NODE_ID: "));       Serial.println(NODE_ID);
+  Serial.print(F("Fire duration: ")); Serial.print(fireDurationMs); Serial.println(F(" ms"));
 
   statusStrip.begin();
   statusStrip.clear();
@@ -1900,11 +2092,30 @@ void loop() {
           continue;
         }
         break;
+      case RECEIVER_CONFIG_QUERY:
+        if (msgSize >= sizeof(ReceiverConfigSetMessage)) {
+          handleConfigQuery((ReceiverConfigSetMessage*)buf);
+          // Skip the normal post-command refreshAckPayload() below --
+          // it would no-op anyway thanks to configResponsePending, but
+          // bail explicitly so the intent is obvious. The response is
+          // already loaded in the ACK FIFO; the next inbound command
+          // (the dongle queues a CLOCK_SYNC right after) will ride it
+          // out and clear the flag.
+          lastCmdReceivedMs = (uint64_t)millis();
+          continue;
+        }
+        break;
       default:
         DBG_PRINT("Unknown message type: ");
         DBG_PRINTLN(mType);
         break;
     }
+
+    // FW v22: any non-config inbound command means the dongle has
+    // already pulled the previously-loaded CONFIG_RESPONSE off the
+    // wire (it rode out in *this* command's auto-ACK). Clear the flag
+    // so refreshAckPayload() below can resume normal status piggyback.
+    if (mType != RECEIVER_CONFIG_QUERY) configResponsePending = false;
 
     // Refresh the ACK payload immediately so the next command's auto-ACK
     // carries fresh status. This replaces the old sendStatus() TX pattern.
@@ -1983,7 +2194,7 @@ void loop() {
   bool doRefresh = false;
   for (uint8_t i = 0; i < 128; i++) {
     if (targetFiring[i]) {
-      if (millis() - fireStartTime[i] >= FIRE_MS_DURATION) {
+      if (millis() - fireStartTime[i] >= fireDurationMs) {
         targetFiring[i] = false;
         doRefresh = true;
       }

@@ -1,5 +1,6 @@
 import { promises as fs } from 'fs';
 import { receiverQueries } from '@/util/sqldb';
+import { getHostInfo } from '@/util/host';
 
 const configPath = '/config/systemcfg.json';
 
@@ -22,6 +23,9 @@ export default async function handler(req, res) {
       const fileContent = await fs.readFile(configPath, 'utf-8');
       const systemConfig = JSON.parse(fileContent);
       systemConfig.receivers = buildReceiversMap();
+      // Surface read-only host info so the UI can gate Pi-only surfaces
+      // (WiFi AP settings, etc.) without a separate round-trip.
+      systemConfig.host = getHostInfo();
       res.status(200).json(systemConfig);
     } catch (error) {
       console.error('Error reading system configuration:', error);
@@ -30,11 +34,14 @@ export default async function handler(req, res) {
   } else if (req.method === 'POST') {
     try {
       const newConfig = req.body;
-      // Don't let writes to systemcfg.json clobber the on-disk receivers
-      // block (which the daemon no longer reads). Strip it before writing —
-      // the table in /data/backyardhero.db is authoritative.
+      // Don't let writes to systemcfg.json clobber server-derived blocks.
+      // `receivers` lives in the DB now (see buildReceiversMap), and `host`
+      // is read-only platform detection -- both should round-trip silently.
       if (newConfig && Object.prototype.hasOwnProperty.call(newConfig, 'receivers')) {
         delete newConfig.receivers;
+      }
+      if (newConfig && Object.prototype.hasOwnProperty.call(newConfig, 'host')) {
+        delete newConfig.host;
       }
       await fs.writeFile(configPath, JSON.stringify(newConfig, null, 2), 'utf-8');
       res.status(200).json({ message: 'System configuration updated successfully' });

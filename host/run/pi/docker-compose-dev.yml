@@ -1,0 +1,48 @@
+# Development compose for Raspberry Pi: builds the image locally on the
+# Pi (slow! 10-15 min the first time) and bind-mounts source so changes
+# rsync'd from a dev box take effect without rebuilds.
+#
+# Use case: iterating on byh_app / pythings / configs while connected to
+# the Pi over SSH. For deploying a stable image use docker-compose.yml.
+#
+# Like the prod Pi file, this binds port 80 (so the friendly URL works
+# from a phone on the AP) and wires up host.docker.internal so the
+# in-container Python daemon can reach the host's TCP-to-serial bridge.
+
+services:
+  firework-system:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: firework-system
+    restart: unless-stopped
+    volumes:
+      - ../../data:/data
+      - ../../config:/config
+      # Dongle-update staging dir, bind-mounted at the same path on
+      # both sides. Next.js (in the container) writes uploaded
+      # firmware bins here; the host-side bridge process reads the
+      # same paths when invoking esptool. Pi's bridge runs natively
+      # outside the container even in dev, so this bind mount is
+      # required for UI-driven dongle updates to work.
+      - /tmp/ota_staging:/tmp/ota_staging
+      - ../../pythings:/app/pythings
+      - ../../byh_app/backyardhero:/app/byh_app/
+      # Anonymous volumes keep the container's own Linux-built
+      # node_modules + .next, so a mac-built better_sqlite3.node can't
+      # leak in through the source bind mount and blow up at require().
+      - /app/byh_app/node_modules
+      - /app/byh_app/.next
+      - ../../supervisord.dev.conf:/etc/supervisor/conf.d/supervisord.conf
+    ports:
+      - "80:1776"    # Friendly URL: http://backyardhero/
+      - "1776:1776"  # Historical URL: http://<host>:1776
+      - "8090:8090"  # WebSocket server
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - SERIAL_PORT=${SERIAL_PORT:-/dev/byh_dongle}
+      - SERIAL_BAUD=115200
+      - LED_STATE_FILE=/data/ledstate
+      - NODE_ENV=development
+    privileged: true

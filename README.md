@@ -16,6 +16,22 @@ Backyard Hero is an open-source firework control system designed for enthusiasts
 
 This project provides the complete software, firmware, and hardware design resources.
 
+## Documentation
+
+Full end-user and developer documentation lives in the project Wiki:
+
+> **[backyardhero wiki](https://github.com/Os4ivmb/backyardhero/wiki)** — getting started by OS, architecture deep-dives, RF protocol details, UI walkthrough, and reference docs.
+
+The Wiki sources are checked into a sibling repo (`backyardhero_pyro.wiki/`). Highlights:
+
+* **[Getting Started](https://github.com/Os4ivmb/backyardhero/wiki/Getting-Started)** — split by [macOS](https://github.com/Os4ivmb/backyardhero/wiki/Getting-Started-macOS), [Linux](https://github.com/Os4ivmb/backyardhero/wiki/Getting-Started-Linux), [Windows](https://github.com/Os4ivmb/backyardhero/wiki/Getting-Started-Windows).
+* **[System Architecture](https://github.com/Os4ivmb/backyardhero/wiki/System-Architecture)** and **[Glossary & Terms](https://github.com/Os4ivmb/backyardhero/wiki/Glossary-and-Terms)**.
+* **[Show Lifecycle](https://github.com/Os4ivmb/backyardhero/wiki/Show-Lifecycle)** and **[Example: end-to-end show](https://github.com/Os4ivmb/backyardhero/wiki/Example-Show-End-to-End)**.
+* **[Receiver firmware](https://github.com/Os4ivmb/backyardhero/wiki/Receiver-Firmware)** and **[Dongle firmware](https://github.com/Os4ivmb/backyardhero/wiki/Dongle-Firmware)** deep-dives.
+* **[Wire protocol](https://github.com/Os4ivmb/backyardhero/wiki/Wire-Protocol-Reference)**, **[Daemon command](https://github.com/Os4ivmb/backyardhero/wiki/Daemon-Command-Reference)**, and **[REST API](https://github.com/Os4ivmb/backyardhero/wiki/API-Reference)** references.
+
+This README is intentionally short — start in the wiki for everything beyond a quickstart.
+
 ## Table of Contents
 
 *   [Images](#images)
@@ -90,7 +106,7 @@ The local web application, runnable on a laptop or a dedicated device like a Ras
 *   **YouTube Video Processing:** Automatically crawl YouTube videos and extract firing profiles by analyzing audio. The system can identify shot timings and optionally populate color information for shells.
 *   **Pyromusical Support:** Upload audio files and synchronize show timing with music. The timeline includes waveform visualization for precise cue placement.
 *   **Advanced Fusing Logic:** The show builder automatically incorporates delays for fused lines in racks, ensuring precise timing based on fuse burn rates.
-*   **Cross-Platform Compatibility:** Designed to run on OSX and Windows (via `start.sh` and `start.bat` respectively in the `host` directory).
+*   **Cross-Platform Compatibility:** Runs on macOS, Linux, and Windows. See per-OS guides in the [Wiki](https://github.com/Os4ivmb/backyardhero/wiki/Getting-Started).
 
 ### Show Control Lifecycle
 
@@ -105,114 +121,61 @@ The system follows a lifecycle for show execution. I learned it from launching r
 4.  **Arming the System:** Before starting, the physical 'start/stop' switch on the dongle must be moved to the 'start' position. (Shows will not load if the switch is not in 'stop').
 5.  **Pre-Launch & Execution:**
     *   Pressing 'Play' in the UI triggers pre-launch checks (continuity, battery levels) on all receivers.
-    *   If checks pass, a synchronized start time (typically T-20 minutes) is sent to all receivers.
-    *   Upon confirmation, the host issues 'play' commands, and the custom receivers take over autonomous execution. This ensures highly precise timing, independent of potential RF interference with the host.
+    *   If checks pass, a synchronized start time (T+25 s by default) is sent to all receivers, and the receivers take over autonomous cue scheduling. If any async receiver hasn't acknowledged readiness by T-10 s the start is aborted.
+    *   By default the dongle's physical 'manual fire' switch must be flipped at T~5 s for the show to actually start ("delegate to client"). This can be disabled in Settings.
+    *   Once running, custom receivers fire from their own internal schedule, independent of host RF — host comms are only used for live telemetry, pause, and stop.
 6.  **Show Monitoring & Safety Abort:**
     *   The show runs according to the programmed sequence.
     *   Flipping the dongle switch to 'stop' or pressing the abort button in the UI immediately halts the show by sending a stop command to all receivers.
-    *   Custom receivers will automatically stop if they lose contact with the host for more than 10 seconds.
+    *   Custom receivers will automatically stop if they lose contact with the host for more than ~10 seconds (adaptive based on recent host poll cadence).
 
 ## Getting Started
 
 ### Prerequisites
 
-*   Docker
-*   Docker Compose
-*   A Unix-based system is currently the primary development target, though Windows support is available via `start.bat`.
+*   Docker + Docker Compose v2
+*   Python 3.9+ (host-side, for the serial bridge)
+*   macOS, Linux, or Windows (each fully supported — see the platform-specific guides in the Wiki)
 
 ### Installation & Setup
 
 1.  **Clone the Repository:**
     ```bash
-    git clone <repository-url> # Replace <repository-url> with the actual URL
-    cd backyardhero # Or your chosen directory name
+    git clone https://github.com/Os4ivmb/backyardhero.git
+    cd backyardhero
     ```
-2.  **System Configuration:**
-    *   The main user configuration file is `host/config/systemcfg.json`.
-    *   **Serial Port (`SERIAL_PORT`):** This is the most critical setting. Identify the correct serial port for your connected dongle and update it in `host/config/systemcfg.json`. While `docker-compose.yml` also defines `SERIAL_PORT`, the `systemcfg.json` file is the recommended place for this user-specific setting.
-    *   **Serial Baud Rate (`SERIAL_BAUD`):** Fixed at `115200` by the dongle hardware; do not change.
-    *   **Add Receivers:** You must add your receivers to `host/config/systemcfg.json` before the system can communicate with them. Each receiver should be listed with its identifier (e.g., "RX161"). The system will only communicate with receivers that are listed in this configuration.
-    
-    **Receiver Configuration Format:**
-    
-    Each receiver entry requires:
-    - **Identifier:** The receiver's unique ID (must match the identifier programmed in the receiver firmware, e.g., "RX161")
-    - **Type:** The receiver type, typically `"BKYD_TS_24_1"` for custom 2.4GHz receivers
-    - **Cues:** An array of cue numbers that this receiver controls
-    
-    **Example: Single 8-Cue Module (8 cues):**
-    ```json
-    "RX161": {
-      "label": "Main Receiver",
-      "type": "BKYD_TS_24_1",
-      "cues": {
-        "RX161": [1, 2, 3, 4, 5, 6, 7, 8]
-      }
-    }
-    ```
-    
-    **Example: Two 8-Cue Modules Chained (16 cues):**
-    ```json
-    "RX162": {
-      "label": "Secondary Receiver",
-      "type": "BKYD_TS_24_1",
-      "cues": {
-        "RX162": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-      }
-    }
-    ```
-    
-    **Example: Four 8-Cue Modules Chained (32 cues):**
-    ```json
-    "RX163": {
-      "label": "Large Receiver Array",
-      "type": "BKYD_TS_24_1",
-      "cues": {
-        "RX163": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
-      }
-    }
-    ```
-    
-    **Important Notes:**
-    - The cue numbers in the array should start at 1 and increment sequentially
-    - The number of cues should match the number of cue modules physically connected to the receiver
-    - Each receiver can support up to 128 cues (16 modules × 8 cues each)
-    - The receiver identifier in the `cues` object key must match the receiver identifier at the top level
-    *   **Privileged Mode (Docker):** If you encounter serial port permission issues, ensure `privileged: true` is active in `host/docker-compose.yml` (it is by default). This grants the Docker container necessary hardware access.
+2.  **Identify your dongle's serial port** (Device Manager on Windows, `ls /dev/tty.usbmodem*` on macOS, `ls /dev/ttyACM*` on Linux). Set this in either `host/config/systemcfg.json`'s `dongle_port`, or the `SERIAL_PORT` env var when launching.
+3.  **Add your receivers** in the UI under **Settings → Receiver Config** after first boot. Receivers are stored in the SQLite database (`/data/backyardhero.db`); `systemcfg.json` only seeds the table on first run if it's empty.
+4.  See **[Connecting the Dongle](https://github.com/Os4ivmb/backyardhero/wiki/Connecting-the-Dongle)** and **[Flashing a Receiver](https://github.com/Os4ivmb/backyardhero/wiki/Flashing-a-Receiver)** for hardware setup.
 
 ### Running the System
 
-1.  Navigate to the `host/` directory:
-    ```bash
-    cd host
-    ```
-2.  Execute the startup script for your OS:
-    *   For OSX/Linux:
-        ```bash
-        ./start.sh
-        ```
-    *   For Windows:
-        ```bash
-        start.bat
-        ```
-    These scripts handle building the Docker images (if not already built) and starting the application stack.
+Each platform has its own folder under `host/run/` with launchers, compose files, and (on Pi) an installer. Pick yours and follow the README inside it.
 
-    > **Note for Development:** If you're developing or trying out the system, `start_dev.sh` (OSX/Linux) or `start_dev.bat` (Windows) may be preferable as they provide development-friendly configurations with hot-reloading and easier debugging.
+| Platform | Folder | Quickstart |
+| --- | --- | --- |
+| **Raspberry Pi** (controller / AP) | [`host/run/pi/`](host/run/pi/README.md) | `sudo host/run/pi/install.sh` (one-shot install + AP + systemd unit) |
+| **macOS** (dev) | [`host/run/osx/`](host/run/osx/README.md) | `host/run/osx/start.sh` (prod) or `start-dev.sh` (hot-reload) |
+| **Windows** (dev) | [`host/run/windows/`](host/run/windows/README.md) | `host\run\windows\start.bat` |
 
-3.  **Access the Web Interface:**
-    Open your web browser and go to `http://localhost:1776`.
+Then open `http://localhost:1776` (or `http://backyardhero/` if you're on the Pi's AP).
+
+For maintainers who need to build and push the prebuilt image, see `host/run/osx/build_and_push_docker.sh` or its Windows equivalent.
+
+See **[Production vs Development Mode](https://github.com/Os4ivmb/backyardhero/wiki/Production-vs-Development-Mode)** for details.
 
 ## Key Files & Directories
 
-*   `host/start.sh` & `host/start.bat`: Master scripts for starting the system on Unix-like systems and Windows, respectively.
-*   `host/start_dev.sh` & `host/start_dev.bat`: Development scripts with hot-reloading and debugging features (recommended for development and testing).
-*   `host/docker-compose.yml`: Defines the Docker services, networks, and volumes.
-*   `host/Dockerfile`: Specifies the build process for the main `firework-system` Docker image.
-*   `host/supervisord.conf`: Configures `supervisord` to manage the Next.js app, WebSocket server, and Python daemon within the container.
-*   `host/config/systemcfg.json`: User-configurable system parameters, primarily the serial port and available devices
-*   `host/byh_app/`: Contains the Next.js frontend web application.
-*   `host/pythings/`: Contains the Python backend (WebSocket server, firework daemon).
-*   `devices/`: Houses all hardware-related files (firmware, CAD, PCB overviews).
+*   `host/run/`: **Per-platform** launchers, compose files, installers. See [`host/run/README.md`](host/run/README.md) for the layout, then jump to your platform's folder.
+*   `host/Dockerfile`: Build recipe for the `firework-system` image (one image, all platforms).
+*   `host/supervisord.conf`, `host/supervisord.dev.conf`: Run *inside* the container; manage the Next.js app, WebSocket server, and Python daemon.
+*   `host/tcp_serial_bridge/tcp_serial_bridge.py`: Host-side bridge from the container's TCP socket to the dongle's USB serial port.
+*   `host/config/systemcfg.json`: System config — serial port, dongle protocol, RF protocol definitions. Receivers live in SQLite.
+*   `host/byh_app/`: Next.js frontend.
+*   `host/pythings/pc_daemon/`: Python firework daemon.
+*   `host/pythings/ws_server/`: Python WebSocket server (state fan-out).
+*   `devices/os4_receiver/`, `devices/os4_dongle/`, `devices/os4_cuemodule/`: Firmware, CAD, PCB.
+*   `devices/utils/`: Receiver/dongle build + flash tooling (`build_receiver.sh`, `flash_receiver.py`, `build_dongle.sh`, `flash_dongle.py`).
 
 ## Target Audience & Community
 

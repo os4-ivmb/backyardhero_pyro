@@ -119,39 +119,19 @@ function ShowLoadout({ setCurrentTab }) {
 
         setReceivers(filteredReceivers);
 
-        // Load existing receiver locations from show data
+        // Load saved receiver geo-positions for this show. SpatialLayoutMap
+        // auto-seeds any missing entries around the chosen map center, so
+        // we don't have to fall back to a hard-coded grid here.
         if (stagedShow.receiver_locations) {
           try {
             const parsedLocations = JSON.parse(stagedShow.receiver_locations);
-            setReceiverLocations(parsedLocations);
+            setReceiverLocations(parsedLocations || {});
           } catch (e) {
             console.error('Failed to parse receiver_locations for show:', stagedShow.id, e);
-            // Initialize with default positions if parsing fails
-            const defaultLocations = {};
-            const receiverKeys = Object.keys(filteredReceivers);
-            receiverKeys.forEach((receiverKey, index) => {
-              const row = Math.floor(index / 3);
-              const col = index % 3;
-              defaultLocations[receiverKey] = {
-                x: 100 + col * 150,
-                y: 100 + row * 150
-              };
-            });
-            setReceiverLocations(defaultLocations);
+            setReceiverLocations({});
           }
         } else {
-          // Initialize with default positions in a grid
-          const defaultLocations = {};
-          const receiverKeys = Object.keys(filteredReceivers);
-          receiverKeys.forEach((receiverKey, index) => {
-            const row = Math.floor(index / 3);
-            const col = index % 3;
-            defaultLocations[receiverKey] = {
-              x: 100 + col * 150,
-              y: 100 + row * 150
-            };
-          });
-          setReceiverLocations(defaultLocations);
+          setReceiverLocations({});
         }
       } else {
         setTargetRcvMap({});
@@ -370,7 +350,10 @@ function ShowLoadout({ setCurrentTab }) {
       .sort((a, b) => a.packName.localeCompare(b.packName));
   }, [stagedShow?.items, racks, inventory]);
 
-  // Save receiver locations to show data
+  // Save receiver locations to show data. The DB column is a TEXT
+  // (JSON-encoded), so we stringify before patching -- keeping the
+  // stagedShow.receiver_locations field in the same shape downstream
+  // consumers (the builder, ShowControl) already expect.
   const saveReceiverLocations = async () => {
     if (!stagedShow.id) {
       alert("Please save the show first before saving receiver locations.");
@@ -380,9 +363,12 @@ function ShowLoadout({ setCurrentTab }) {
     try {
       const updatedShowData = {
         ...stagedShow,
-        receiver_locations: receiverLocations
+        receiver_locations:
+          receiverLocations && Object.keys(receiverLocations).length > 0
+            ? JSON.stringify(receiverLocations)
+            : null,
       };
-      
+
       await updateShow(stagedShow.id, updatedShowData);
       alert("Receiver locations saved successfully!");
     } catch (error) {

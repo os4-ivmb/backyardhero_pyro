@@ -23,9 +23,23 @@ export default function handler(req, res) {
       return res.status(500).json({ error: "Failed to delete show." });
     }
   } else if (req.method === 'PATCH') {
-    const { name, duration, version, runtime_version, display_payload, runtime_payload, authorization_code, protocol, audioFile, receiver_locations, receiver_labels } = req.body;
+    const {
+      name, duration, version, runtime_version,
+      display_payload, runtime_payload,
+      authorization_code, protocol, audioFile,
+      receiver_locations, receiver_labels, show_receivers,
+    } = req.body;
 
-    if (!name || !duration || !version || !runtime_version || !display_payload || !runtime_payload || !authorization_code || !protocol) {
+    // `duration` is allowed to be 0 (an empty show with no items still has a
+    // valid duration of zero seconds), so check explicitly for a finite
+    // non-negative number rather than truthiness.
+    const durationNum = Number(duration);
+    if (
+      !name || !version || !runtime_version ||
+      !display_payload || !runtime_payload ||
+      !authorization_code || !protocol ||
+      !Number.isFinite(durationNum) || durationNum < 0
+    ) {
       return res.status(400).json({ error: 'All fields are required.' });
     }
 
@@ -44,6 +58,7 @@ export default function handler(req, res) {
         audio_file,
         receiver_locations,
         receiver_labels,
+        show_receivers,
         id
       );
       if (result.changes === 0) return res.status(404).json({ error: "Show not found." });

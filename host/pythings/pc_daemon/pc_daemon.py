@@ -221,6 +221,12 @@ class FireworkDaemon:
         # `csim`). UI uses this to confirm the operator's edit took
         # effect (or got clamped).
         self.dongle_clock_sync_interval_ms = None
+        # The dongle's own FW_VERSION, as reported in each per-second
+        # status frame. None until the first frame arrives. Surfaced in
+        # /data/state so the dongle update flow can show
+        # "currently running v15, uploading v16" before the operator
+        # clicks flash.
+        self.dongle_fw_version = None
         # When set, /data/last_scan.json holds the full per-channel result
         # from the most recent scan_result we've received from the dongle.
         self.rf_scan_pending_since_ms = None
@@ -751,6 +757,44 @@ class FireworkDaemon:
                         self.write_error(f"retry_receiver({ident}) failed: {e}")
                 else:
                     print("retry_receiver: protocol handler not ready.")
+            elif command['type'] == 'fetch_receiver_config':
+                # Operator-initiated CONFIG_QUERY for a single receiver
+                # (UI per-receiver fetch button) or the broadcast-to-all
+                # variant when `ident` is omitted. Optionally writes a
+                # new fire_duration_ms before the receiver responds; the
+                # CONFIG_RESPONSE that follows is persisted to DB
+                # automatically by process_rxcfg_msg.
+                ident = command.get('ident')  # None / "" => all
+                fdv   = command.get('fire_duration_ms')
+                if not (self.protocol_handler and hasattr(
+                    self.protocol_handler, 'fetch_receiver_config'
+                )):
+                    print("fetch_receiver_config: protocol handler not ready.")
+                else:
+                    try:
+                        if ident:
+                            ok = self.protocol_handler.fetch_receiver_config(
+                                ident, fire_duration_ms=fdv,
+                            )
+                            if not ok:
+                                self.write_error(
+                                    f"fetch_receiver_config({ident}) refused"
+                                    + (f" (fd={fdv})" if fdv is not None else "")
+                                )
+                        else:
+                            results = self.protocol_handler.fetch_all_receiver_configs(
+                                fire_duration_ms=fdv,
+                            )
+                            failed = [k for k, v in results.items() if not v]
+                            if failed:
+                                print(
+                                    f"fetch_receiver_config: skipped (offline / 433): "
+                                    f"{failed}"
+                                )
+                    except Exception as e:
+                        self.write_error(
+                            f"fetch_receiver_config failed: {e}"
+                        )
             elif command['type'] == 'set_rf_channel':
                 # Apply a new RF channel to the dongle. The dongle's
                 # parseLedJSON path accepts `rf_channel` and calls
@@ -806,6 +850,55 @@ class FireworkDaemon:
                     ok, msg = self.protocol_handler.abort_ota_flash()
                     if not ok:
                         self.write_error(f"ota_flash_abort: {msg}")
+            elif command['type'] == 'dongle_flash_start':
+                # UI-driven dongle update. The Next.js handler stages
+                # the .bin set under /tmp/ota_staging/<job>/ (which is
+                # bind-mounted into the host's filesystem so the bridge
+                # can read the same paths) and drops this command.
+                # The protocol handler enforces the "no show loaded /
+                # disarmed / no receiver-OTA in flight" gating; the
+                # bridge enforces the "only one flash at a time" lock.
+                mode = command.get('mode')
+                files = command.get('files') or {}
+                file_names = command.get('file_names') or {}
+                if mode not in ('app', 'full'):
+                    self.write_error(
+                        f"dongle_flash_start refused: mode must be 'app' or 'full' (got {mode!r})"
+                    )
+                elif not isinstance(files, dict) or not files:
+                    self.write_error(
+                        "dongle_flash_start refused: files must be a non-empty {offset: path} dict"
+                    )
+                elif not (self.protocol_handler and hasattr(
+                    self.protocol_handler, 'start_dongle_flash'
+                )):
+                    self.write_error("dongle_flash_start: protocol handler not ready.")
+                else:
+                    ok, msg = self.protocol_handler.start_dongle_flash(
+                        mode=mode, files=files, file_names=file_names
+                    )
+                    if not ok:
+                        self.write_error(f"dongle_flash_start: {msg}")
+                    else:
+                        print(f"dongle_flash_start: queued ({msg})")
+            elif command['type'] == 'dongle_flash_continue':
+                if not (self.protocol_handler and hasattr(
+                    self.protocol_handler, 'continue_dongle_flash'
+                )):
+                    print("dongle_flash_continue: protocol handler not ready.")
+                else:
+                    ok, msg = self.protocol_handler.continue_dongle_flash()
+                    if not ok:
+                        self.write_error(f"dongle_flash_continue: {msg}")
+            elif command['type'] == 'dongle_flash_abort':
+                if not (self.protocol_handler and hasattr(
+                    self.protocol_handler, 'abort_dongle_flash'
+                )):
+                    print("dongle_flash_abort: protocol handler not ready.")
+                else:
+                    ok, msg = self.protocol_handler.abort_dongle_flash()
+                    if not ok:
+                        self.write_error(f"dongle_flash_abort: {msg}")
             elif command['type'] == 'scan_radio':
                 # Operator-initiated RF spectrum scan. We refuse if a show
                 # is loaded or the system is armed because the dongle blocks
@@ -1109,6 +1202,21 @@ class FireworkDaemon:
                 and hasattr(self.protocol_handler, 'get_ota_state')
                 else None
             ),
+            # Dongle update job state (None until the first job is
+            # submitted). Mirrors the snapshot returned by the bridge's
+            # /flash_dongle/status, with a small driver-side wrapper
+            # for HTTP-layer errors. Same shape contract as `ota` so
+            # the UI's progress widget logic is reusable.
+            "dongle_ota": (
+                self.protocol_handler.get_dongle_flash_state()
+                if self.protocol_handler is not None
+                and hasattr(self.protocol_handler, 'get_dongle_flash_state')
+                else None
+            ),
+            # Live FW_VERSION reported by the dongle's heartbeat. Used
+            # by the dongle update UI to display "currently running
+            # vN" before the operator picks a .bin.
+            "dongle_fw_version": self.dongle_fw_version,
             "settings": {
                 "led_brightness": self.led_brightness,
                 "fire_repeat_ct": self.fire_repetition,

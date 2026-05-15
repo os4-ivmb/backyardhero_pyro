@@ -1,1 +1,11 @@
 pyserial
+# esptool is required for the UI-driven dongle update flow. The bridge
+# exposes an HTTP endpoint (POST /flash_dongle) that drives this esptool
+# against the dongle's USB-CDC port; without it the flasher endpoint
+# returns 500.
+#
+# Pin to >=4.9 because earlier versions hang the connect on
+# lolin_s2_mini boards with "Could not configure port" -- the ESP32-S2
+# USB-CDC reset fix didn't land until 4.9. Same constraint as
+# devices/utils/requirements.txt.
+esptool>=4.9

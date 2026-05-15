@@ -1,0 +1,44 @@
+# Development compose for macOS development boxes (Docker Desktop).
+#
+# Builds the image locally and bind-mounts source so edits hot-reload
+# via Next.js HMR (frontend / API routes) and supervisorctl restart
+# (Python). No port 80 binding, no extra_hosts -- both unnecessary on
+# Docker Desktop and risk colliding with whatever else the dev has
+# running on the mac.
+
+services:
+  firework-system:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: firework-system
+    restart: unless-stopped
+    volumes:
+      - ../../data:/data
+      - ../../config:/config
+      # Dongle-update staging dir, bind-mounted at the same path on
+      # both sides. The Next.js handler writes uploaded firmware
+      # binaries here; the host-side bridge process reads them back
+      # via the same path when invoking esptool. (The receiver-OTA
+      # staging that lives in /tmp/ota_staging is also under this
+      # mount, but doesn't need it -- daemon + Next.js are both in
+      # the container.)
+      - /tmp/ota_staging:/tmp/ota_staging
+      - ../../pythings:/app/pythings
+      - ../../byh_app/backyardhero:/app/byh_app/
+      # Anonymous volumes shadow the host bind mount so the container
+      # keeps its own Linux-built node_modules + .next -- otherwise the
+      # macOS-built better_sqlite3.node leaks in and require() blows up
+      # with "invalid ELF header".
+      - /app/byh_app/node_modules
+      - /app/byh_app/.next
+      - ../../supervisord.dev.conf:/etc/supervisor/conf.d/supervisord.conf
+    ports:
+      - "1776:1776"  # Next.js app
+      - "8090:8090"  # WebSocket server
+    environment:
+      - SERIAL_PORT=${SERIAL_PORT:-/dev/tty.usbmodem01}
+      - SERIAL_BAUD=115200
+      - LED_STATE_FILE=/data/ledstate
+      - NODE_ENV=development
+    privileged: true

@@ -6,10 +6,12 @@ NODE_ID provisioning over serial.
 Three modes:
 
     flash_receiver.py
-        Default. App-only flash at 0x10000 (same as the IDE does for an
-        upload to an already-flashed board). PRESERVES NVS, so the
-        receiver's NODE_ID / RECEIVER_IDENT carry through every routine
-        firmware bump.
+        Default. Writes the app at 0x10000 AND re-stamps the OTA
+        next-app pointer (boot_app0.bin at 0xe000), so the chip is
+        guaranteed to boot what we just wrote -- even if the previous
+        run was an OTA that left the bootloader pointing at app1.
+        PRESERVES NVS, so the receiver's NODE_ID / RECEIVER_IDENT carry
+        through every routine firmware bump.
 
     flash_receiver.py --full
         First-time flash: bootloader + partition table + boot_app0 + app,
@@ -22,8 +24,8 @@ Three modes:
         serial afterwards. Use for a brand-new chip or for recovery.
 
     flash_receiver.py --set-id
-        App-only flash followed by an interactive SETID. Re-numbers a
-        receiver without wiping anything else in NVS.
+        Same flash as default (app + boot_app0), then an interactive
+        SETID. Re-numbers a receiver without wiping anything else in NVS.
 
 `--node N` and `--ident NAME` skip the prompts.
 
@@ -172,6 +174,35 @@ def _latest_app_bin() -> tuple[int, Path]:
 def find_latest_app_bin() -> Path:
     """Path to the newest app binary."""
     return _latest_app_bin()[1]
+
+
+def find_boot_app0_for(app_bin: Path) -> Path | None:
+    """Locate the boot_app0.bin that pairs with a given app binary.
+
+    Strategy:
+      1. If `app_bin` matches the build_receiver.sh naming convention
+         (`os4_receiver_v<N>.bin`), look for `os4_receiver_v<N>.boot_app0.bin`
+         next to it. This is the version-matched artifact.
+      2. Otherwise fall back to `bin/latest.boot_app0.bin` -- the
+         build_receiver.sh symlink. boot_app0.bin is byte-for-byte
+         identical across versions (it's the static "boot from app0"
+         pointer copied straight out of the arduino-esp32 install), so
+         using `latest` is safe even if the user passed `--bin` to a
+         hand-renamed file.
+      3. If neither exists, return None and let the caller decide whether
+         to skip the boot_app0 flash.
+    """
+    m = APP_BIN_RE.match(app_bin.name)
+    if m:
+        sibling = app_bin.parent / f"os4_receiver_v{m.group(1)}.boot_app0.bin"
+        if sibling.is_file():
+            return sibling
+
+    fallback = BIN_DIR / "latest.boot_app0.bin"
+    if fallback.exists():
+        return fallback.resolve()
+
+    return None
 
 
 def find_latest_full_set() -> dict[str, Path]:
@@ -612,8 +643,29 @@ def main() -> int:
         if not app_bin.is_file():
             err(f"binary not found: {app_bin}")
             return 1
+
+        # Always re-stamp boot_app0 alongside the app. boot_app0 is the
+        # OTA "next-app" pointer at 0xe000; if the receiver's last boot
+        # was an OTA, that pointer is set to app1, and an app-only flash
+        # to app0 (0x10000) would silently keep booting the OTA'd image
+        # in app1. Re-flashing boot_app0 forces "boot app0", so the chip
+        # always boots whatever we just wrote. The NVS gap (0x9000-0xdfff)
+        # sits below 0xe000 and is unaffected.
+        boot_app0 = find_boot_app0_for(app_bin)
         flash_pairs = [(OFFSET_APP, app_bin)]
-        log(f"app-only flash (preserves NVS): {_format_bin_label(app_bin)}")
+        if boot_app0 is not None:
+            flash_pairs.insert(0, (OFFSET_BOOT_APP0, boot_app0))
+            log(f"app + boot_app0 flash (preserves NVS): {_format_bin_label(app_bin)}")
+            log(f"  also restamping {_format_bin_label(boot_app0)} at {OFFSET_BOOT_APP0}")
+        else:
+            log(
+                "WARNING: no boot_app0.bin found next to the app binary or at "
+                "bin/latest.boot_app0.bin -- skipping the OTA-pointer reset. "
+                "If the receiver was last flashed via OTA, it may keep booting "
+                "the previous image. Re-run devices/utils/build_receiver.sh "
+                "to regenerate boot_app0.bin."
+            )
+            log(f"app-only flash (preserves NVS): {_format_bin_label(app_bin)}")
 
     port = args.port or prompt_port()
     log(f"using port: {port}")

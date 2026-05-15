@@ -16,6 +16,15 @@ TCP_PORT = 9000
 serial_conn = None
 serial_lock = threading.Lock()
 
+# Set to True while the flasher service has the dongle's USB-CDC port
+# checked out for esptool. While True the forwarder threads must NOT
+# hold the port open (esptool needs exclusive access) and the auto-
+# reconnect helper must not race with esptool's own port management.
+# Cleared by flash_resume_serial() once the flash finishes (or aborts);
+# the existing _try_auto_reopen path then reattaches as the dongle
+# re-enumerates after the post-flash hard reset.
+flashing = False
+
 # Auto-reconnect bookkeeping. The dongle may reboot during operation
 # (e.g. its hardware task watchdog firing during a hostile OTA RF link,
 # or the operator unplug/replug). On macOS, the /dev/tty.usbmodem* path
@@ -37,6 +46,15 @@ def _try_auto_reopen():
     the serial_lock + idempotent close serialize concurrent calls.
     """
     global serial_conn, _last_reconnect_attempt, _consecutive_failures
+
+    # The flasher service holds the dongle's USB-CDC port exclusively
+    # while esptool is mid-flash. Re-opening here would race with
+    # esptool and at best produce a corrupted flash, at worst leave
+    # the dongle bricked. Bail out cleanly; the post-flash teardown
+    # in flash_server clears `flashing` so the next iteration of the
+    # forwarder loops will resume normal auto-reconnect.
+    if flashing:
+        return False
 
     now = time.monotonic()
     backoff = min(RECONNECT_BACKOFF_MAX_S,
@@ -173,6 +191,12 @@ def serial_to_tcp(client):
     last_disconnect_log = 0.0
     try:
         while True:
+            if flashing:
+                # The flasher service has the port. Park here cheaply --
+                # no auto-reopen attempts, no reads. We come back to
+                # life once `flashing` clears.
+                time.sleep(0.1)
+                continue
             if not (serial_conn and serial_conn.is_open):
                 # Try to auto-reopen instead of just waiting passively
                 # for a config_serial command to revive us. The dongle
@@ -241,7 +265,18 @@ def tcp_to_serial(client):
                 if process_command(buffer, client):
                     buffer = b''  # Command processed, clear buffer
                     continue
-            
+
+            # While the flasher has the port, drop everything we'd
+            # forward to serial. The daemon's OTA driver tolerates
+            # silent gaps via its existing dongle-silence-abort path,
+            # and the receiver-OTA driver isn't running concurrently
+            # (the daemon refuses to start a dongle flash while a
+            # receiver flash is mid-flight, and vice versa).
+            if flashing:
+                if buffer:
+                    buffer = b''
+                continue
+
             # Not a command or command processing failed, send to serial
             if serial_conn and serial_conn.is_open:
                 try:
@@ -321,9 +356,77 @@ def start_tcp_server():
         if serial_conn:
             serial_conn.close()
 
+
+# ---------------------------------------------------------------------------
+# Flash server hooks
+# ---------------------------------------------------------------------------
+#
+# These three functions form the contract between the bridge (which
+# owns the dongle's USB-CDC port) and the flash server (which needs to
+# borrow that port for esptool).
+#
+# pause: close the serial fd and tell the forwarder threads to stop
+#        trying to reopen it. Until resume() is called, the bridge is
+#        a no-op for both directions.
+# resume: clear the flag. The forwarder threads' existing
+#         _try_auto_reopen path will reattach within a few hundred ms,
+#         picking up the dongle on whatever /dev/ttyACMx it re-enumerated
+#         to (the udev symlink /dev/byh_dongle stays put).
+# current_port: what port the flasher should hand to esptool. We
+#         deliberately read SERIAL_CONFIG['port'] each time -- if the
+#         operator changed the port via /api/system/serial_config we
+#         want the new value, not a stale snapshot.
+
+def flash_pause_serial():
+    """Release the serial port for esptool."""
+    global serial_conn, flashing
+    flashing = True
+    with serial_lock:
+        if serial_conn:
+            try:
+                serial_conn.close()
+            except Exception as e:
+                print(f"flash_pause_serial: close raised {e}")
+            serial_conn = None
+    print("[bridge] paused serial forwarders for dongle flash")
+
+
+def flash_resume_serial():
+    """Hand the port back to the bridge."""
+    global flashing
+    flashing = False
+    print("[bridge] resumed serial forwarders post-flash")
+    # Don't proactively re-open here: serial_to_tcp's _try_auto_reopen
+    # loop is already calling us within 100ms, and the dongle may not
+    # be back on the USB bus yet (it takes ~1-3s to re-enumerate after
+    # esptool's hard reset). The auto-reconnect path handles that
+    # waiting cleanly.
+
+
+def flash_current_port() -> str:
+    return SERIAL_CONFIG.get('port') or ''
+
+
 if __name__ == '__main__':
     # Establish initial serial connection
     reconnect_serial(False)
-    
+
+    # Start the flasher HTTP server. Imported here (not at module top)
+    # to keep the bridge's startup path lightweight: a missing/broken
+    # dongle_flasher import shouldn't keep the regular forwarder from
+    # coming up.
+    try:
+        from flash_server import BridgeIO, start_flash_server
+        bridge_io = BridgeIO(
+            pause_serial=flash_pause_serial,
+            resume_serial=flash_resume_serial,
+            current_port=flash_current_port,
+        )
+        start_flash_server(bridge_io)
+    except Exception as e:
+        print(f"WARN: flash server failed to start: {e}")
+        print("WARN: dongle UI updates will be unavailable; "
+              "the forwarder is still up.")
+
     # Start TCP server
     start_tcp_server()

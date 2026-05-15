@@ -63,6 +63,35 @@
 //     that nodeID. Previously a forgotten receiver would still get any
 //     in-flight queued commands dispatched, wasting up to ~22ms of
 //     radio time per cmd on TX-FAIL retries.
+// v16: 2026-05-XX - Receiver-side config query/set (paired with receiver
+//   FW v22+):
+//   * Two new message types:
+//       RECEIVER_CONFIG_QUERY    (18) -- dongle -> receiver
+//       RECEIVER_CONFIG_RESPONSE (19) -- receiver -> dongle (in ACK payload)
+//   * New serial command:
+//       `rxcfg IDENT`            -- pure fetch (flags=0)
+//       `rxcfg IDENT fd <ms>`    -- set fire_duration_ms + fetch
+//     Each command emits a single `{"type":"rxcfg", ...}` JSON line on
+//     receipt of the receiver's CONFIG_RESPONSE, carrying nodeID, FW /
+//     board version, NUM_BOARDS / noBoardsDetected / cuesAvailable, and
+//     the actually-applied (clamped) fire_duration_ms.
+//   * ACK choreography mirrors handleFlashBegin's: the dongle sends the
+//     CONFIG_QUERY (its auto-ACK carries stale RECEIVER_STATUS, which
+//     we ingest normally), then immediately sends a CLOCK_SYNC. The
+//     receiver loaded the CONFIG_RESPONSE into its ACK FIFO between
+//     those two writes, so the CLOCK_SYNC's auto-ACK carries the
+//     response. Done in the same dispatchOneCommand iteration so the
+//     CONFIG_RESPONSE can't get raced by another receiver's poll.
+//   * Auto-query: any newly-registered receiver (autocreate via
+//     getReceiverByIdent, including post-prune re-discovery) is marked
+//     configQueryPending. The next poll slot for that receiver
+//     dispatches a CONFIG_QUERY instead of a CLOCK_SYNC, which covers
+//     the "operator turned the unit off, added a cue board, turned it
+//     back on" case without UI involvement. Flag clears once the
+//     CONFIG_RESPONSE is ingested.
+//   * Per-receiver entries in the per-second status JSON now include
+//     `fw` / `bv` / `nb` / `nbd` / `ca` / `fd` so the host can recover
+//     full receiver state (e.g. post-restart) without re-querying.
 // v15: 2026-05-XX - Non-blocking OTA serial writes + faster WDT recovery:
 //   * emitOtaAck/Nack/Pong/heartbeat now build their line into a stack
 //     buffer and check Serial.availableForWrite() *before* writing. If
@@ -107,7 +136,7 @@
 //     drops from ~2.1s to ~600ms, so a transient burst of interference
 //     no longer chokes the serial pipe for seconds at a time -- the host
 //     gets the NACK and decides whether to retry or recover.
-#define FW_VERSION 15
+#define FW_VERSION 16
 
 #define RF24_CE_PIN 37
 #define RF24_CSN_PIN 36
@@ -125,24 +154,32 @@
 #define NUM_PIXELS 7
 
 enum MessageType {
-  MANUAL_FIRE         = 1,
-  CLOCK_SYNC          = 2,
-  START_LOAD          = 3,
-  SHOW_LOAD           = 4,
-  GENERIC_PLAY        = 5,
-  GENERIC_STOP        = 6,
-  GENERIC_RESET       = 7,
-  GENERIC_PAUSE       = 8,
-  SHOW_START          = 9,
-  RECEIVER_STATUS     = 10,
-  SHOW_LOADN          = 11,  // Packed multi-cue load (up to 6 cues per frame)
-  RESET_DVC           = 12,
-  OTA_BEGIN           = 13,
-  OTA_DATA            = 14,
-  OTA_END             = 15,
-  OTA_ABORT           = 16,
-  RECEIVER_OTA_STATUS = 17
+  MANUAL_FIRE              = 1,
+  CLOCK_SYNC               = 2,
+  START_LOAD               = 3,
+  SHOW_LOAD                = 4,
+  GENERIC_PLAY             = 5,
+  GENERIC_STOP             = 6,
+  GENERIC_RESET            = 7,
+  GENERIC_PAUSE            = 8,
+  SHOW_START               = 9,
+  RECEIVER_STATUS          = 10,
+  SHOW_LOADN               = 11,  // Packed multi-cue load (up to 6 cues per frame)
+  RESET_DVC                = 12,
+  OTA_BEGIN                = 13,
+  OTA_DATA                 = 14,
+  OTA_END                  = 15,
+  OTA_ABORT                = 16,
+  RECEIVER_OTA_STATUS      = 17,
+  RECEIVER_CONFIG_QUERY    = 18,  // dongle -> receiver (paired with FW v22+)
+  RECEIVER_CONFIG_RESPONSE = 19   // receiver -> dongle (in ACK payload)
 };
+
+// Bit flags for ReceiverConfigSetMessage.flags. flags == 0 is a pure
+// fetch (no settings written). New writable knobs add new flag bits and
+// new field slots in ReceiverConfigSetMessage; the receiver dispatch is
+// msgSize-checked so older firmware just ignores trailing bytes.
+#define CFG_FLAG_SET_FIRE_DURATION 0x01
 
 struct ManualFireMessage {
   uint8_t type;
@@ -203,6 +240,31 @@ struct ReceiverStatusMessage {
   char ident[10];
   uint64_t cont64_0;
   uint64_t cont64_1;
+} __attribute__((packed));
+
+// dongle -> receiver: fetch config (and optionally apply settings).
+// flags == 0 is a pure fetch. Wire layout is append-only -- new knobs
+// add new flag bits + new trailing fields, and older receiver firmware
+// (which size-checks against its compiled struct) safely ignores them.
+struct ReceiverConfigSetMessage {
+  uint8_t  type;              // RECEIVER_CONFIG_QUERY
+  uint8_t  flags;             // bit 0: SET_FIRE_DURATION
+  uint16_t fire_duration_ms;  // applied when flags & CFG_FLAG_SET_FIRE_DURATION
+} __attribute__((packed));
+
+// receiver -> dongle: piggybacks in the same ACK FIFO as
+// RECEIVER_STATUS. Routed by leading type byte. `reserved` is
+// zero-padded for future fields without a wire bump.
+struct ReceiverConfigResponseMessage {
+  uint8_t  type;              // RECEIVER_CONFIG_RESPONSE
+  uint8_t  nodeID;
+  uint8_t  fwVersion;
+  uint8_t  boardVersion;
+  uint8_t  numBoards;         // 0 if noBoardsDetected, else detected NUM_BOARDS
+  uint8_t  noBoardsDetected;  // 0 or 1
+  uint8_t  cuesAvailable;     // 0 if noBoardsDetected, else NUM_BOARDS * 8
+  uint16_t fireDurationMs;    // currently-effective fire pulse width (ms)
+  uint8_t  reserved[8];       // future fields
 } __attribute__((packed));
 
 // ---------------------------------------------------------------------------
@@ -269,6 +331,23 @@ struct ReceiverInfo {
   uint8_t successCount;
 
   uint8_t consecutiveFailures;
+
+  // FW v16: cached receiver-side config from the most recent
+  // RECEIVER_CONFIG_RESPONSE. configValid is false until the first
+  // response lands, so the per-second status JSON can omit these
+  // fields rather than emit zeros and confuse the host. configQueryPending
+  // is set when a receiver is freshly auto-created (initial connect or
+  // post-prune re-discovery) -- maybePollNextReceiver substitutes a
+  // CONFIG_QUERY for the next CLOCK_SYNC poll for that receiver, and
+  // the flag clears once the response is ingested.
+  bool     configValid;
+  bool     configQueryPending;
+  uint8_t  fwVersion;
+  uint8_t  boardVersion;
+  uint8_t  numBoards;
+  uint8_t  noBoardsDetected;
+  uint8_t  cuesAvailable;
+  uint16_t fireDurationMs;
 };
 
 // Bumped from 10 to 32 to support 20+ receivers per the throughput target.
@@ -341,6 +420,12 @@ struct QueuedCommand {
   // For SHOW_LOADN
   uint8_t loadn_count;
   ShowLoadNCue loadn_cues[SHOW_LOADN_MAX_CUES];
+
+  // For RECEIVER_CONFIG_QUERY (FW v16+). cfg_flags is the bitset that
+  // gates which trailing fields actually get applied on the receiver;
+  // 0 means a pure fetch.
+  uint8_t  cfg_flags;
+  uint16_t cfg_fire_duration_ms;
 };
 
 // Bumped from 40 to 128 — show-start can enqueue ~300 commands at once.
@@ -763,6 +848,19 @@ ReceiverInfo* getReceiverByIdent(const String &ident, bool createIfNotExist) {
     r.successCount = 0;
     for (uint8_t k = 0; k < MAX_SUCCESS_SAMPLES; k++) r.successHistory[k] = false;
     r.consecutiveFailures = 0;
+    // FW v16: queue an automatic CONFIG_QUERY for the next poll slot
+    // assigned to this receiver. Covers initial connect AND post-prune
+    // re-discovery (the operator turned the unit off, swapped a cue
+    // board, turned it back on -- we want the new NUM_BOARDS *and* any
+    // operator-set fire_duration_ms reflected on the host immediately).
+    r.configValid = false;
+    r.configQueryPending = true;
+    r.fwVersion = 0;
+    r.boardVersion = 0;
+    r.numBoards = 0;
+    r.noBoardsDetected = 0;
+    r.cuesAvailable = 0;
+    r.fireDurationMs = 0;
     numReceivers++;
     return &receivers[numReceivers - 1];
   }
@@ -945,6 +1043,86 @@ ReceiverInfo* ingestStatusFrame(const uint8_t* buf, uint8_t len, uint64_t now) {
   return r;
 }
 
+// FW v16: emit a single `rxcfg` JSON line summarizing the latest
+// CONFIG_RESPONSE for a receiver. Mirrors emitRxUpd's compact key
+// scheme so the host parser can stay symmetric:
+//   i=ident n=nodeID fw=fwVersion bv=boardVersion nb=numBoards
+//   nbd=noBoardsDetected ca=cuesAvailable fd=fireDurationMs t=lastMsgTime
+void emitRxCfg(const ReceiverInfo* r) {
+  if (!r || !r->configValid) return;
+  StaticJsonDocument<192> d;
+  d["type"] = "rxcfg";
+  d["i"]    = r->ident;
+  d["n"]    = r->nodeID;
+  d["fw"]   = r->fwVersion;
+  d["bv"]   = r->boardVersion;
+  d["nb"]   = r->numBoards;
+  d["nbd"]  = r->noBoardsDetected;
+  d["ca"]   = r->cuesAvailable;
+  d["fd"]   = r->fireDurationMs;
+  d["t"]    = r->lastMessageTime;
+  serializeJson(d, Serial);
+  Serial.write('\n');
+}
+
+// FW v16: ingest a RECEIVER_CONFIG_RESPONSE arrived via the ACK FIFO.
+// Routed to from ingestAckPayload(). Updates the cached config fields,
+// clears configQueryPending so future polls go back to CLOCK_SYNC, and
+// emits the `rxcfg` line so the host can persist the new values.
+ReceiverInfo* ingestConfigResponse(const uint8_t* buf, uint8_t len, uint64_t now) {
+  if (len < sizeof(ReceiverConfigResponseMessage)) {
+    if (debugMode > 0) {
+      Serial.print(F("WARN: short cfg resp, len=")); Serial.println(len);
+    }
+    return NULL;
+  }
+  const ReceiverConfigResponseMessage* cr = (const ReceiverConfigResponseMessage*)buf;
+  if (cr->nodeID == 0) {
+    if (debugMode > 0) Serial.println(F("WARN: cfg resp nodeID=0"));
+    return NULL;
+  }
+  ReceiverInfo* r = getReceiverByNodeID(cr->nodeID);
+  if (!r) {
+    // Unknown nodeID -- we don't have an ident here so we can't auto-create.
+    // The next normal status frame will register the receiver, after which a
+    // fresh config query (auto- or operator-driven) will succeed.
+    if (debugMode > 0) {
+      Serial.print(F("WARN: cfg resp from unknown N")); Serial.println(cr->nodeID);
+    }
+    return NULL;
+  }
+  r->configValid       = true;
+  r->configQueryPending = false;
+  r->fwVersion         = cr->fwVersion;
+  r->boardVersion      = cr->boardVersion;
+  r->numBoards         = cr->numBoards;
+  r->noBoardsDetected  = cr->noBoardsDetected;
+  r->cuesAvailable     = cr->cuesAvailable;
+  r->fireDurationMs    = cr->fireDurationMs;
+  r->lastMessageTime   = now;
+  emitRxCfg(r);
+  return r;
+}
+
+// FW v16: dispatch an ACK-payload frame by leading type byte. Lets the
+// receiver multiplex RECEIVER_STATUS and RECEIVER_CONFIG_RESPONSE
+// across the same single ACK FIFO without a separate transport. New
+// ACK payload types add new cases here.
+ReceiverInfo* ingestAckPayload(const uint8_t* buf, uint8_t len, uint64_t now) {
+  if (len == 0) return NULL;
+  switch (buf[0]) {
+    case RECEIVER_STATUS:
+      return ingestStatusFrame(buf, len, now);
+    case RECEIVER_CONFIG_RESPONSE:
+      return ingestConfigResponse(buf, len, now);
+    default:
+      if (debugMode > 0) {
+        Serial.print(F("WARN: unknown ack type=")); Serial.println(buf[0]);
+      }
+      return NULL;
+  }
+}
+
 // Soft recovery: clear the radio FIFOs and reapply config without a power-cycle.
 // Avoids the previous 20+ ms stall that blocked all other receivers.
 void softRadioRecovery() {
@@ -1083,7 +1261,7 @@ bool sendCommandFrame(uint8_t nodeID, const void* msg, uint8_t msgLen, uint64_t 
       break;
     }
     radio.read(ackBuf, ackLen);
-    ReceiverInfo* maybeR = ingestStatusFrame(ackBuf, ackLen, now);
+    ReceiverInfo* maybeR = ingestAckPayload(ackBuf, ackLen, now);
     if (maybeR) updatedR = maybeR;
   }
 
@@ -1178,6 +1356,43 @@ bool sendShowStart(uint8_t nodeID, uint64_t startTime, uint8_t numTargets, uint1
 bool sendGeneric(uint8_t nodeID, uint8_t commandType, uint64_t now) {
   GenericMessage msg = { commandType };
   return sendCommandFrame(nodeID, &msg, sizeof(msg), now);
+}
+
+// FW v16: send a RECEIVER_CONFIG_QUERY then immediately a CLOCK_SYNC to
+// fetch the receiver's CONFIG_RESPONSE. The query's auto-ACK carries
+// the receiver's previously-loaded RECEIVER_STATUS (ingested as
+// normal); the receiver loads the CONFIG_RESPONSE into its ACK FIFO
+// during the brief gap before the follow-up CLOCK_SYNC, so the
+// CLOCK_SYNC's auto-ACK carries the response. ingestAckPayload routes
+// it to ingestConfigResponse, which emits the `rxcfg` line.
+//
+// Returns true if BOTH writes succeeded. The CLOCK_SYNC failing means
+// we definitely lost the response; the host can re-issue rxcfg.
+bool sendConfigQuery(uint8_t nodeID, uint8_t flags, uint16_t fire_dur_ms, uint64_t now) {
+  ReceiverConfigSetMessage q;
+  q.type = RECEIVER_CONFIG_QUERY;
+  q.flags = flags;
+  q.fire_duration_ms = fire_dur_ms;
+  bool ok1 = sendCommandFrame(nodeID, &q, sizeof(q), now);
+  if (!ok1) return false;
+
+  // Inter-frame gap to give the receiver's main loop time to dispatch
+  // the CONFIG_QUERY and call loadConfigResponseIntoAck() before our
+  // follow-up CLOCK_SYNC's auto-ACK fires. radio.write() returns the
+  // moment the CONFIG_QUERY's auto-ACK arrives (~1ms after TX start)
+  // -- by then the receiver's loop has only just barely *received*
+  // the frame, not processed it. Without this delay the CLOCK_SYNC
+  // can arrive before the response is loaded and we get the stale
+  // RECEIVER_STATUS instead.
+  //
+  // 8ms mirrors handleFlashBegin's "wait for the receiver to settle"
+  // delay (15ms there, but that includes Update.begin + radio rate
+  // hop). For a plain config query the receiver has nothing slow to
+  // do, so 8ms gives ~5ms of headroom over the worst observed loop
+  // iteration time (LED animations + show housekeeping).
+  delay(8);
+
+  return sendClockSync(nodeID, 0, (uint64_t)(millis() + tsOffset));
 }
 
 // 433 MHz Bilusocn TX path (unchanged).
@@ -2206,9 +2421,10 @@ void processSerialCommand(String inStr) {
   }
 
   int secondSpace = args.indexOf(' ');
-  // `msync` and `forget` are the two single-arg commands. Everything else
+  // `msync` and `forget` are single-arg commands; `rxcfg` is single-arg
+  // when invoked as a pure fetch (no key/value tail). Everything else
   // requires `IDENT <params...>`.
-  if (secondSpace < 0 && cmdStr != "msync" && cmdStr != "forget") {
+  if (secondSpace < 0 && cmdStr != "msync" && cmdStr != "forget" && cmdStr != "rxcfg") {
     Serial.println(F("C?NSS")); return;
   }
 
@@ -2336,6 +2552,46 @@ void processSerialCommand(String inStr) {
     qc.showstart_targetStartTime = ts_param;
     qc.showstart_numTargetsToFire = int_tokens[0];
     qc.showstart_showId = int_tokens[1];
+  } else if (cmdStr == "rxcfg") {
+    // FW v16: receiver config query/set. Grammar:
+    //   rxcfg IDENT                  (pure fetch)
+    //   rxcfg IDENT fd <ms>          (set fire_duration_ms + fetch)
+    // Future writable knobs add new tokens after the ident, each as
+    // `<key> <value>`. Unknown tokens are rejected so a typoed key
+    // doesn't silently no-op (looking like a successful set on the host
+    // side without anything actually changing on the receiver).
+    qc.messageType = RECEIVER_CONFIG_QUERY;
+    qc.cfg_flags = 0;
+    qc.cfg_fire_duration_ms = 0;
+    String rest = paramsStr;
+    rest.trim();
+    while (rest.length() > 0) {
+      int sp = rest.indexOf(' ');
+      String key = (sp > 0) ? rest.substring(0, sp) : rest;
+      if (sp <= 0) {
+        Serial.print(F("CV rxcfg missing value for ")); Serial.println(key);
+        return;
+      }
+      String afterKey = rest.substring(sp + 1);
+      afterKey.trim();
+      int sp2 = afterKey.indexOf(' ');
+      String val = (sp2 > 0) ? afterKey.substring(0, sp2) : afterKey;
+      String tail = (sp2 > 0) ? afterKey.substring(sp2 + 1) : String("");
+      tail.trim();
+      if (key == "fd") {
+        long fdv = val.toInt();
+        if (fdv <= 0 || fdv > 65535) {
+          Serial.print(F("CV rxcfg fd out-of-range ")); Serial.println(val);
+          return;
+        }
+        qc.cfg_flags |= CFG_FLAG_SET_FIRE_DURATION;
+        qc.cfg_fire_duration_ms = (uint16_t)fdv;
+      } else {
+        Serial.print(F("CV rxcfg unknown key ")); Serial.println(key);
+        return;
+      }
+      rest = tail;
+    }
   } else if (cmdStr == "play" || cmdStr == "stop" || cmdStr == "reset" || cmdStr == "pause") {
     if (cmdStr == "play")       qc.messageType = GENERIC_PLAY;
     else if (cmdStr == "stop")  qc.messageType = GENERIC_STOP;
@@ -2399,6 +2655,9 @@ void dispatchOneCommand(uint64_t now) {
       case GENERIC_PAUSE:
       case RESET_DVC:
         ok = sendGeneric(cmd.targetNodeID, cmd.messageType, now); break;
+      case RECEIVER_CONFIG_QUERY:
+        ok = sendConfigQuery(cmd.targetNodeID, cmd.cfg_flags,
+                             cmd.cfg_fire_duration_ms, now); break;
       default:
         Serial.print(F("ERR: unknown cmd type=")); Serial.println(cmd.messageType);
         return;
@@ -2439,9 +2698,20 @@ void maybePollNextReceiver(uint64_t now) {
 
     QueuedCommand qc = {0};
     qc.targetNodeID = r.nodeID;
-    qc.messageType = CLOCK_SYNC;
-    qc.sync_timestamp = 0;  // 0 = stamp at TX time
     qc.repeat_count = 1;
+    if (r.configQueryPending) {
+      // FW v16: instead of the regular CLOCK_SYNC poll, dispatch a
+      // pure-fetch CONFIG_QUERY (flags=0). sendConfigQuery itself
+      // sends a follow-up CLOCK_SYNC under the hood to retrieve the
+      // CONFIG_RESPONSE from the ACK FIFO, so the clock-sync cadence
+      // for this receiver isn't actually skipped.
+      qc.messageType = RECEIVER_CONFIG_QUERY;
+      qc.cfg_flags = 0;
+      qc.cfg_fire_duration_ms = 0;
+    } else {
+      qc.messageType = CLOCK_SYNC;
+      qc.sync_timestamp = 0;  // 0 = stamp at TX time
+    }
     enqueueCommand(qc);
     lastPollDispatchTime = now;
     return;
@@ -2579,17 +2849,13 @@ void loop() {
       break;
     }
     radio.read(&buf, msgSize);
-    if (msgSize > 0 && buf[0] == RECEIVER_STATUS) {
-      // Unsolicited frames have no associated TX, so there's no fresh
-      // latency sample to emit — pass false so the host doesn't see a
-      // duplicate sample in the sliding window.
-      ReceiverInfo* r = ingestStatusFrame(buf, msgSize, now);
-      if (r) emitRxUpd(r, false);
-    } else if (msgSize > 0) {
-      if (debugMode > 0) {
-        Serial.print(F("WARN: unexpected inbound type=")); Serial.println(buf[0]);
-      }
-    }
+    if (msgSize == 0) continue;
+    // Unsolicited frames have no associated TX, so there's no fresh
+    // latency sample to emit — pass false so the host doesn't see a
+    // duplicate sample in the sliding window. ingestAckPayload also
+    // emits the rxcfg JSON for CONFIG_RESPONSE arrivals here.
+    ReceiverInfo* r = ingestAckPayload(buf, msgSize, now);
+    if (r && buf[0] == RECEIVER_STATUS) emitRxUpd(r, false);
   }
 
   // While OTA flash mode is active, the dongle is pinned to one receiver
@@ -2686,6 +2952,18 @@ void loop() {
         }
         ro["x"] = rAvg;
         ro["sp"] = calculateSuccessPercent(&receivers[i]);
+
+        // FW v16: include the cached receiver-side config when valid.
+        // Skipped entirely on receivers we haven't queried yet so the
+        // host can tell "no answer yet" from "really has 0 cues".
+        if (receivers[i].configValid) {
+          ro["fw"]  = receivers[i].fwVersion;
+          ro["bv"]  = receivers[i].boardVersion;
+          ro["nb"]  = receivers[i].numBoards;
+          ro["nbd"] = receivers[i].noBoardsDetected;
+          ro["ca"]  = receivers[i].cuesAvailable;
+          ro["fd"]  = receivers[i].fireDurationMs;
+        }
 
         JsonArray ca = ro.createNestedArray("c");
         for (uint8_t j = 0; j < CONTINUITY_INDEX_CT; j++) ca.add(receivers[i].continuity[j]);

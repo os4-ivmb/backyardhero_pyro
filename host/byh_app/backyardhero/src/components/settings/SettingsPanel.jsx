@@ -1,10 +1,13 @@
-import React, { useState } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   MdOutlineSettingsRemote,
   MdOutlineBugReport,
   MdOutlineRocketLaunch,
+  MdOutlineRouter,
+  MdOutlineWifi,
 } from "react-icons/md";
 import { Section, Card, CardHeader, cn } from "@/design";
+import useAppStore from "@/store/useAppStore";
 
 import BrightnessSlider from "./BrightnessSlider";
 import TransmitRepetitionCount from "./TransmitRepetitionCount";
@@ -14,11 +17,19 @@ import DebugModeToggle from "./DebugModeToggle";
 import ProtocolConfig from "./ProtocolConfig";
 import RFScanPanel from "./RFScanPanel";
 import OtaFlashPanel from "./OtaFlashPanel";
+import DongleFlashPanel from "./DongleFlashPanel";
+import ReceiverConfigSettings from "./ReceiverConfigSettings";
+import DefaultLocationSettings from "./DefaultLocationSettings";
+import AccessPointSettings from "./AccessPointSettings";
 
-// Settings page. Three top-level tabs:
+// Settings page. Top-level tabs:
 //   Dongle    — physical box knobs: LEDs, retransmit count, serial
 //               connection, debug-mode toggle. Anything that controls
 //               the USB transmitter directly.
+//   Receivers — runtime config that lives on each receiver (FW v22+ /
+//               dongle FW v16+): broadcast fire_duration_ms, refresh
+//               every receiver's reported config, etc. Per-receiver
+//               overrides happen on the Receivers admin page.
 //   Debug     — diagnostics surface: RF spectrum scan + daemon timing
 //               knobs (receiver / command / clock-sync timeouts). This
 //               tab is "you only touch this if something is wrong."
@@ -26,14 +37,23 @@ import OtaFlashPanel from "./OtaFlashPanel";
 //               (minimum battery, continuity check). Was previously
 //               "Firing handler config".
 
+// Tabs are rendered in this order, but `visible` can hide one based on the
+// host environment (see buildVisibleTabs). The Network tab is the only
+// Pi-specific surface today: WiFi AP config requires the host-side
+// byh-ap-apply systemd service that install_pi.sh sets up, so showing
+// the tab on a dev laptop or a non-Pi server would just dead-end.
 const TABS = [
-  { key: "dongle", label: "Dongle", icon: <MdOutlineSettingsRemote /> },
-  { key: "debug", label: "Debug", icon: <MdOutlineBugReport /> },
-  { key: "show", label: "Show config", icon: <MdOutlineRocketLaunch /> },
+  { key: "dongle", label: "Dongle", icon: <MdOutlineSettingsRemote />, visible: () => true },
+  { key: "receivers", label: "Receivers", icon: <MdOutlineRouter />, visible: () => true },
+  { key: "network", label: "Network", icon: <MdOutlineWifi />, visible: (host) => !!host?.is_raspberry_pi },
+  { key: "debug", label: "Debug", icon: <MdOutlineBugReport />, visible: () => true },
+  { key: "show", label: "Show config", icon: <MdOutlineRocketLaunch />, visible: () => true },
 ];
 
 const SUBTITLES = {
   dongle: "Brightness, serial connection, retransmit count, debug mode.",
+  receivers: "Fleet-wide receiver runtime knobs (fire pulse width, etc.).",
+  network: "WiFi access point hosted by this Pi.",
   debug: "Spectrum diagnostics and daemon timing.",
   show: "Pre-fire safety checks that apply to every show.",
 };
@@ -51,6 +71,25 @@ function SettingCard({ title, eyebrow, className, children }) {
 
 export default function SettingsPanel() {
   const [tab, setTab] = useState("dongle");
+  const host = useAppStore((s) => s.systemConfig?.host);
+
+  // Filter tabs through `visible(host)` so Pi-only sections drop out
+  // entirely on dev laptops. `host` is undefined until the first
+  // fetchSystemConfig() resolves; treat that as "not a Pi" so we don't
+  // briefly flash a tab that's about to disappear.
+  const visibleTabs = useMemo(
+    () => TABS.filter((t) => t.visible(host)),
+    [host]
+  );
+
+  // If we're parked on a tab that just got hidden (e.g. user was on
+  // Network when the systemConfig fetch came back saying "not a Pi"),
+  // bounce back to the default rather than render an empty pane.
+  useEffect(() => {
+    if (!visibleTabs.some((t) => t.key === tab)) {
+      setTab(visibleTabs[0]?.key ?? "dongle");
+    }
+  }, [visibleTabs, tab]);
 
   return (
     <div className="w-full max-w-5xl mx-auto px-4 sm:px-6 py-6">
@@ -65,7 +104,7 @@ export default function SettingsPanel() {
           aria-label="Settings sections"
           className="flex items-stretch gap-1 border-b border-border-subtle mb-5"
         >
-          {TABS.map((t) => {
+          {visibleTabs.map((t) => {
             const active = t.key === tab;
             return (
               <button
@@ -88,9 +127,37 @@ export default function SettingsPanel() {
         </div>
 
         {tab === "dongle" ? <DongleTab /> : null}
+        {tab === "receivers" ? <ReceiversTab /> : null}
+        {tab === "network" ? <NetworkTab /> : null}
         {tab === "debug" ? <DebugTab /> : null}
         {tab === "show" ? <ShowTab /> : null}
       </Section>
+    </div>
+  );
+}
+
+function NetworkTab() {
+  return (
+    <div className="grid grid-cols-1 gap-4">
+      <SettingCard
+        title="WiFi access point"
+        eyebrow="On-board hotspot"
+      >
+        <AccessPointSettings />
+      </SettingCard>
+    </div>
+  );
+}
+
+function ReceiversTab() {
+  return (
+    <div className="grid grid-cols-1 gap-4">
+      <SettingCard
+        title="Receiver runtime config"
+        eyebrow="Broadcast to all"
+      >
+        <ReceiverConfigSettings />
+      </SettingCard>
     </div>
   );
 }
@@ -149,6 +216,14 @@ function DebugTab() {
       >
         <OtaFlashPanel />
       </SettingCard>
+
+      <SettingCard
+        title="Dongle firmware update"
+        eyebrow="Host-side flash"
+        className="lg:col-span-2"
+      >
+        <DongleFlashPanel />
+      </SettingCard>
     </div>
   );
 }
@@ -158,6 +233,13 @@ function ShowTab() {
     <div className="grid grid-cols-1 gap-4">
       <SettingCard title="Pre-fire safety" eyebrow="Per-protocol checks">
         <ProtocolConfig />
+      </SettingCard>
+
+      <SettingCard
+        title="Default show location"
+        eyebrow="Builder map starting view"
+      >
+        <DefaultLocationSettings />
       </SettingCard>
     </div>
   );

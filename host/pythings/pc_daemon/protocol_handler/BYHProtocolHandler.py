@@ -11,6 +11,7 @@ from enum import Enum
 from led_control import *
 
 from .OtaFlashDriver import OtaFlashDriver
+from .DongleFlashDriver import DongleFlashDriver
 
 # Path for the full per-channel RF scan dump. Kept separate from
 # /data/state because it's bulky (~3KB JSON for 126 channels) and
@@ -100,6 +101,13 @@ class BYHProtocolHandler:
         # internally. Lives on the protocol handler so it can share the
         # dongle's serial connection and pipe events from process_serial_in.
         self.ota_driver = OtaFlashDriver(parent)
+
+        # Dongle-update driver. Talks HTTP to the host-side bridge's
+        # /flash_dongle endpoint -- the dongle's USB-CDC port is owned
+        # by the bridge process, so this driver can't drive esptool
+        # directly. It mirrors the bridge's per-job snapshot into
+        # fw_state.dongle_ota for the UI.
+        self.dongle_flash_driver = DongleFlashDriver(parent)
 
         self.load_initial_receiver_cfg()
         print(f"Initialized Protocol {self.protocol}")
@@ -322,6 +330,49 @@ class BYHProtocolHandler:
     def get_ota_state(self):
         return self.ota_driver.snapshot()
 
+    # ----- Dongle update (UI-driven host-side esptool flash) -----------
+    def start_dongle_flash(self, *, mode, files, file_names):
+        """Submit a dongle update job to the host-side flasher.
+
+        Refuses if a show is loaded or the system is armed (same gating
+        as receiver OTA -- we don't want a half-flashed dongle going
+        offline mid-show), and refuses if a receiver OTA is in flight
+        (the bridge can't share the dongle between esptool and the
+        running OTA stream).
+
+        `files` is {hex_offset: filesystem_path}. The Next.js handler
+        validated existence + size before staging; we trust those checks
+        and just hand the paths to the bridge.
+        """
+        if self.show_loaded:
+            return False, "Dongle update refused: a show is currently loaded."
+        if self.parent.is_armed:
+            return False, "Dongle update refused: system is armed. Disarm first."
+        if self.ota_driver.is_busy():
+            return False, "Dongle update refused: a receiver OTA flash is in flight."
+
+        ok, msg = self.dongle_flash_driver.start_job(
+            mode=mode, files=files, file_names=file_names,
+        )
+        if ok:
+            self.parent.mark_state_dirty()
+        return ok, msg
+
+    def continue_dongle_flash(self):
+        ok, msg = self.dongle_flash_driver.continue_job()
+        if ok:
+            self.parent.mark_state_dirty()
+        return ok, msg
+
+    def abort_dongle_flash(self):
+        ok, msg = self.dongle_flash_driver.abort()
+        if ok:
+            self.parent.mark_state_dirty()
+        return ok, msg
+
+    def get_dongle_flash_state(self):
+        return self.dongle_flash_driver.snapshot()
+
     def retry_receiver(self, ident):
         """Re-issue registration for a single receiver. Use this when a
         receiver was pruned by the dongle (timeout) and needs to come back
@@ -505,6 +556,12 @@ class BYHProtocolHandler:
     # the rest of the daemon (and the UI) consume. Shared across the
     # per-second `status` aggregate AND the FW v7 `rxupd` push line so
     # both shapes parse through one code path.
+    #
+    # Dongle FW v16+ also includes the receiver-side config (when
+    # configValid is true on the dongle) on each per-receiver status
+    # entry. They land here so the in-memory `status` substructure
+    # surfaces them in the broadcast state file -- the UI doesn't have
+    # to round-trip back through the DB to render fw / fire_duration.
     _ABBR_KEY_MAP = {
         'i': 'ident',
         'n': 'node',
@@ -516,6 +573,12 @@ class BYHProtocolHandler:
         'c': 'continuity',
         'x': 'lat',
         'sp': 'successPercent',
+        'fw':  'fwVersion',
+        'bv':  'boardVersion',
+        'nb':  'numBoards',
+        'nbd': 'noBoardsDetected',
+        'ca':  'cuesAvailable',
+        'fd':  'fireDurationMs',
     }
 
     def _merge_receiver(self, abbr_dict, lmtoffset):
@@ -598,6 +661,248 @@ class BYHProtocolHandler:
             # per-second `status` tick will register it shortly.
             return
         self.updateRelevantStates()
+
+    # Field set written into Receivers.config_data by process_rxcfg_msg.
+    # Kept tiny on purpose -- only knobs the dongle/receiver actually
+    # echo back belong in here. UI / API never read or write this dict
+    # directly; they fetch the parsed object via the receiverQueries
+    # helpers and present individual keys.
+    _RXCFG_CONFIG_DATA_KEYS = ('fire_duration_ms',)
+
+    # Host-side overrides parked in config_data by the UI / API. The
+    # daemon NEVER writes these (they're operator-set), only reads them
+    # to decide whether to honour the receiver-reported counts.
+    #
+    # force_cues_available: int | None -- when set (and > 0), the host
+    #   pretends the receiver has exactly this many cues regardless of
+    #   what the rxcfg response said. Lets an operator allocate fewer
+    #   (or more) addressable cues than NUM_BOARDS auto-detected --
+    #   useful when running a smaller show against a fully-populated
+    #   receiver, or when a board is partially wired.
+    _CONFIG_DATA_HOST_OVERRIDE_KEYS = ('force_cues_available',)
+
+    def _persist_rxcfg_to_db(self, ident, fw, bv, ca, fire_dur):
+        """Mirror the receiver-reported config into the Receivers table.
+
+        Skips silently if the row doesn't exist (operator may have just
+        deleted the receiver from the UI between the query going out and
+        the response landing). config_data is merged into the existing
+        JSON so unrelated keys the UI may have parked there survive.
+
+        Also auto-syncs cues_data to reflect the receiver-reported
+        cues_available -- the receiver's NUM_BOARDS detection is now
+        the source of truth for which cue positions the UI can drive,
+        replacing the old "operator types a number in edit mode" flow.
+        Skipped for BILUSOCN_433_TX_ONLY (one-way 433MHz units don't
+        participate in the CONFIG_QUERY protocol at all, so we never
+        get a rxcfg for them, but we belt-and-suspenders the type
+        check below for any future single-zone rework).
+        """
+        try:
+            conn = sqlite3.connect(db_filepath)
+            try:
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT type, cues_data, config_data FROM Receivers WHERE id = ?",
+                    (ident,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return  # receiver no longer in DB, drop the update
+                try:
+                    cfg = json.loads(row['config_data']) if row['config_data'] else {}
+                except (json.JSONDecodeError, TypeError):
+                    cfg = {}
+                if not isinstance(cfg, dict):
+                    cfg = {}
+                if fire_dur is not None:
+                    cfg['fire_duration_ms'] = int(fire_dur)
+
+                # Auto-derive cues_data from the receiver-reported
+                # cues_available count. Only touch cues_data when:
+                #   * the type isn't 433MHz-only, AND
+                #   * we actually have a count to apply (override or
+                #     `ca` not None), AND
+                #   * the new shape differs from what's already stored.
+                # The "differs" check keeps configuration_version stable
+                # when nothing changed, so the host doesn't churn the
+                # daemon-reload signal on every periodic poll-driven
+                # rxcfg.
+                #
+                # Host override: config_data.force_cues_available pins
+                # the effective cue count regardless of what the receiver
+                # reports. When the override is set, NUM_BOARDS auto-
+                # detection is purely informational. We still record the
+                # raw `ca` in the cues_available column so the UI can
+                # show "you forced X but the receiver actually reports Y".
+                cues_data_param = None
+                rcv_type = row['type']
+                force_raw = cfg.get('force_cues_available')
+                try:
+                    force_cues = int(force_raw) if force_raw is not None else None
+                except (TypeError, ValueError):
+                    force_cues = None
+                if force_cues is not None and force_cues <= 0:
+                    force_cues = None  # treat 0/negative as "no force"
+                effective_cues = (
+                    force_cues
+                    if force_cues is not None
+                    else (int(ca) if ca is not None else None)
+                )
+                if rcv_type != 'BILUSOCN_433_TX_ONLY' and effective_cues is not None:
+                    new_cues_obj = {ident: list(range(1, effective_cues + 1))}
+                    try:
+                        existing_cues = json.loads(row['cues_data']) if row['cues_data'] else {}
+                    except (json.JSONDecodeError, TypeError):
+                        existing_cues = {}
+                    if existing_cues != new_cues_obj:
+                        cues_data_param = json.dumps(new_cues_obj)
+
+                if cues_data_param is not None:
+                    cur.execute(
+                        """UPDATE Receivers SET
+                              fw_version = ?,
+                              board_version = ?,
+                              cues_available = ?,
+                              config_data = ?,
+                              cues_data = ?,
+                              configuration_version = configuration_version + 1,
+                              updated_at = CURRENT_TIMESTAMP
+                           WHERE id = ?""",
+                        (
+                            int(fw) if fw is not None else None,
+                            int(bv) if bv is not None else None,
+                            int(ca) if ca is not None else None,
+                            json.dumps(cfg),
+                            cues_data_param,
+                            ident,
+                        ),
+                    )
+                else:
+                    cur.execute(
+                        """UPDATE Receivers SET
+                              fw_version = ?,
+                              board_version = ?,
+                              cues_available = ?,
+                              config_data = ?,
+                              configuration_version = configuration_version + 1,
+                              updated_at = CURRENT_TIMESTAMP
+                           WHERE id = ?""",
+                        (
+                            int(fw) if fw is not None else None,
+                            int(bv) if bv is not None else None,
+                            int(ca) if ca is not None else None,
+                            json.dumps(cfg),
+                            ident,
+                        ),
+                    )
+                conn.commit()
+
+                # Also reflect the new cues into our in-memory map so
+                # the daemon's resolve_zone_target_to_device_id keeps
+                # working without waiting for the next reload. We don't
+                # call reload_receivers_from_db here (that would
+                # re-issue sync/forget needlessly).
+                if cues_data_param is not None and ident in self.receivers:
+                    try:
+                        self.receivers[ident]['cues'] = json.loads(cues_data_param)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            print(f"ERROR: persist rxcfg for {ident} failed: {e}")
+
+    def process_rxcfg_msg(self, msg_obj):
+        """Ingest a `rxcfg` JSON line emitted by the dongle (FW v16+) in
+        response to a CONFIG_QUERY. Updates the in-memory receiver
+        status snapshot AND mirrors the values back into the Receivers
+        table so they survive a daemon / host restart.
+        """
+        ident = msg_obj.get('i')
+        if not ident:
+            return
+        # Update in-memory status so the broadcast state file reflects
+        # the new values immediately. Reuse _merge_receiver so the same
+        # ABBR -> full-name mapping applies (incl. the new fw/bv/etc.
+        # keys added above).
+        if ident in self.receivers:
+            self._merge_receiver(msg_obj, lmtoffset=0)
+            # Stamp lmt with host-now: the rxcfg arrived via the same
+            # USB-CDC path as rxupd does for successful TX, so host time
+            # is the most accurate "last contact" we have.
+            self.receivers[ident].setdefault('status', {})
+            self.receivers[ident]['status']['lmt'] = int(time.time() * 1000)
+        else:
+            print(f"rxcfg from unknown ident {ident}; ignoring")
+
+        # Persist to DB. Cast through process_rxcfg_msg's input so a
+        # missing key (older dongle FW or partial parse) drops gracefully
+        # to NULL/None instead of crashing.
+        self._persist_rxcfg_to_db(
+            ident,
+            msg_obj.get('fw'),
+            msg_obj.get('bv'),
+            msg_obj.get('ca'),
+            msg_obj.get('fd'),
+        )
+
+    def fetch_receiver_config(self, ident, fire_duration_ms=None):
+        """Send a `rxcfg` command to the dongle. With no args it's a
+        pure fetch; pass `fire_duration_ms` to also write a new fire
+        pulse width before the receiver sends its CONFIG_RESPONSE.
+
+        The receiver's response lands asynchronously as a `rxcfg` JSON
+        line that process_rxcfg_msg ingests + persists. Returns True if
+        the command was queued on the dongle, regardless of whether the
+        receiver eventually answers.
+        """
+        if ident not in self.receivers:
+            print(f"fetch_receiver_config: unknown ident {ident}")
+            return False
+        if self.receivers[ident].get('type') == 'BILUSOCN_433_TX_ONLY':
+            return False  # one-way device; nothing to fetch
+        cmd = f"rxcfg {ident}"
+        if fire_duration_ms is not None:
+            try:
+                fdv = int(fire_duration_ms)
+            except (TypeError, ValueError):
+                print(f"fetch_receiver_config: bad fire_duration_ms {fire_duration_ms!r}")
+                return False
+            # Receiver firmware clamps to [50, 5000]; reject outright on
+            # the host side too so the operator gets immediate feedback
+            # rather than silently discovering the clamp later.
+            if not (50 <= fdv <= 5000):
+                print(f"fetch_receiver_config: fire_duration_ms {fdv} out of range [50, 5000]")
+                return False
+            cmd += f" fd {fdv}"
+        try:
+            self.parent.send_serial_command(cmd)
+            return True
+        except Exception as e:
+            print(f"fetch_receiver_config({ident}): {e}")
+            return False
+
+    def fetch_all_receiver_configs(self, fire_duration_ms=None):
+        """Run fetch_receiver_config across every connected receiver.
+        Used by the settings-panel "set fire duration for all receivers"
+        action and the UI's "refresh everyone" button. Returns the list
+        of ident -> bool results so the caller can surface partial
+        failures."""
+        results = {}
+        for ident in list(self.receivers.keys()):
+            if not self.receiver_is_connected(ident):
+                results[ident] = False
+                continue
+            ok = self.fetch_receiver_config(ident, fire_duration_ms=fire_duration_ms)
+            results[ident] = ok
+            # Light spacing so the dongle's 128-deep queue doesn't
+            # saturate when broadcasting to ~30 receivers (each rxcfg
+            # turns into a CONFIG_QUERY + a follow-up CLOCK_SYNC, so we
+            # enqueue 2 slots per receiver).
+            time.sleep(0.04)
+        return results
 
     def process_serial_in(self, msg):
         if(self.parent.debug_mode):
@@ -694,6 +999,15 @@ class BYHProtocolHandler:
                 msg_type = msg_obj.get('type','status')
 
                 if(msg_type == 'status'):
+                    # Capture the dongle's own FW version from its
+                    # heartbeat. We surface it in fw_state.dongle so the
+                    # UI's update flow can show "currently running v15,
+                    # uploading v16" before the operator clicks flash.
+                    if 'fw' in msg_obj:
+                        try:
+                            self.parent.dongle_fw_version = int(msg_obj['fw'])
+                        except (TypeError, ValueError):
+                            pass
                     # Capture the active RF channel from each status frame.
                     # The dongle started reporting `ch` in FW v6; older
                     # firmware just won't include the key (None on parent).
@@ -731,6 +1045,14 @@ class BYHProtocolHandler:
                     self.parent.mark_state_dirty()
                 elif(msg_type == 'rxupd'):
                     self.process_rxupd_msg(msg_obj)
+                    self.parent.mark_state_dirty()
+                elif(msg_type == 'rxcfg'):
+                    # FW v16+ receiver-config response. Lands every time
+                    # the dongle finishes a CONFIG_QUERY round (operator-
+                    # initiated rxcfg command, or auto-query on initial
+                    # connect / post-prune re-discovery). Persists to DB
+                    # AND updates the in-memory snapshot for the UI.
+                    self.process_rxcfg_msg(msg_obj)
                     self.parent.mark_state_dirty()
                 elif(msg_type == 'scan_result'):
                     self._handle_scan_result(msg_obj)

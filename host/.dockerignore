@@ -1,0 +1,44 @@
+# Keep host-built artifacts out of the Docker build context. Without this,
+# `COPY byh_app/backyardhero /app/byh_app/` in the Dockerfile clobbers the
+# Linux-ABI node_modules that `npm ci` just built inside the image with the
+# macOS Mach-O ones from the developer's laptop, which then crash at runtime
+# with "invalid ELF header" on better_sqlite3.node and friends.
+
+# Node / Next.js build outputs
+**/node_modules
+**/.next
+**/.turbo
+**/.swc
+**/npm-debug.log*
+**/yarn-debug.log*
+**/yarn-error.log*
+**/.pnpm-debug.log*
+
+# Python
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/venv
+**/.venv
+
+# Local data + secrets that shouldn't bake into the image
+data/
+**/.env
+**/.env.local
+**/.env.*.local
+
+# Editor / OS noise
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+**/*.swp
+
+# VCS
+.git
+.gitignore
+.gitattributes

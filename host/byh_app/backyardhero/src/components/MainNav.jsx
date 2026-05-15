@@ -5,6 +5,7 @@ import { MdAssignment, MdHome } from "react-icons/md";
 
 import useAppStore from "@/store/useAppStore";
 import useAppMode from "@/design/useAppMode";
+import useShowReceiverVerification from "@/util/useShowReceiverVerification";
 import AppShell from "./shell/AppShell";
 import TopBar from "./shell/TopBar";
 import StatusBar from "./shell/StatusBar";
@@ -43,6 +44,10 @@ export default function MainNav() {
   const [currTab, setCurrTab] = useState("main");
   const hasStagedShow = Boolean(stagedShow?.id);
   const { mode } = useAppMode();
+  // Watch for receiver verification failures on the staged show. The
+  // result drives a red X badge on the Receivers menu item and is also
+  // consumed downstream by the Load Show gate in ShowControl.
+  const verification = useShowReceiverVerification();
 
   // Loadout tab only makes sense when there's something staged. If the
   // user is on it and the staged show goes away, fall back to console.
@@ -61,8 +66,19 @@ export default function MainNav() {
     hydrateStagedShowFromId();
   }, [shows, inventoryById, hydrateStagedShowFromId]);
 
-  const tabs = TABS
-    .map((t) => t.key === "loadout" ? { ...t, hidden: !hasStagedShow } : t);
+  const tabs = TABS.map((t) => {
+    if (t.key === "loadout") return { ...t, hidden: !hasStagedShow };
+    if (t.key === "receivers" && verification.hasError) {
+      return {
+        ...t,
+        errorBadge:
+          verification.summary
+            ? `Show receiver issues: ${verification.summary}`
+            : "Show receiver issues",
+      };
+    }
+    return t;
+  });
 
   const armedRail = mode.id === "armed" || mode.id === "live" || mode.id === "manual_fire";
 

@@ -12,6 +12,7 @@ import useAppMode from "@/design/useAppMode";
 import { Card, Button, Badge, Stat, IconButton, cn } from "@/design";
 import { protoStatusBadge, protoStatusLabel } from "@/util/protoStatus";
 import { audioFieldFromShow } from "@/utils/audioTracks";
+import useShowReceiverVerification from "@/util/useShowReceiverVerification";
 
 // Per-press magnitude of the live audio sync scrubber.
 const SYNC_NUDGE_MS = 50;
@@ -301,6 +302,11 @@ export default function ShowControl({
   const { stagedShow, setStagedShow, updateShow } = useAppStore();
   const { stateData } = useStateAppStore();
   const { mode, isShowLoaded, protoStatus, isArmed, startSwActive } = useAppMode();
+  // Receiver verification for the staged show. Drives the Load Show
+  // disabled/blocked state below: if the show references a missing /
+  // disabled / under-cued receiver the operator can't load until they
+  // fix it on the Receivers page (or re-edit the show).
+  const showRcvVerification = useShowReceiverVerification();
 
   // ---------------------------------------------------------------------
   // Audio sync offset rendering. The state itself lives in ConsolePanel
@@ -423,6 +429,22 @@ export default function ShowControl({
         icon: <FaTriangleExclamation aria-hidden />,
         hint: "Turn the show start switch OFF, then load.",
       };
+      // Receiver verification block. We refuse to load a show that
+      // references receivers that aren't there / are disabled / can't
+      // accommodate the configured cue count — the daemon would surface
+      // less helpful errors mid-load anyway. The operator can resolve
+      // either on the Receivers page or by re-editing the show.
+      if (showRcvVerification.hasError) {
+        return {
+          label: "Resolve receivers",
+          variant: "danger",
+          disabled: true,
+          icon: <FaTriangleExclamation aria-hidden />,
+          hint: showRcvVerification.summary
+            ? `Receivers: ${showRcvVerification.summary}`
+            : "Show has receiver verification errors",
+        };
+      }
       return {
         label: "Load show",
         variant: "primary",
@@ -512,7 +534,8 @@ export default function ShowControl({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLive, waitingClientStart, dstc, isShowLoaded, hasErrors, isReadyToFire,
-      allReceiversOnline, errors?.length, protoStatus, isArmed, startSwActive]);
+      allReceiversOnline, errors?.length, protoStatus, isArmed, startSwActive,
+      showRcvVerification.hasError, showRcvVerification.summary]);
 
   // Status chip describing show pre-checks (calm wording, single source).
   // Note: the T-N countdown is *not* rendered here -- during
@@ -571,6 +594,26 @@ export default function ShowControl({
           ) : null}
         </div>
       </div>
+
+      {/* Receiver verification banner. Shown ONLY when the staged show
+          has verification errors AND it isn't already loaded — at that
+          point the daemon is already enforcing whatever set of receivers
+          the load wired up, so warning here would be noise. */}
+      {!isShowLoaded && showRcvVerification.hasError ? (
+        <div className="flex items-start gap-2 rounded-sm border border-danger/40 bg-danger-bg/60 px-3 py-2 text-xs text-danger-fg">
+          <FaTriangleExclamation className="mt-0.5 shrink-0" aria-hidden />
+          <div>
+            <div className="font-medium">
+              This show can't be loaded: {showRcvVerification.summary}.
+            </div>
+            <div className="opacity-80 mt-0.5">
+              Fix the affected receivers on the Receivers page (add, enable,
+              or increase their cue count) — or re-open the show and adjust
+              its receiver list.
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {/* Primary action row: ONE button, hero size. */}
       <div className="flex items-center gap-4 flex-wrap">

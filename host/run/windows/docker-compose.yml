@@ -1,0 +1,31 @@
+# Production compose for Windows development boxes (Docker Desktop).
+#
+# Mirrors the osx prod compose. Docker Desktop on Windows resolves
+# host.docker.internal natively (no extra_hosts needed) and we don't
+# bind port 80 (Windows hosts often have IIS or other services there).
+
+services:
+  firework-system:
+    image: ${BYH_IMAGE:-os4ivmb/backyardhero:latest}
+    container_name: firework-system
+    restart: unless-stopped
+    volumes:
+      - ../../data:/data
+      - ../../config:/config
+      - /tmp/d_cmd:/tmp/d_cmd
+      # Dongle-update staging dir, bind-mounted at the same path on
+      # both sides. Next.js (in the container) writes uploaded
+      # firmware bins here; the host-side bridge process reads the
+      # same paths when invoking esptool. Docker Desktop on Windows
+      # maps /tmp/* through its WSL2 backend, same way it does for
+      # /tmp/d_cmd above.
+      - /tmp/ota_staging:/tmp/ota_staging
+    ports:
+      - "1776:1776"  # Next.js app
+      - "8090:8090"  # WebSocket server
+    environment:
+      - SERIAL_PORT=${SERIAL_PORT:-COM3}
+      - SERIAL_BAUD=115200
+      - LED_STATE_FILE=/data/ledstate
+      - NODE_ENV=production
+    privileged: true

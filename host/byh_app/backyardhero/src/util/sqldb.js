@@ -69,7 +69,8 @@ function initializeDatabase() {
       protocol TEXT,
       audio_file TEXT, -- To store audio file path and metadata as JSON
       receiver_locations TEXT, -- To store receiver positions as JSON
-      receiver_labels TEXT -- To store receiver labels as JSON
+      receiver_labels TEXT, -- To store receiver labels as JSON
+      show_receivers TEXT -- To store per-show receiver list as JSON: [{ id, label?, cues }]
     );
   `;
 
@@ -125,6 +126,20 @@ function initializeDatabase() {
   // the receiver ident (e.g. "RX163"); cues_data and metadata are JSON blobs;
   // configuration_version is bumped on every UPDATE so other components can
   // trivially detect changes.
+  //
+  // Receiver-reported fields (FW v22+ via the dongle's RECEIVER_CONFIG_RESPONSE):
+  //   fw_version       INT    -- nullable until first config response lands
+  //   board_version    INT    -- ditto
+  //   cues_available   INT    -- physically-usable cues per the receiver's
+  //                              own NUM_BOARDS detection. 0 when no boards
+  //                              are plugged in. Authoritative; replaces the
+  //                              old "operator types a cue count in the UI"
+  //                              flow.
+  //   config_data      JSON   -- writable per-receiver runtime config:
+  //                              { fire_duration_ms?: number, ... }
+  //                              The daemon mirrors the latest values it got
+  //                              back from the receiver here so they survive
+  //                              host restarts.
   const createReceiversTable = `
     CREATE TABLE IF NOT EXISTS Receivers (
       id TEXT PRIMARY KEY NOT NULL,
@@ -134,6 +149,10 @@ function initializeDatabase() {
       enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
       metadata TEXT NOT NULL DEFAULT '{}', -- JSON: any extra fields
       configuration_version INTEGER NOT NULL DEFAULT 1,
+      fw_version INTEGER,
+      board_version INTEGER,
+      cues_available INTEGER,
+      config_data TEXT NOT NULL DEFAULT '{}', -- JSON: { fire_duration_ms?: number, ... }
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
     );
@@ -151,6 +170,20 @@ function initializeDatabase() {
       // Column already exists, ignore error
       if (!err.message.includes('duplicate column name')) {
         console.error("Error adding receiver_labels column:", err.message);
+      }
+    }
+
+    // Per-show receivers list (JSON). The Show now owns the canonical list of
+    // receivers + cue counts it uses; the builder no longer derives the
+    // editable target grid from the global Receivers table at edit time. Old
+    // shows that pre-date this column have it as NULL and the builder
+    // back-fills from items[] + receiver_labels on first edit.
+    try {
+      db.exec(`ALTER TABLE Show ADD COLUMN show_receivers TEXT`);
+      console.log("Added show_receivers column to Show table.");
+    } catch (err) {
+      if (!err.message.includes('duplicate column name')) {
+        console.error("Error adding show_receivers column:", err.message);
       }
     }
     
@@ -213,6 +246,31 @@ function initializeDatabase() {
 
     db.exec(createReceiversTable);
     console.log("Checked/created Receivers table.");
+
+    // Migrations for receiver-reported config columns (FW v22+). Wrapped in
+    // individual try/catches so an existing column doesn't abort the rest.
+    // Schema choices:
+    //   * fw_version / board_version / cues_available are nullable -- they
+    //     stay NULL until the receiver first answers a CONFIG_QUERY, which
+    //     lets the UI distinguish "haven't queried yet" from "really 0".
+    //   * config_data defaults to '{}' so the JSON.parse path in
+    //     _hydrateReceiverRow can always succeed without a NULL guard.
+    for (const sql of [
+      `ALTER TABLE Receivers ADD COLUMN fw_version INTEGER`,
+      `ALTER TABLE Receivers ADD COLUMN board_version INTEGER`,
+      `ALTER TABLE Receivers ADD COLUMN cues_available INTEGER`,
+      `ALTER TABLE Receivers ADD COLUMN config_data TEXT NOT NULL DEFAULT '{}'`,
+    ]) {
+      try {
+        db.exec(sql);
+        console.log(`Migration applied: ${sql}`);
+      } catch (err) {
+        if (!err.message.includes('duplicate column name')) {
+          console.error(`Receivers migration failed (${sql}):`, err.message);
+        }
+      }
+    }
+
     seedReceiversFromSystemCfgIfEmpty();
   } catch (err) {
     console.error("Error initializing database tables:", err.message);
@@ -276,10 +334,10 @@ function seedReceiversFromSystemCfgIfEmpty() {
 initializeDatabase(); // Initialize database on load
 
 export const showQueries = {
-  insert: db.prepare(`INSERT INTO Show (name, duration, version, runtime_version, display_payload, runtime_payload, authorization_code, protocol, audio_file, receiver_locations, receiver_labels)
-                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  insert: db.prepare(`INSERT INTO Show (name, duration, version, runtime_version, display_payload, runtime_payload, authorization_code, protocol, audio_file, receiver_locations, receiver_labels, show_receivers)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
   getAll: db.prepare(`SELECT * FROM Show`),
-  update: db.prepare(`UPDATE Show SET name = ?, duration = ?, version = ?, runtime_version = ?, display_payload = ?, runtime_payload = ?, authorization_code = ?, protocol = ?, audio_file = ?, receiver_locations = ?, receiver_labels = ? WHERE id = ?`),
+  update: db.prepare(`UPDATE Show SET name = ?, duration = ?, version = ?, runtime_version = ?, display_payload = ?, runtime_payload = ?, authorization_code = ?, protocol = ?, audio_file = ?, receiver_locations = ?, receiver_labels = ?, show_receivers = ? WHERE id = ?`),
   delete: db.prepare(`DELETE FROM Show WHERE id = ?`), // Delete query
 };
 
@@ -325,12 +383,16 @@ const _receiverStmts = {
   getAll: db.prepare(`SELECT * FROM Receivers ORDER BY id`),
   getById: db.prepare(`SELECT * FROM Receivers WHERE id = ?`),
   insert: db.prepare(`
-    INSERT INTO Receivers (id, label, type, cues_data, enabled, metadata, configuration_version)
-    VALUES (?, ?, ?, ?, ?, ?, 1)
+    INSERT INTO Receivers (id, label, type, cues_data, enabled, metadata, configuration_version, config_data)
+    VALUES (?, ?, ?, ?, ?, ?, 1, ?)
   `),
   // The COALESCE-with-current-row pattern lets callers PATCH any subset of
   // columns without clobbering the others. configuration_version bumps on
   // every update.
+  //
+  // Receiver-reported columns (fw_version / board_version / cues_available /
+  // config_data) are part of the same patch surface so the daemon can write
+  // them via the same helper -- no special-casing.
   update: db.prepare(`
     UPDATE Receivers SET
       label = COALESCE(?, label),
@@ -338,6 +400,10 @@ const _receiverStmts = {
       cues_data = COALESCE(?, cues_data),
       enabled = COALESCE(?, enabled),
       metadata = COALESCE(?, metadata),
+      fw_version = COALESCE(?, fw_version),
+      board_version = COALESCE(?, board_version),
+      cues_available = COALESCE(?, cues_available),
+      config_data = COALESCE(?, config_data),
       configuration_version = configuration_version + 1,
       updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
@@ -349,20 +415,23 @@ function _hydrateReceiverRow(row) {
   if (!row) return null;
   let cues = {};
   let metadata = {};
+  let configData = {};
   try { cues = row.cues_data ? JSON.parse(row.cues_data) : {}; } catch { cues = {}; }
   try { metadata = row.metadata ? JSON.parse(row.metadata) : {}; } catch { metadata = {}; }
+  try { configData = row.config_data ? JSON.parse(row.config_data) : {}; } catch { configData = {}; }
   return {
     ...row,
     enabled: row.enabled === 1,
     cues_data: cues,
     metadata,
+    config_data: configData,
   };
 }
 
 export const receiverQueries = {
   getAll: () => _receiverStmts.getAll.all().map(_hydrateReceiverRow),
   getById: (id) => _hydrateReceiverRow(_receiverStmts.getById.get(id)),
-  insert: ({ id, label, type, cues_data = {}, enabled = true, metadata = {} }) => {
+  insert: ({ id, label, type, cues_data = {}, enabled = true, metadata = {}, config_data = {} }) => {
     return _receiverStmts.insert.run(
       id,
       label || id,
@@ -370,20 +439,31 @@ export const receiverQueries = {
       JSON.stringify(cues_data),
       enabled ? 1 : 0,
       JSON.stringify(metadata),
+      JSON.stringify(config_data),
     );
   },
   /**
    * Patch-style update. Pass only the fields you want to change; pass
    * undefined for any field to leave it alone. Returns the run() result
    * (with `.changes`).
+   *
+   * Pass numbers (or null to clear) for fw_version/board_version/cues_available;
+   * pass an object for config_data (it'll be JSON.stringified).
    */
-  update: (id, { label, type, cues_data, enabled, metadata } = {}) => {
+  update: (id, {
+    label, type, cues_data, enabled, metadata,
+    fw_version, board_version, cues_available, config_data,
+  } = {}) => {
     return _receiverStmts.update.run(
       label === undefined ? null : label,
       type === undefined ? null : type,
       cues_data === undefined ? null : JSON.stringify(cues_data),
       enabled === undefined ? null : (enabled ? 1 : 0),
       metadata === undefined ? null : JSON.stringify(metadata),
+      fw_version === undefined ? null : fw_version,
+      board_version === undefined ? null : board_version,
+      cues_available === undefined ? null : cues_available,
+      config_data === undefined ? null : JSON.stringify(config_data),
       id,
     );
   },

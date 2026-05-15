@@ -11,6 +11,13 @@ const receiverRowToStoreEntry = (row) => ({
   enabled: !!row.enabled,
   metadata: row.metadata || {},
   configuration_version: row.configuration_version,
+  // Receiver-reported config (FW v22+ via the dongle). Null until the
+  // first CONFIG_RESPONSE lands; the UI uses null vs 0 to distinguish
+  // "haven't queried yet" from "really 0 cues / no boards".
+  fw_version: row.fw_version ?? null,
+  board_version: row.board_version ?? null,
+  cues_available: row.cues_available ?? null,
+  config_data: row.config_data || {},
 });
 
 // We persist only a tiny subset (the staged show ID) to localStorage. The
@@ -74,7 +81,23 @@ const useAppStore = create(persist((set, get) => ({
         } else {
           show.receiverLabels = null;
         }
-        
+
+        // Parse show_receivers JSON if present. This is the per-show canonical
+        // list of receivers / cue counts, owned by the show itself rather than
+        // derived from the global Receivers table. Pre-migration shows have it
+        // as null and the builder back-fills on first edit.
+        if (show.show_receivers) {
+          try {
+            const parsed = JSON.parse(show.show_receivers);
+            show.showReceivers = Array.isArray(parsed) ? parsed : [];
+          } catch (e) {
+            console.error('Failed to parse show_receivers for show:', show.id, e);
+            show.showReceivers = [];
+          }
+        } else {
+          show.showReceivers = [];
+        }
+
         acc[show.id] = show;
         return acc;
       }, {});
@@ -188,7 +211,21 @@ const useAppStore = create(persist((set, get) => ({
         console.error('Failed to parse audio_file for staged show:', e);
       }
     }
-    set({ stagedShow: { ...found, items, audioFile, audioTracks, audioOffsetMs } });
+    // Pass through showReceivers (already parsed during fetchShows). If a
+    // caller staged the show before fetchShows ran, fall back to parsing the
+    // raw `show_receivers` column here so the hydrated object is complete.
+    let showReceivers = Array.isArray(found.showReceivers) ? found.showReceivers : null;
+    if (!showReceivers && found.show_receivers) {
+      try {
+        const parsed = JSON.parse(found.show_receivers);
+        showReceivers = Array.isArray(parsed) ? parsed : [];
+      } catch (e) {
+        console.error('Failed to parse show_receivers for staged show:', e);
+        showReceivers = [];
+      }
+    }
+    if (!showReceivers) showReceivers = [];
+    set({ stagedShow: { ...found, items, audioFile, audioTracks, audioOffsetMs, showReceivers } });
   },
 
   loadedShow: {},
@@ -308,14 +345,7 @@ const useAppStore = create(persist((set, get) => ({
       const { data } = await axios.get('/api/receivers');
       const byId = {};
       for (const row of data) {
-        byId[row.id] = {
-          label: row.label,
-          type: row.type,
-          cues: row.cues_data || {},
-          enabled: !!row.enabled,
-          metadata: row.metadata || {},
-          configuration_version: row.configuration_version,
-        };
+        byId[row.id] = receiverRowToStoreEntry(row);
       }
       set({ receivers: byId });
       return byId;
@@ -405,6 +435,30 @@ const useAppStore = create(persist((set, get) => ({
       await axios.post(`/api/receivers/${id}/retry`);
     } catch (error) {
       console.error(`Failed to send retry_receiver(${id}):`, error);
+      throw error;
+    }
+  },
+
+  /**
+   * Send a CONFIG_QUERY to a single receiver (or all of them when `id` is
+   * undefined / null). Optionally set the receiver's fire_duration_ms in
+   * the same round-trip. The daemon writes the response back to the
+   * Receivers table; UI consumers should refresh via fetchReceivers()
+   * after a short delay (~500-1000ms) to pick up the new values.
+   */
+  fetchReceiverConfig: async (id, { fire_duration_ms } = {}) => {
+    try {
+      const body = {};
+      if (fire_duration_ms !== undefined && fire_duration_ms !== null) {
+        body.fire_duration_ms = fire_duration_ms;
+      }
+      const url = id ? `/api/receivers/${id}/rxcfg` : '/api/receivers/rxcfg';
+      await axios.post(url, body);
+    } catch (error) {
+      console.error(
+        `Failed to queue rxcfg(${id ?? 'all'}):`,
+        error?.response?.data || error,
+      );
       throw error;
     }
   },

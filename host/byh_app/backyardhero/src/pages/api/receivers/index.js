@@ -8,7 +8,11 @@ import { receiverQueries } from "@/util/sqldb";
  *
  * POST /api/receivers
  *   → create a new receiver row (id is required and must be unique).
- *     Body: { id, label?, type, cues_data?, enabled?, metadata? }
+ *     Body: { id, label?, type, cues_data?, enabled?, metadata?, config_data? }
+ *
+ * GET responses include the receiver-reported fields: fw_version,
+ * board_version, cues_available, config_data. fw/board/cues_available
+ * are NULL until the receiver has answered a CONFIG_QUERY at least once.
  */
 export default function handler(req, res) {
   if (req.method === 'GET') {
@@ -22,7 +26,7 @@ export default function handler(req, res) {
   }
 
   if (req.method === 'POST') {
-    const { id, label, type, cues_data, enabled, metadata } = req.body || {};
+    const { id, label, type, cues_data, enabled, metadata, config_data } = req.body || {};
     if (!id || typeof id !== 'string') {
       return res.status(400).json({ error: 'id is required (string).' });
     }
@@ -40,6 +44,7 @@ export default function handler(req, res) {
         cues_data: cues_data || { [id]: [] },
         enabled: enabled !== undefined ? !!enabled : true,
         metadata: metadata || {},
+        config_data: config_data || {},
       });
       return res.status(201).json(receiverQueries.getById(id));
     } catch (error) {

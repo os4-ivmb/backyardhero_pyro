@@ -14,11 +14,15 @@ import {
   MdRefresh,
   MdWarning,
   MdAdd,
-  MdClose
+  MdClose,
+  MdSettingsBackupRestore,
 } from 'react-icons/md';
 import { FaSpinner } from 'react-icons/fa';
+import { FaCircleQuestion, FaTriangleExclamation } from 'react-icons/fa6';
 import ShowHealth from "../homepanel/ShowHealth";
 import { isPollableReceiver } from "@/util/receivers";
+import { SHOW_RECEIVER_STATUS } from "@/util/showReceivers";
+import useShowReceiverVerification from "@/util/useShowReceiverVerification";
 
 // FW_VERSION: Frontend version tracking for ReceiverDisplay component
 // v1.0.0: Initial version - Basic receiver display with battery, connectivity, and cue status
@@ -29,7 +33,46 @@ import { isPollableReceiver } from "@/util/receivers";
 // v1.5.0: Drop the analog freshness bar in favour of a 3-tone status (green/orange/red) keyed off raw seconds, plus a top-level segmented bar with one segment per enabled receiver.
 // v1.5.1: Tighten cue chip sizing and force a 5-wide cue grid on receiver cards.
 // v1.5.2: Use px-3 cue chip padding for a little more breathing room inside the 5-wide grid.
-const FW_VERSION = "1.5.2";
+// v1.6.0: Receiver-reported config (paired with receiver FW v22+ / dongle FW v16+):
+//   * Per-receiver "fetch config" icon button on actively connected cards.
+//   * Dropped the manual "# Cues" input -- cues_data is now auto-derived from
+//     the receiver's NUM_BOARDS detection (cues_available in the rxcfg
+//     response). The card surfaces FW / board version and the live
+//     cue-count read so operators have a single source of truth.
+// v1.7.0: Add an optional "Force zones" override in the edit panel
+//   (multiples of 8, plus "Don't force"). When set, persisted into
+//   config_data.force_cues_available; the daemon ignores subsequent
+//   NUM_BOARDS reads for the cues_data sync, and the UI displays the
+//   forced count with a "(forced)" suffix.
+const FW_VERSION = "1.7.0";
+
+// Selectable values for the "Force zones" override on non-Bilusocn
+// receivers. 0 means "no override" -- read the receiver's NUM_BOARDS
+// detection. The non-zero values are multiples of 8 because every
+// physical cue board is 8 outputs (NUM_LEDS = 8 * NUM_BOARDS), so
+// forcing a non-multiple has no useful interpretation on the wire.
+const FORCE_ZONES_OPTIONS = [0, 8, 16, 24, 32, 40, 48, 56, 64];
+
+// Read the host-side cue-count override out of a receiver row's
+// config_data, returning 0 when unset / invalid (the "Don't force"
+// option). Only accepts positive integers; the daemon enforces the
+// same on persistence.
+function getForceCuesAvailable(receiver) {
+  const v = receiver?.config_data?.force_cues_available;
+  if (v == null) return 0;
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? n : 0;
+}
+
+// "Effective" cue count = forced override (when set) or the
+// receiver-reported cues_available. Returns null when neither is
+// known (operator hasn't fetched cfg yet AND nothing's pinned).
+function effectiveCueCount(receiver) {
+  const forced = getForceCuesAvailable(receiver);
+  if (forced > 0) return forced;
+  const reported = receiver?.cues_available;
+  return reported == null ? null : reported;
+}
 
 // Discrete freshness tones. Operators were misreading the analog bar as
 // "the radio is laggy" when it was just polling cadence; the discrete
@@ -139,6 +182,13 @@ function SingleReceiver({
   onPendingEditChange, // (id, patch) => void
   onRetry, // (id) => void
   retryBusy = false,
+  // Receiver-config fetch (FW v22+ / dongle FW v16+)
+  onFetchConfig, // (id) => Promise<void> | void
+  fetchConfigBusy = false,
+  // When true, render the per-card debug info row (Cues / FW / Board /
+  // Fire ms). Off by default to keep the live status grid scannable;
+  // toggled from the Receivers page header by the operator.
+  debugDisplay = false,
 }) {
   const [popup, setPopup] = useState(null);
   const receiverRef = useRef(null);
@@ -240,6 +290,19 @@ function SingleReceiver({
     ? pendingEdit.rangeStart
     : (bilusocnCurrent?.rangeStart ?? DEFAULT_BILUSOCN_RANGE_START);
 
+  // Host-side "Force zones" override. 0 means "don't force" (use the
+  // receiver-reported cues_available). Pending value falls back to the
+  // currently-persisted override.
+  const currentForceZones = getForceCuesAvailable(receiver);
+  const editForceZones = pendingEdit?.forceZones !== undefined
+    ? pendingEdit.forceZones
+    : currentForceZones;
+  // What the card *thinks* the receiver has, for the non-edit display.
+  // Forced value takes precedence; otherwise the receiver-reported
+  // cues_available (which may be null when no rxcfg has landed yet).
+  const displayCueCount = effectiveCueCount(receiver);
+  const isForcedActive = currentForceZones > 0;
+
   // The retry button is visible whenever the receiver is enabled — it's the
   // only way to recover a pruned receiver without restarting the daemon.
   const showRetry = isEnabled && typeof onRetry === 'function';
@@ -311,11 +374,33 @@ function SingleReceiver({
         )}
       </div>
 
-      {/* Retry connection button. Always available when enabled (even when
-          edit mode is locked) so a pruned receiver can be re-added on the
-          fly. Hidden for one-way TX-only types — there's nothing to poll. */}
+      {/* Per-card action row: retry connection + fetch receiver config.
+          Both are always available when enabled (even when edit mode is
+          locked) so a pruned receiver can be re-added on the fly and an
+          operator can refresh the rxcfg snapshot mid-show without
+          touching anything else. Hidden for one-way TX-only types --
+          there's nothing to poll, no rxcfg to fetch. */}
       {showRetry && receiver.type !== 'BILUSOCN_433_TX_ONLY' && (
-        <div className="flex">
+        <div className="flex gap-2">
+          {typeof onFetchConfig === 'function' && (
+            <button
+              type="button"
+              disabled={fetchConfigBusy || !isConnectionGood}
+              onClick={() => onFetchConfig(rcv_name)}
+              className={`flex items-center gap-1 px-2 py-1 text-xs rounded
+                ${fetchConfigBusy || !isConnectionGood
+                  ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
+                  : 'bg-gray-700 hover:bg-gray-600 text-gray-200'}`}
+              title={
+                isConnectionGood
+                  ? 'Fetch receiver config (NUM_BOARDS, fire duration, FW)'
+                  : 'Receiver is not connected'
+              }
+            >
+              <MdSettingsBackupRestore className={fetchConfigBusy ? 'animate-spin' : ''} />
+              Fetch cfg
+            </button>
+          )}
           <button
             type="button"
             disabled={retryBusy}
@@ -329,6 +414,45 @@ function SingleReceiver({
             <MdRefresh className={retryBusy ? 'animate-spin' : ''} />
             Retry
           </button>
+        </div>
+      )}
+
+      {/* Receiver-reported config snapshot. Shown when we've gotten at
+          least one CONFIG_RESPONSE for this receiver OR an operator
+          has pinned a force_cues_available override (the override is
+          authoritative even before the first rxcfg lands).
+          Hidden in edit mode because the edit panel surfaces the same
+          numbers in a writable shape. Also hidden unless the operator
+          toggles "Debug Display" up top -- on a busy show the row is
+          mostly noise once you've verified it once. */}
+      {!editMode && debugDisplay && (receiver.cues_available != null || isForcedActive) && (
+        <div className="text-xs text-gray-400 flex flex-wrap gap-x-3 gap-y-1">
+          <span>
+            Cues: <span className="text-gray-200">{displayCueCount ?? '—'}</span>
+            {isForcedActive && (
+              <span
+                className="text-amber-400 ml-1"
+                title={
+                  receiver.cues_available != null
+                    ? `Receiver reports ${receiver.cues_available} cues; host forced to ${currentForceZones}`
+                    : `Host forced to ${currentForceZones} cues (receiver hasn't reported yet)`
+                }
+              >
+                (forced)
+              </span>
+            )}
+          </span>
+          {receiver.fw_version != null && (
+            <span>FW <span className="text-gray-200">v{receiver.fw_version}</span></span>
+          )}
+          {receiver.board_version != null && (
+            <span>Board <span className="text-gray-200">v{receiver.board_version}</span></span>
+          )}
+          {receiver.config_data?.fire_duration_ms != null && (
+            <span>
+              Fire <span className="text-gray-200">{receiver.config_data.fire_duration_ms}ms</span>
+            </span>
+          )}
         </div>
       )}
 
@@ -498,27 +622,82 @@ function SingleReceiver({
               </label>
             </>
           ) : (
-            <label className="flex items-center gap-2">
-              <span className="text-xs text-gray-400 whitespace-nowrap"># Cues</span>
-              <input
-                type="number"
-                min={0}
-                max={256}
-                value={editCueCount}
+            <div className="flex flex-col gap-1">
+              <span className="text-xs text-gray-400">Force zones (optional)</span>
+              <select
+                value={editForceZones}
                 onChange={(e) =>
                   onPendingEditChange?.(rcv_name, {
-                    cueCount: Math.max(0, parseInt(e.target.value, 10) || 0),
+                    forceZones: parseInt(e.target.value, 10) || 0,
                   })
                 }
-                className="w-20 px-2 py-1 rounded bg-gray-900 border border-gray-600 text-white"
-              />
+                className="px-2 py-1 rounded bg-gray-900 border border-gray-600 text-white text-xs"
+              >
+                {FORCE_ZONES_OPTIONS.map((n) => (
+                  <option key={n} value={n}>
+                    {n === 0 ? "Don't force" : `${n} cues`}
+                  </option>
+                ))}
+              </select>
               <span className="text-xs text-gray-500">
-                writes 1..N under zone "{rcv_name}"
+                {receiver.cues_available != null ? (
+                  <>
+                    Receiver reports{' '}
+                    <span className="text-gray-300">{receiver.cues_available}</span>{' '}
+                    cues from NUM_BOARDS detection.
+                  </>
+                ) : (
+                  <>
+                    Receiver hasn't reported yet -- click "Fetch cfg" once it's online.
+                  </>
+                )}
+                {' '}When forced, the host treats this receiver as having exactly
+                that many cues regardless of what cfg fetch returns.
               </span>
-            </label>
+            </div>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// Placeholder tile rendered in place of a real receiver card when the show
+// references a receiver that doesn't currently exist on the system, or one
+// that has been disabled. Operators see one of these per problem so the
+// remediation path (Receivers admin → add/enable) is obvious without
+// having to cross-reference the show data.
+function ErrorReceiverTile({ entry, kind }) {
+  const icon =
+    kind === SHOW_RECEIVER_STATUS.MISSING ? (
+      <FaCircleQuestion className="text-red-400" size={28} />
+    ) : (
+      <FaTriangleExclamation className="text-red-400" size={28} />
+    );
+  const title = entry.label ? `${entry.label} (${entry.id})` : entry.id;
+  const message =
+    kind === SHOW_RECEIVER_STATUS.MISSING
+      ? "Not on this system."
+      : "Disabled.";
+  const hint =
+    kind === SHOW_RECEIVER_STATUS.MISSING
+      ? "Add it on the Receivers page (or remove it from the show)."
+      : "Re-enable it to load this show.";
+  return (
+    <div className="border rounded-xl p-4 bg-gray-800 text-white shadow-md border-red-500/70 flex flex-col gap-3 w-72 relative">
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold">
+          <span>{title}</span>
+        </h2>
+        {icon}
+      </div>
+      <div className="text-sm text-red-300">
+        <div className="font-medium">{message}</div>
+        <div className="text-xs text-red-300/80 mt-1">{hint}</div>
+      </div>
+      <div className="text-xs text-gray-500">
+        Show expects {entry.cues} cue{entry.cues === 1 ? "" : "s"}.
+      </div>
     </div>
   );
 }
@@ -533,6 +712,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       updateReceiver,
       reloadReceiversOnDaemon,
       retryReceiver,
+      fetchReceiverConfig,
     } = useAppStore();
     const { stateData } = useStateAppStore()
     const [ targetRcvMap, setTargetRcvMap ] = useState({});
@@ -540,12 +720,35 @@ export default function ReceiverDisplay({ setCurrentTab }) {
     const [showDisabledReceivers, setShowDisabledReceivers] = useState(false);
     const [receiverLabels, setReceiverLabels] = useState({});
 
+    // "Debug Display" toggle. Persisted to localStorage so the operator
+    // doesn't have to re-enable it after every page navigation. When on,
+    // each card shows a Cues / FW / Board / Fire row pulled from the
+    // receiver's last rxcfg response. Off by default -- the row is
+    // mostly noise once the fleet has been verified, and the live
+    // status icons + cue grid carry the day-to-day signal.
+    const [debugDisplay, setDebugDisplay] = useState(() => {
+      if (typeof window === 'undefined') return false;
+      try { return window.localStorage.getItem('byh.receivers.debugDisplay') === '1'; }
+      catch { return false; }
+    });
+    useEffect(() => {
+      if (typeof window === 'undefined') return;
+      try { window.localStorage.setItem('byh.receivers.debugDisplay', debugDisplay ? '1' : '0'); }
+      catch { /* localStorage unavailable -- ignore */ }
+    }, [debugDisplay]);
+
+    // Show-level verification. When a show is staged this drives the
+    // top-level error grid (one tile per receiver entry, colour-coded by
+    // status) plus the menu-bar X badge in the parent shell.
+    const verification = useShowReceiverVerification();
+
     // Edit-mode state
     const [unlocked, setUnlocked] = useState(false);
     // pendingEdits: { [rcvId]: { label?, enabled?, cueCount? } }
     const [pendingEdits, setPendingEdits] = useState({});
     const [savingEdits, setSavingEdits] = useState(false);
     const [retryBusy, setRetryBusy] = useState({}); // { [rcvId]: true }
+    const [fetchConfigBusy, setFetchConfigBusy] = useState({}); // { [rcvId]: true }
 
     // Add-receiver form state. Controlled inputs live here so the form
     // survives editing surrounding cards. The form is only rendered when the
@@ -657,9 +860,12 @@ export default function ReceiverDisplay({ setCurrentTab }) {
           const currentLabel = def.label || id;
           const currentEnabled = def.enabled !== false;
           const currentCueCount = cueCountFromCues(def.cues);
+          const currentForceZones = getForceCuesAvailable(def);
           const noLabelChange = merged.label === undefined || merged.label === currentLabel;
           const noEnabledChange = merged.enabled === undefined || merged.enabled === currentEnabled;
           const noCueChange = merged.cueCount === undefined || merged.cueCount === currentCueCount;
+          const noForceChange =
+            merged.forceZones === undefined || merged.forceZones === currentForceZones;
           // Bilusocn has separate zone+rangeStart fields. For BYH receivers
           // these stay undefined, so the checks below are no-ops.
           const bilusocnCurrent = isBilusocnType(def.type) ? parseBilusocnCues(def.cues) : null;
@@ -671,6 +877,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
             noLabelChange &&
             noEnabledChange &&
             noCueChange &&
+            noForceChange &&
             noZoneChange &&
             noRangeChange
           ) {
@@ -700,6 +907,39 @@ export default function ReceiverDisplay({ setCurrentTab }) {
         }, 800);
       }
     }, [retryReceiver]);
+
+    // Fire a CONFIG_QUERY at one receiver and re-pull the DB after a
+    // short delay so the new fw / cues_available / fire_duration_ms
+    // surface in the UI without the operator having to refresh.
+    //
+    // 1.5s is enough for: dongle to dispatch the query+followup
+    // (~50ms), receiver to respond (~10ms), daemon to ingest +
+    // sqlite-write (~50ms), state file flush (debounced to <500ms).
+    // The fetchReceivers GET reads straight from SQLite so it's
+    // authoritative even before the broadcast state file catches up.
+    const handleFetchConfig = useCallback(async (id) => {
+      setFetchConfigBusy((prev) => ({ ...prev, [id]: true }));
+      try {
+        await fetchReceiverConfig(id);
+        // The daemon writes the response asynchronously; wait briefly
+        // before re-fetching so the new row reflects the rxcfg.
+        setTimeout(() => {
+          fetchReceivers().catch((e) =>
+            console.error('fetchReceivers post-rxcfg failed:', e),
+          );
+        }, 1500);
+      } catch (e) {
+        console.error('Fetch config failed', e);
+      } finally {
+        setTimeout(() => {
+          setFetchConfigBusy((prev) => {
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          });
+        }, 1500);
+      }
+    }, [fetchReceiverConfig, fetchReceivers]);
 
     const handleLockClick = useCallback(async () => {
       if (!unlocked) {
@@ -744,6 +984,40 @@ export default function ReceiverDisplay({ setCurrentTab }) {
             edit.cueCount !== cueCountFromCues(def.cues)
           ) {
             patch.cues_data = buildCuesData(id, edit.cueCount);
+          }
+
+          // Force-zones override: persisted into config_data and also
+          // immediately reflected in cues_data so the UI / show builder
+          // see the new cue count without having to wait for the next
+          // rxcfg sync from the daemon. When set to 0 ("Don't force") we
+          // delete the override key and fall back to the receiver-
+          // reported cues_available.
+          if (!isBilusocnType(def.type) && edit.forceZones !== undefined) {
+            const currentForce = getForceCuesAvailable(def);
+            if (edit.forceZones !== currentForce) {
+              const existingCfg = (def.config_data && typeof def.config_data === 'object')
+                ? def.config_data
+                : {};
+              const nextCfg = { ...existingCfg };
+              if (edit.forceZones > 0) {
+                nextCfg.force_cues_available = edit.forceZones;
+              } else {
+                delete nextCfg.force_cues_available;
+              }
+              patch.config_data = nextCfg;
+
+              // Recompute cues_data to match the new effective count.
+              // Force > 0  -> use the forced count.
+              // Force == 0 -> fall back to cues_available; if that's
+              //               unknown, leave cues_data alone (the next
+              //               rxcfg will fix it).
+              const effective = edit.forceZones > 0
+                ? edit.forceZones
+                : (def.cues_available != null ? def.cues_available : null);
+              if (effective != null) {
+                patch.cues_data = buildCuesData(id, effective);
+              }
+            }
           }
           if (Object.keys(patch).length === 0) continue;
           await updateReceiver(id, patch);
@@ -1061,6 +1335,21 @@ export default function ReceiverDisplay({ setCurrentTab }) {
             <div className="flex justify-between items-center p-4 border-b border-gray-700">
                 <h1 className="text-2xl font-bold text-white">Receivers</h1>
                 <div className="flex items-center gap-3">
+                    {/* Operator-only debug toggle. Persisted to
+                        localStorage so it survives navigation but doesn't
+                        leak into a different operator's session. */}
+                    <label
+                      className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none hover:text-gray-200"
+                      title="Show per-card Cues / FW / Board / Fire row"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={debugDisplay}
+                        onChange={(e) => setDebugDisplay(e.target.checked)}
+                        className="h-3.5 w-3.5 accent-amber-500"
+                      />
+                      Debug Display
+                    </label>
                     {stagedShow && (
                         <button
                             onClick={() => setCurrentTab('loadout')}
@@ -1259,32 +1548,71 @@ export default function ReceiverDisplay({ setCurrentTab }) {
               </form>
             )}
 
-            {/* Used Receivers (filtered to enabled-only when locked) */}
-            {stagedShow && Object.keys(targetRcvMap).length > 0 && (
+            {/* Show-staged: the canonical list of receivers is the show's own
+                showReceivers array (now in-memory via the verification hook).
+                We render one tile per entry, choosing between a real
+                SingleReceiver card (with a red outline when the DB receiver
+                doesn't have enough cues) and an ErrorReceiverTile for the
+                missing/disabled cases. The Unused Receivers (DB receivers
+                NOT referenced by the show) still collapse below. */}
+            {verification.hasStagedShow && (
                 <div className="flex flex-wrap gap-5 p-4 justify-center">
-                    {visibleReceiverKeys
-                        .filter(rcv_key => targetRcvMap[rcv_key])
-                        .map((rcv_key, i) => (
+                    {verification.results.map((r, i) => {
+                        const id = r.entry.id;
+                        if (r.status === SHOW_RECEIVER_STATUS.MISSING ||
+                            r.status === SHOW_RECEIVER_STATUS.DISABLED) {
+                            return (
+                                <ErrorReceiverTile
+                                    key={`err-${id}-${i}`}
+                                    entry={r.entry}
+                                    kind={r.status}
+                                />
+                            );
+                        }
+                        const isInsufficient = r.status === SHOW_RECEIVER_STATUS.INSUFFICIENT;
+                        // SingleReceiver doesn't natively know how to render
+                        // the "insufficient cues" border so we wrap it in a
+                        // red-outlined frame and overlay the explanation.
+                        const tile = (
                             <SingleReceiver
-                              key={i}
-                              rcv_name={rcv_key}
-                              receiver={receivers[rcv_key]}
-                              showMapping={targetRcvMap[rcv_key]}
+                              key={`ok-${id}-${i}`}
+                              rcv_name={id}
+                              receiver={receivers[id]}
+                              showMapping={targetRcvMap[id]}
                               showId={stagedShow?.id}
-                              receiverLabel={receiverLabels[rcv_key]}
+                              receiverLabel={r.entry.label || receiverLabels[id]}
                               editMode={unlocked}
-                              pendingEdit={pendingEdits[rcv_key]}
+                              pendingEdit={pendingEdits[id]}
                               onPendingEditChange={handlePendingEditChange}
                               onRetry={handleRetry}
-                              retryBusy={!!retryBusy[rcv_key]}
+                              retryBusy={!!retryBusy[id]}
+                              onFetchConfig={handleFetchConfig}
+                              fetchConfigBusy={!!fetchConfigBusy[id]}
+                              debugDisplay={debugDisplay}
                             />
-                        ))}
+                        );
+                        if (!isInsufficient) return tile;
+                        return (
+                            <div
+                                key={`insuf-${id}-${i}`}
+                                className="rounded-xl ring-2 ring-red-500/70 ring-offset-2 ring-offset-gray-900 relative"
+                            >
+                                <div className="absolute -top-2 left-3 right-3 bg-gray-900 px-1 z-10 text-xs text-red-300 font-medium">
+                                    Show needs {r.entry.cues} cues, receiver has {r.have}
+                                </div>
+                                {tile}
+                            </div>
+                        );
+                    })}
                 </div>
             )}
 
-            {/* Unused Receivers - Collapsible (filtered to enabled-only when locked) */}
-            {stagedShow && Object.keys(targetRcvMap).length > 0 && (() => {
-                const unusedKeys = visibleReceiverKeys.filter(k => !targetRcvMap[k]);
+            {/* Unused Receivers - Collapsible. Under per-show receivers an
+                "unused" receiver is one that exists in the DB but isn't
+                referenced by the show's showReceivers list. */}
+            {verification.hasStagedShow && (() => {
+                const referenced = new Set(verification.results.map((r) => r.entry.id));
+                const unusedKeys = visibleReceiverKeys.filter((k) => !referenced.has(k));
                 if (unusedKeys.length === 0) return null;
                 return (
                     <div className="border-t border-gray-700">
@@ -1310,6 +1638,9 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                                       onPendingEditChange={handlePendingEditChange}
                                       onRetry={handleRetry}
                                       retryBusy={!!retryBusy[rcv_key]}
+                                      onFetchConfig={handleFetchConfig}
+                                      fetchConfigBusy={!!fetchConfigBusy[rcv_key]}
+                                      debugDisplay={debugDisplay}
                                     />
                                 ))}
                             </div>
@@ -1319,7 +1650,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
             })()}
 
             {/* All Receivers (when no show is staged; filtered to enabled-only when locked) */}
-            {(!stagedShow || Object.keys(targetRcvMap).length === 0) && (
+            {!verification.hasStagedShow && (
                 <div className="flex flex-wrap gap-5 p-4 justify-center">
                     {visibleReceiverKeys.map((rcv_key, i) => (
                         <SingleReceiver
@@ -1334,6 +1665,9 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                           onPendingEditChange={handlePendingEditChange}
                           onRetry={handleRetry}
                           retryBusy={!!retryBusy[rcv_key]}
+                          onFetchConfig={handleFetchConfig}
+                          fetchConfigBusy={!!fetchConfigBusy[rcv_key]}
+                          debugDisplay={debugDisplay}
                         />
                     ))}
                 </div>
@@ -1365,6 +1699,9 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                                   onPendingEditChange={handlePendingEditChange}
                                   onRetry={handleRetry}
                                   retryBusy={!!retryBusy[rcv_key]}
+                                  onFetchConfig={handleFetchConfig}
+                                  fetchConfigBusy={!!fetchConfigBusy[rcv_key]}
+                                  debugDisplay={debugDisplay}
                                 />
                             ))}
                         </div>

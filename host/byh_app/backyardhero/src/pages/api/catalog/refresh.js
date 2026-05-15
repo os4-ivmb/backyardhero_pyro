@@ -10,8 +10,8 @@ export default async function handler(req, res) {
     // Get progress status
     try {
       const progressPath = '/data/catalog_crawl_progress.json';
-      if (fs.existsSync(progressPath)) {
-        const progressData = fs.readFileSync(progressPath, 'utf-8');
+      if (fs.existsSync(/*turbopackIgnore: true*/ progressPath)) {
+        const progressData = fs.readFileSync(/*turbopackIgnore: true*/ progressPath, 'utf-8');
         const progress = JSON.parse(progressData);
         return res.status(200).json(progress);
       } else {
@@ -32,8 +32,8 @@ export default async function handler(req, res) {
     try {
       // Check if a crawl is already running
       const progressPath = '/data/catalog_crawl_progress.json';
-      if (fs.existsSync(progressPath)) {
-        const progressData = fs.readFileSync(progressPath, 'utf-8');
+      if (fs.existsSync(/*turbopackIgnore: true*/ progressPath)) {
+        const progressData = fs.readFileSync(/*turbopackIgnore: true*/ progressPath, 'utf-8');
         const progress = JSON.parse(progressData);
         if (progress.status === 'running') {
           return res.status(409).json({ 
@@ -43,22 +43,23 @@ export default async function handler(req, res) {
         }
       }
 
-      // Find the script path (crawl_catalog.py in pythings/inv_crawl directory)
-      let scriptPath = path.join(process.cwd(), '../../pythings/inv_crawl/crawl_catalog.py');
-      
-      // Try alternative paths
+      // Find the script path (crawl_catalog.py in pythings/inv_crawl directory).
+      // turbopackIgnore comments keep these runtime-only path lookups out of
+      // the build trace -- otherwise Turbopack walks up out of the project root.
+      let scriptPath = path.join(/*turbopackIgnore: true*/ process.cwd(), '../../pythings/inv_crawl/crawl_catalog.py');
+
       const possiblePaths = [
         scriptPath,
-        path.join(process.cwd(), '../../../pythings/inv_crawl/crawl_catalog.py'),
-        path.join(process.cwd(), '../../../../pythings/inv_crawl/crawl_catalog.py'),
+        path.join(/*turbopackIgnore: true*/ process.cwd(), '../../../pythings/inv_crawl/crawl_catalog.py'),
+        path.join(/*turbopackIgnore: true*/ process.cwd(), '../../../../pythings/inv_crawl/crawl_catalog.py'),
         '/app/pythings/inv_crawl/crawl_catalog.py',
-        path.join(__dirname, '../../../../pythings/inv_crawl/crawl_catalog.py'),
-        path.join(process.cwd(), 'pythings/inv_crawl/crawl_catalog.py')
+        path.join(/*turbopackIgnore: true*/ __dirname, '../../../../pythings/inv_crawl/crawl_catalog.py'),
+        path.join(/*turbopackIgnore: true*/ process.cwd(), 'pythings/inv_crawl/crawl_catalog.py')
       ];
 
       let foundPath = null;
       for (const testPath of possiblePaths) {
-        if (fs.existsSync(testPath)) {
+        if (fs.existsSync(/*turbopackIgnore: true*/ testPath)) {
           foundPath = testPath;
           break;
         }

@@ -1,5 +1,6 @@
 import React from "react";
 import Image from "next/image";
+import { FaCircleXmark } from "react-icons/fa6";
 import { cn } from "@/design";
 import ModeBadge from "./ModeBadge";
 
@@ -72,6 +73,17 @@ export default function TopBar({
                 <span className="ml-1 px-1.5 py-0.5 text-2xs rounded-sm bg-accent-muted text-accent-fg">
                   {tab.badge}
                 </span>
+              ) : null}
+              {tab.errorBadge ? (
+                <FaCircleXmark
+                  className="ml-1 text-danger-fg text-sm shrink-0"
+                  title={
+                    typeof tab.errorBadge === "string"
+                      ? tab.errorBadge
+                      : "Verification errors"
+                  }
+                  aria-label="verification errors"
+                />
               ) : null}
             </button>
           );

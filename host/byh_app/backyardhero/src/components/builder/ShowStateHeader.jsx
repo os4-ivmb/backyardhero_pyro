@@ -1,6 +1,5 @@
-import React, { useState, useMemo } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import useAppStore from '@/store/useAppStore';
-import { audioFieldFromShow } from "@/utils/audioTracks";
 
 // Resolve a non-negative number from a unit_cost-like value; returns 0 otherwise.
 const toCost = (val) => {
@@ -72,86 +71,74 @@ const computeItemCost = (item, inventoryById) => {
   return lookupCost(item.itemId) * qty;
 };
 
-export default function ShowStateHeader({ items, showMetadata, setShowMetadata, refreshInventoryFnc , clearEditor, receiverLabels }) {
-  const { createShow, updateShow, setStagedShow, inventoryById } = useAppStore();
+// Compact "Saved · 3s ago" / "Saving..." / "Unsaved changes" pill that
+// keeps the operator confident the auto-save is doing its job. The
+// "ago" string updates once a second while the badge is mounted; we
+// re-derive on the same interval rather than recomputing per render so
+// children that are mid-drag don't re-render at the wrong moment.
+function SaveStatusBadge({ status, lastSavedAt, hasShowId }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (status !== "saved") return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [status]);
 
-  const handleUpsertShow = async () => {
-    let authorization_code = showMetadata.authorization_code
-    // Only prompt for code if creating a new show
-    if (!authorization_code) {
-      authorization_code = prompt("Please enter an auth code for this show. It will be used to both edit and launch the show.")
-    }
-
-    const allowedAttributes = ["id", "startTime", "itemId", "zone", "target", "type", "name", "duration", "delay", "rackId", "rackCells", "rackName", "rackSpacing", "fireableItem", "fireableItemId", "fuse", "spacing", "leadInInches", "shells", "multiple", "steps", "firstStepFuseDelay"];
-
-    const compressedItems = items.map(obj =>
-        allowedAttributes.reduce((acc, key) => {
-            if (key in obj) acc[key] = obj[key];
-            return acc;
-        }, {})
-    );
-
-    // Multi-track audio. The API expects `audioFile` to be the JSON blob
-    // that gets written to the `audio_file` column verbatim, so we send
-    // the {tracks:[...], audioOffsetMs} wrapper there. The in-memory
-    // state shape is different: it keeps `audioTracks` (canonical
-    // array) plus `audioFile` aliased to the first track for legacy
-    // consumers, and `audioOffsetMs` as a top-level field.
-    //
-    // The editor doesn't expose UI for `audioOffsetMs` -- that's tuned
-    // from the operator console -- but we read it off `showMetadata`
-    // and re-include it on save so editor saves don't clobber a
-    // previously-tuned offset.
-    const tracksForState = Array.isArray(showMetadata.audioTracks)
-      ? showMetadata.audioTracks
-      : [];
-    const audioOffsetMsForState = Number.isFinite(showMetadata.audioOffsetMs)
-      ? showMetadata.audioOffsetMs
-      : 0;
-    const apiAudioBlob = tracksForState.length
-      ? audioFieldFromShow({
-          tracks: tracksForState,
-          audioOffsetMs: audioOffsetMsForState,
-        })
-      : showMetadata.audioFile || null;
-
-    const apiShowData = {
-        runtime_version: "0",
-        runtime_payload: "{}",
-        ...showMetadata,
-        authorization_code,
-        version: (parseInt(showMetadata.version) || 1) + 1,
-        duration: items.length > 0
-            ? Math.round(Math.max(
-                ...items.map((item) => item.startTime + item.duration)
-            ))
-            : 0,
-        display_payload: JSON.stringify(compressedItems),
-        audioFile: apiAudioBlob,
-        // Include receiver locations as JSON if present
-        receiver_locations: showMetadata.receiver_locations ? JSON.stringify(showMetadata.receiver_locations) : null,
-        // Include receiver labels as JSON if present
-        receiver_labels: receiverLabels && Object.keys(receiverLabels).length > 0 ? JSON.stringify(receiverLabels) : null
-    }
-
-    const stateShape = {
-        ...apiShowData,
-        audioFile: tracksForState[0] || null,
-        audioTracks: tracksForState,
-        audioOffsetMs: audioOffsetMsForState,
-    };
-
-    if(showMetadata.id){
-        updateShow(showMetadata.id, apiShowData)
-        setShowMetadata((showmd) => ({ ...showmd, ...stateShape }))
-        setStagedShow({...stateShape, id: showMetadata.id, items })
-        alert("Updated Successfully!")
-    }else{
-        const id = await createShow(apiShowData)
-        setShowMetadata((showmd) => ({ ...showmd, ...stateShape, id: id }))
-        setStagedShow({...stateShape, id: id, items })
-    }
+  if (!hasShowId && status === "idle") {
+    // Brand-new draft. Nothing to communicate yet -- the Add Show
+    // button itself is the affordance.
+    return null;
   }
+
+  let label;
+  let toneClass;
+  if (status === "saving") {
+    label = "Saving…";
+    toneClass = "bg-blue-900/40 text-blue-200 border-blue-700/60";
+  } else if (status === "dirty") {
+    label = "Unsaved changes";
+    toneClass = "bg-amber-900/40 text-amber-200 border-amber-700/60";
+  } else if (status === "error") {
+    label = "Save failed";
+    toneClass = "bg-red-900/40 text-red-200 border-red-700/60";
+  } else if (lastSavedAt) {
+    const ageS = Math.max(0, Math.floor((now - lastSavedAt) / 1000));
+    let ago;
+    if (ageS < 5) ago = "just now";
+    else if (ageS < 60) ago = `${ageS}s ago`;
+    else if (ageS < 3600) ago = `${Math.floor(ageS / 60)}m ago`;
+    else ago = `${Math.floor(ageS / 3600)}h ago`;
+    label = `Saved · ${ago}`;
+    toneClass = "bg-emerald-900/40 text-emerald-200 border-emerald-700/60";
+  } else {
+    label = "Auto-save on";
+    toneClass = "bg-gray-700 text-gray-300 border-gray-600";
+  }
+
+  return (
+    <span
+      className={`text-xs px-2 py-1 rounded border ${toneClass} whitespace-nowrap`}
+      title="The editor auto-saves a second or so after each edit."
+    >
+      {label}
+    </span>
+  );
+}
+
+export default function ShowStateHeader({
+  items,
+  showMetadata,
+  setShowMetadata,
+  refreshInventoryFnc,
+  clearEditor,
+  receiverLabels,
+  // Save plumbing: lifted into ShowBuilder so the same function powers
+  // both the manual button and the debounced auto-save.
+  onSaveShow,
+  saveStatus = "idle",
+  lastSavedAt = null,
+}) {
+  const { inventoryById } = useAppStore();
 
   // Calculate show statistics
   const stats = useMemo(() => {
@@ -292,28 +279,36 @@ export default function ShowStateHeader({ items, showMetadata, setShowMetadata, 
         </div>
       </div>
       <div className="text-center">
-        <div className=" text-white">
-  
-        <button
-          className="bg-blue-800 px-4 py-2 rounded mx-1"
-          onClick={()=>clearEditor()}
-        >
-          Clear
-        </button>
-        <button
-          className="bg-blue-800 px-4 py-2 rounded mx-1"
-          onClick={()=>refreshInventoryFnc()}
-        >
-          Refresh Inventory
-        </button>
-        <button
-          onClick={handleUpsertShow}
-          className={`p-2 mx-1 bg-blue-800 text-white rounded-md ${!showMetadata.name ? 'bg-gray-400' : 'hover:bg-blue-600'}`}
-          disabled={!showMetadata.name}
-        >
-          {showMetadata.id ? "Save" : "Add Show"}
-        </button>
-        
+        <div className="text-white flex items-center gap-2 justify-end">
+          <SaveStatusBadge
+            status={saveStatus}
+            lastSavedAt={lastSavedAt}
+            hasShowId={!!showMetadata.id}
+          />
+          <button
+            className="bg-blue-800 px-4 py-2 rounded mx-1"
+            onClick={()=>clearEditor()}
+          >
+            Clear
+          </button>
+          <button
+            className="bg-blue-800 px-4 py-2 rounded mx-1"
+            onClick={()=>refreshInventoryFnc()}
+          >
+            Refresh Inventory
+          </button>
+          <button
+            onClick={() => onSaveShow?.()}
+            className={`p-2 mx-1 bg-blue-800 text-white rounded-md ${!showMetadata.name ? 'bg-gray-400' : 'hover:bg-blue-600'}`}
+            disabled={!showMetadata.name || saveStatus === "saving"}
+            title={
+              showMetadata.id
+                ? "Auto-save runs after edits; this button forces an immediate save."
+                : "Save creates the show row; subsequent edits auto-save."
+            }
+          >
+            {showMetadata.id ? "Save" : "Add Show"}
+          </button>
         </div>
       </div>
     </div>

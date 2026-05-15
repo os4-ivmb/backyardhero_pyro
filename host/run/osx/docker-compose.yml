@@ -1,0 +1,38 @@
+# Production compose for macOS development boxes (Docker Desktop).
+#
+# Differences vs Pi:
+#   * Does NOT bind host port 80 (mac dev boxes may have apache/nginx/
+#     anything else on 80; localhost:1776 is the normal access pattern).
+#   * Does NOT include extra_hosts -- Docker Desktop resolves
+#     host.docker.internal natively, so the explicit entry is redundant.
+#   * No pull_policy override (mac dev boxes always have internet; let
+#     `docker compose pull` decide).
+#
+# Relative paths are resolved against this file's directory (host/run/osx/),
+# so ../../ points back at the host/ root.
+
+services:
+  firework-system:
+    image: ${BYH_IMAGE:-os4ivmb/backyardhero:latest}
+    container_name: firework-system
+    restart: unless-stopped
+    volumes:
+      - ../../data:/data
+      - ../../config:/config
+      - /tmp/d_cmd:/tmp/d_cmd
+      # Dongle-update staging dir, bind-mounted at the same path on
+      # both sides. The Next.js handler (in the container) drops the
+      # uploaded firmware bins under /tmp/ota_staging/<job>/<kind>.bin;
+      # the host-side bridge process reads those same paths and hands
+      # them to esptool. Without this bind mount the bridge sees an
+      # empty directory and rejects the dongle flash job.
+      - /tmp/ota_staging:/tmp/ota_staging
+    ports:
+      - "1776:1776"  # Next.js app
+      - "8090:8090"  # WebSocket server
+    environment:
+      - SERIAL_PORT=${SERIAL_PORT:-/dev/tty.usbmodem01}
+      - SERIAL_BAUD=115200
+      - LED_STATE_FILE=/data/ledstate
+      - NODE_ENV=production
+    privileged: true

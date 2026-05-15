@@ -5,10 +5,20 @@ import { receiverQueries } from "@/util/sqldb";
  *   → returns a single receiver row, or 404 if not found.
  *
  * PATCH /api/receivers/:id
- *   → updates one or more of: label, type, cues_data, enabled, metadata.
+ *   → updates one or more of: label, type, cues_data, enabled, metadata,
+ *     config_data.
  *     Only the provided fields are updated. configuration_version is bumped
  *     by the underlying SQL.
- *     Body: { label?, type?, cues_data?, enabled?, metadata? }
+ *     Body: { label?, type?, cues_data?, enabled?, metadata?, config_data? }
+ *
+ *     config_data is a free-form JSON object the daemon and UI both park
+ *     keys in:
+ *       * fire_duration_ms       -- mirrored from receiver NVS
+ *       * force_cues_available   -- host override pinning the effective
+ *                                   cue count regardless of NUM_BOARDS
+ *     The whole object is replaced on each PATCH, so callers that want
+ *     to update a single key MUST merge with the existing config_data
+ *     they read from GET first.
  *
  * DELETE /api/receivers/:id
  *   → deletes the row outright. Note: the daemon won't know about this
@@ -30,7 +40,7 @@ export default function handler(req, res) {
     if (!receiverQueries.getById(id)) {
       return res.status(404).json({ error: 'Receiver not found.' });
     }
-    const { label, type, cues_data, enabled, metadata } = req.body || {};
+    const { label, type, cues_data, enabled, metadata, config_data } = req.body || {};
 
     // Lightweight validation. cues_data must be an object-of-arrays.
     if (cues_data !== undefined) {
@@ -46,8 +56,27 @@ export default function handler(req, res) {
       }
     }
 
+    // config_data is a flat JSON dict; reject arrays / primitives.
+    // We don't enforce the inner schema here -- the daemon (which is
+    // the only component that reads most keys) tolerates missing /
+    // ill-typed values gracefully. Per-key validation happens at write
+    // time in the UI.
+    if (config_data !== undefined) {
+      if (config_data === null || typeof config_data !== 'object' || Array.isArray(config_data)) {
+        return res.status(400).json({ error: 'config_data must be an object.' });
+      }
+      const force = config_data.force_cues_available;
+      if (force !== undefined && force !== null) {
+        if (!Number.isInteger(force) || force < 0 || force > 256) {
+          return res.status(400).json({
+            error: 'config_data.force_cues_available must be an integer in 0..256 (or null/omitted).',
+          });
+        }
+      }
+    }
+
     try {
-      receiverQueries.update(id, { label, type, cues_data, enabled, metadata });
+      receiverQueries.update(id, { label, type, cues_data, enabled, metadata, config_data });
       return res.status(200).json(receiverQueries.getById(id));
     } catch (error) {
       console.error(`Failed to update receiver ${id}:`, error);

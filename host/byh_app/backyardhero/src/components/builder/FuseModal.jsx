@@ -1,74 +1,116 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from "react";
+import { Modal, Button, Field, inputClass, selectClass } from "@/design";
 
-export default function FuseModal({ isOpen, onClose, onConfirm, inventory }) {
-  const [fuseType, setFuseType] = useState('');
-  const [leadIn, setLeadIn] = useState(1);
+// Modal for creating *or editing* a fuse.
+//
+// Create mode:
+//   <FuseModal isOpen mode="create" inventory={...}
+//     onConfirm={({ fuseType, leadIn }) => ...}
+//     onClose={...}/>
+//
+// Edit mode (also exposes delete):
+//   <FuseModal isOpen mode="edit" inventory={...}
+//     initialFuseType={fuse.type} initialLeadIn={fuse.leadIn}
+//     onConfirm={({ fuseType, leadIn }) => ...}
+//     onDelete={() => ...}
+//     onClose={...}/>
+export default function FuseModal({
+  isOpen,
+  onClose,
+  onConfirm,
+  onDelete,
+  inventory,
+  mode = "create",
+  initialFuseType = "",
+  initialLeadIn = 1,
+  title,
+}) {
+  const [fuseType, setFuseType] = useState(initialFuseType || "");
+  const [leadIn, setLeadIn] = useState(initialLeadIn);
 
-  const fuseInventory = inventory.filter(item => item.type === 'FUSE');
+  // Re-seed every time we re-open with a different target fuse so we
+  // don't carry stale state from a prior edit.
+  useEffect(() => {
+    if (!isOpen) return;
+    setFuseType(initialFuseType ? String(initialFuseType) : "");
+    setLeadIn(initialLeadIn ?? 1);
+  }, [isOpen, initialFuseType, initialLeadIn]);
+
+  const fuseInventory = (inventory || []).filter(
+    (item) => item.type === "FUSE"
+  );
 
   const handleConfirm = () => {
     if (!fuseType) {
-      alert('Please select a fuse type');
+      alert("Please select a fuse type");
       return;
     }
-    onConfirm(fuseType, leadIn);
+    onConfirm?.({ fuseType, leadIn });
   };
 
-  if (!isOpen) return null;
+  const resolvedTitle =
+    title || (mode === "edit" ? "Edit fuse" : "Pick fuse type");
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-      <div className="bg-gray-800 text-white p-6 rounded shadow-lg w-96 relative z-50">
-        <h2 className="text-xl mb-4">Create Fuse</h2>
-        
-        <div className="mb-4">
-          <label className="block mb-2">Select Fuse Type:</label>
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      title={resolvedTitle}
+      size="md"
+      footerStart={
+        mode === "edit" && onDelete ? (
+          <Button variant="danger" onClick={onDelete}>
+            Delete fuse
+          </Button>
+        ) : null
+      }
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={handleConfirm}>
+            {mode === "edit" ? "Save changes" : "Start fuse"}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <Field label="Fuse type">
           <select
-            className="w-full p-2 bg-gray-700 rounded"
+            className={selectClass}
             value={fuseType}
             onChange={(e) => setFuseType(e.target.value)}
           >
-            <option value="" disabled>-- Select Fuse Type --</option>
+            <option value="" disabled>
+              -- Select fuse type --
+            </option>
             {fuseInventory.map((fuse) => (
               <option key={fuse.id} value={fuse.id}>
-                <span style={{ color: fuse.color }}>{fuse.name}</span> ({fuse.burn_rate} s/f)
+                {fuse.name} ({fuse.burn_rate} s/ft)
               </option>
             ))}
           </select>
-        </div>
+        </Field>
 
-        <div className="mb-4">
-          <label className="block mb-2">Lead-In (inches):</label>
+        <Field label="Lead-in (inches)">
           <input
             type="number"
             min="0"
             step="0.1"
             value={leadIn}
             onChange={(e) => setLeadIn(parseFloat(e.target.value) || 0)}
-            className="w-full p-2 bg-gray-700 rounded"
+            className={inputClass}
           />
-        </div>
+        </Field>
 
-        <div className="flex gap-2">
-          <button
-            onClick={handleConfirm}
-            className="flex-1 px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700"
-          >
-            Create Fuse
-          </button>
-          <button
-            onClick={onClose}
-            className="px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700"
-          >
-            Cancel
-          </button>
-        </div>
+        {mode === "create" ? (
+          <p className="text-xs text-fg-muted">
+            After confirming, click cells on the rack in order to chain
+            them. You can save or discard the fuse from the toolbar.
+          </p>
+        ) : null}
       </div>
-    </div>
+    </Modal>
   );
 }
-
-
-
-
-

@@ -4,6 +4,7 @@ import useAppStore from '@/store/useAppStore';
 import FusedLineBuilderModal from "./FusedLineBuilderModal";
 import FusedItemLineBuilderModal from "./FusedItemLineBuilderModal";
 import ShowTargetGrid from "./ShowTargetGrid";
+import ShowReceiverModal from "./ShowReceiverModal";
 import ShowStateHeader from "./ShowStateHeader";
 import VideoPreviewPopup from "../common/VideoPreviewPopup";
 import SpatialLayoutMap from "./SpatialLayoutMap";
@@ -12,6 +13,7 @@ import RackShellsSelector from "./RackShellsSelector";
 import WaveSurfer from 'wavesurfer.js';
 import { analyzeAudioFile, bpmFromTapTimes } from "@/utils/bpmAnalyzer";
 import {
+  audioFieldFromShow,
   newTrackId,
   totalShowAudioDuration,
   trackAtShowTime,
@@ -27,6 +29,13 @@ import {
   Badge,
   cn,
 } from "@/design";
+import {
+  availableDevicesFromShowReceivers,
+  deriveShowReceiversFromLegacy,
+  highestUsedCueForReceiver,
+  itemsCountForReceiver,
+  verifyShowReceivers,
+} from "@/util/showReceivers";
 
 // Item type catalogue surfaced in the Add Item modal. Centralised so the
 // dropdown order stays predictable and labels stay in one place.
@@ -2161,6 +2170,55 @@ const CopyItemTargetModal = ({ isOpen, onClose, onConfirm, sourceItem, items, av
   );
 };
 
+// Fields persisted into a show's `display_payload` JSON. Anything outside
+// this list (e.g. inventory-derived `name`, `image`, `unit_cost`) is
+// re-hydrated from the inventory map on load and so must NOT be serialised
+// -- otherwise the persisted blob bloats and goes stale on inventory edits.
+// Kept module-scoped so the save function and the auto-save fingerprint
+// helper stay in lockstep.
+const SAVEABLE_ITEM_ATTRIBUTES = [
+  "id", "startTime", "itemId", "zone", "target", "type", "name", "duration",
+  "delay", "rackId", "rackCells", "rackName", "rackSpacing", "fireableItem",
+  "fireableItemId", "fuse", "spacing", "leadInInches", "shells", "multiple",
+  "steps", "firstStepFuseDelay",
+];
+const compressItemsForSave = (items) =>
+  items.map((obj) =>
+    SAVEABLE_ITEM_ATTRIBUTES.reduce((acc, key) => {
+      if (key in obj) acc[key] = obj[key];
+      return acc;
+    }, {})
+  );
+
+// Canonical fingerprint of the editor's saveable state. Stringified so we
+// can do cheap O(1) string comparisons in the auto-save effect; the
+// included fields exactly mirror the API payload that handleSaveShow
+// builds, so a hydrate-after-save round trip produces an identical
+// string and the auto-save loop converges instantly.
+const computeSaveFingerprint = ({
+  name, protocol, authorization_code, audioOffsetMs,
+  items, showReceivers, audioTracks, receiverLocations, receiverLabels,
+}) => {
+  try {
+    return JSON.stringify({
+      name: name ?? "",
+      protocol: protocol ?? "",
+      authorization_code: authorization_code ?? "",
+      audioOffsetMs: Number.isFinite(audioOffsetMs) ? audioOffsetMs : 0,
+      items: compressItemsForSave(Array.isArray(items) ? items : []),
+      showReceivers: Array.isArray(showReceivers) ? showReceivers : [],
+      audioTracks: Array.isArray(audioTracks) ? audioTracks : [],
+      receiverLocations: receiverLocations || {},
+      receiverLabels: receiverLabels || {},
+    });
+  } catch {
+    // Cycle / non-serialisable in audioTracks etc. Fall back to a
+    // unique-per-render token so the auto-save effect treats it as
+    // dirty and writes through (better than silently dropping edits).
+    return `__nonserialisable_${Date.now()}_${Math.random()}`;
+  }
+};
+
 const ShowBuilder = (props) => {
   const {
     systemConfig,
@@ -2170,6 +2228,7 @@ const ShowBuilder = (props) => {
     stagedShow,
     setStagedShow,
     updateShow,
+    createShow,
   } = useAppStore();
   const [items, setItems] = useState([]);
   const [showMetadata, setShowMetadata] = useState({});
@@ -2206,13 +2265,35 @@ const ShowBuilder = (props) => {
   const activeTrackOffset =
     activeTrackIndex >= 0 ? audioOffsets[activeTrackIndex] : 0;
   const activeLocalTime = Math.max(0, audioCurrentTime - activeTrackOffset);
-  const [availableDevices, setAvailableDevices] = useState({});
   const [receiverLocations, setReceiverLocations] = useState({});
-  const [receiverLabels, setReceiverLabels] = useState({});
+  // Per-show receiver list: [{ id, label?, cues }]. Owns the canonical
+  // target grid for this show; availableDevices and receiverLabels are
+  // derived from it below. Persisted via the `show_receivers` column.
+  const [showReceivers, setShowReceivers] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(50);
   const [itemsFixed, setItemsFixed] = useState(false);
-  const [filteredReceivers, setFilteredReceivers] = useState({});
   const [activeTab, setActiveTab] = useState("target"); // "target", "racks", "test", "layout"
+
+  // Edit/Add modal for a single show-receiver entry.
+  // `editingReceiverEntry` is null for ADD mode, a copy of the entry for EDIT.
+  const [isReceiverModalOpen, setIsReceiverModalOpen] = useState(false);
+  const [editingReceiverEntry, setEditingReceiverEntry] = useState(null);
+
+  // Derived: availableDevices is the { zone -> [target] } map the rest of
+  // the builder consumes. receiverLabels is derived from the same source
+  // so legacy consumers (TargetGrid headers, dropdowns, copy modal) keep
+  // working without a separate slice.
+  const availableDevices = useMemo(
+    () => availableDevicesFromShowReceivers(showReceivers),
+    [showReceivers]
+  );
+  const receiverLabels = useMemo(() => {
+    const out = {};
+    for (const entry of showReceivers) {
+      if (entry && entry.id && entry.label) out[entry.id] = entry.label;
+    }
+    return out;
+  }, [showReceivers]);
 
   // Copy Item flow:
   //   null              → idle
@@ -2238,6 +2319,28 @@ const ShowBuilder = (props) => {
       ? receivers
       : systemConfig.receivers;
 
+  // Test Show Builder used to filter the DB receivers by the show's
+  // protocol; under per-show receivers it's simply the DB rows referenced
+  // by the show. This is a memo on activeReceivers so it stays live as
+  // receiver edits stream in.
+  const filteredReceivers = useMemo(() => {
+    const out = {};
+    for (const entry of showReceivers) {
+      if (!entry || !entry.id) continue;
+      const row = (activeReceivers || {})[entry.id];
+      if (row) out[entry.id] = row;
+    }
+    return out;
+  }, [showReceivers, activeReceivers]);
+
+  // Live verification of the show's receivers against the DB. Used by
+  // ShowTargetGrid (error tiles, red outlines), the Receivers menu badge
+  // and the Load Show block. Recomputed cheaply on every relevant change.
+  const verification = useMemo(
+    () => verifyShowReceivers(showReceivers, activeReceivers),
+    [showReceivers, activeReceivers]
+  );
+
   const handleTabChange = (tabName) => {
     // Save current scroll position
     const scrollY = window.scrollY;
@@ -2252,102 +2355,29 @@ const ShowBuilder = (props) => {
     });
   };
 
+  // Default the show protocol if none is set yet. We no longer derive
+  // availableDevices from the protocol; the editor's target grid comes
+  // from the per-show `showReceivers` list instead. The protocol field is
+  // still meaningful for firing (which radio link to use) so we keep the
+  // default behaviour, just stripped of the cues plumbing.
   useEffect(() => {
+    if (showMetadata.protocol) return;
+    if (!systemConfig.protocols) return;
+    const first = Object.keys(systemConfig.protocols)[0];
+    if (first) setShowMetadata((showmd) => ({ ...showmd, protocol: first }));
+  }, [showMetadata.protocol, systemConfig.protocols]);
 
-    
-    let tprotocol = showMetadata.protocol;
-    
-    // If no protocol is set, set the first available one
-    if(!tprotocol && systemConfig.protocols && Object.keys(systemConfig.protocols).length > 0){
-      tprotocol = Object.keys(systemConfig.protocols)[0];
-      console.log('Setting default protocol:', tprotocol);
-      setShowMetadata((showmd) => ({ ...showmd, protocol: tprotocol }));
-      return; // Exit early, let the next render handle it
-    }
-
-    console.log('Using protocol:', tprotocol);
-
-    if (tprotocol && activeReceivers && systemConfig.protocols) {
-      const protocol = systemConfig.protocols[tprotocol];
-      console.log('Found protocol object:', protocol);
-      
-      if (protocol && protocol.receivers) {
-        console.log('Protocol receivers:', protocol.receivers);
-        console.log('Available system receivers:', Object.keys(activeReceivers));
-        
-        const filteredReceivers = Object.fromEntries(
-          Object.entries(activeReceivers).filter(([key, receiver]) => {
-            const isIncluded = protocol.receivers.includes(key);
-            console.log(`Receiver ${key}: ${isIncluded ? 'included' : 'excluded'}`);
-            return isIncluded;
-          })
-        );
-        
-        setFilteredReceivers(filteredReceivers);
-        console.log('Filtered receivers:', filteredReceivers);
-        
-        const availableDevicesData = mergeCues(filteredReceivers);
-        console.log('Final availableDevices:', availableDevicesData);
-        
-        // If mergeCues returns empty, try using the receivers directly
-        if (Object.keys(availableDevicesData).length === 0 && Object.keys(filteredReceivers).length > 0) {
-          console.log('mergeCues returned empty, using receivers directly');
-          // Create a simple mapping from receiver keys to their cues
-          const directMapping = {};
-          Object.entries(filteredReceivers).forEach(([receiverKey, receiver]) => {
-            if (receiver.cues) {
-              Object.entries(receiver.cues).forEach(([zone, targets]) => {
-                if (!directMapping[zone]) {
-                  directMapping[zone] = [];
-                }
-                directMapping[zone].push(...targets);
-              });
-            }
-          });
-          console.log('Direct mapping:', directMapping);
-          setAvailableDevices(directMapping);
-        } else {
-          setAvailableDevices(availableDevicesData);
-        }
-      } else {
-        console.log('Protocol or protocol.receivers is missing, using all receivers');
-        // If protocol.receivers doesn't exist, use all available receivers
-        setFilteredReceivers(activeReceivers);
-        const availableDevicesData = mergeCues(activeReceivers);
-        console.log('Using all receivers, availableDevices:', availableDevicesData);
-        
-        // If mergeCues returns empty, try using the receivers directly
-        if (Object.keys(availableDevicesData).length === 0 && Object.keys(activeReceivers).length > 0) {
-          console.log('mergeCues returned empty, using all receivers directly');
-          const directMapping = {};
-          Object.entries(activeReceivers).forEach(([receiverKey, receiver]) => {
-            if (receiver.cues) {
-              Object.entries(receiver.cues).forEach(([zone, targets]) => {
-                if (!directMapping[zone]) {
-                  directMapping[zone] = [];
-                }
-                directMapping[zone].push(...targets);
-              });
-            }
-          });
-          console.log('Direct mapping from all receivers:', directMapping);
-          setAvailableDevices(directMapping);
-        } else {
-          setAvailableDevices(availableDevicesData);
-        }
-      }
-    } else {
-      console.log('Missing required data:', { tprotocol, hasReceivers: !!activeReceivers, hasProtocols: !!systemConfig.protocols });
-      setAvailableDevices({});
-      setFilteredReceivers({});
-    }
-  }, [showMetadata.protocol, activeReceivers, systemConfig.protocols]);
-
-  // Debug useEffect to monitor availableDevices changes
+  // Keep showMetadata in sync with the showReceivers list so the save
+  // path serialises both `show_receivers` (canonical) and
+  // `receiver_labels` (legacy, still consumed by ReceiverDisplay's
+  // older code paths until everything is migrated).
   useEffect(() => {
-    console.log('availableDevices changed:', availableDevices);
-    console.log('availableDevices keys:', Object.keys(availableDevices));
-  }, [availableDevices]);
+    setShowMetadata((prev) => ({
+      ...prev,
+      showReceivers,
+      receiver_labels: receiverLabels,
+    }));
+  }, [showReceivers, receiverLabels]);
 
   useEffect(() => {
     if (items.length && !itemsFixed) {
@@ -2368,7 +2398,31 @@ const ShowBuilder = (props) => {
     }
   }, [items]);
 
+  // Tracks the show id we last hydrated the editor from. Prevents
+  // re-hydration on stagedShow ref churn that doesn't actually swap
+  // shows -- the most important case being our own auto-save, which
+  // calls setStagedShow({...stateShape, id}) at the end of every save.
+  // Without this guard the hydration below re-parses
+  // stagedShow.receiver_locations from the *snapshot taken when
+  // handleSaveShow started* and overrides the editor's current
+  // receiverLocations, which makes a marker drag that lands during a
+  // save's network round-trip silently snap back to its pre-drag
+  // position. Same risk for items / showReceivers / audioTracks.
+  //
+  // Initial value `undefined` (not null) so the first run with id=null
+  // -- e.g. operator opens the editor with nothing staged -- still
+  // executes the else-branch reset.
+  const lastHydratedIdRef = useRef(undefined);
+
   useEffect(() => {
+    const sid = stagedShow?.id ?? null;
+    if (lastHydratedIdRef.current === sid) {
+      // Same show as last hydration (or both null) -- the editor's
+      // local state is the source of truth, don't clobber it.
+      return;
+    }
+    lastHydratedIdRef.current = sid;
+
     if (stagedShow.id) {
       setShowMetadata(stagedShow);
       const newItems = JSON.parse(stagedShow.display_payload);
@@ -2385,7 +2439,7 @@ const ShowBuilder = (props) => {
       setActiveTrackId(tracks[0]?.id || null);
       setAudioCurrentTime(0);
       setIsAudioPlaying(false);
-      
+
       // Load existing receiver locations from show data
       if (stagedShow.receiver_locations) {
         try {
@@ -2399,24 +2453,43 @@ const ShowBuilder = (props) => {
       } else {
         initializeDefaultLocations();
       }
-      
-      // Load existing receiver labels from show data
-      if (stagedShow.receiver_labels) {
+
+      // Hydrate per-show receivers. Three sources, in priority order:
+      //   1. The parsed `showReceivers` field the store decoded from the
+      //      `show_receivers` column. This is the canonical source going
+      //      forward.
+      //   2. The raw `show_receivers` JSON string, in case the show was
+      //      staged before fetchShows finished parsing it.
+      //   3. Legacy back-fill from items[] + receiver_labels for any show
+      //      that predates the column. We compute it eagerly so the
+      //      operator sees their old receivers; persistence happens on
+      //      the next Save.
+      let nextShowReceivers = null;
+      if (Array.isArray(stagedShow.showReceivers)) {
+        nextShowReceivers = stagedShow.showReceivers;
+      } else if (stagedShow.show_receivers) {
         try {
-          const parsedLabels = JSON.parse(stagedShow.receiver_labels);
-          setReceiverLabels(parsedLabels);
-          setShowMetadata(prev => ({ ...prev, receiver_labels: parsedLabels }));
+          const parsed = JSON.parse(stagedShow.show_receivers);
+          if (Array.isArray(parsed)) nextShowReceivers = parsed;
         } catch (e) {
-          console.error('Failed to parse receiver_labels for show:', stagedShow.id, e);
-          setReceiverLabels({});
+          console.error('Failed to parse show_receivers for show:', stagedShow.id, e);
         }
-      } else if (stagedShow.receiverLabels) {
-        // Handle parsed labels from store
-        setReceiverLabels(stagedShow.receiverLabels);
-        setShowMetadata(prev => ({ ...prev, receiver_labels: stagedShow.receiverLabels }));
-      } else {
-        setReceiverLabels({});
       }
+      if (!nextShowReceivers || nextShowReceivers.length === 0) {
+        let legacyLabels = {};
+        if (stagedShow.receiverLabels && typeof stagedShow.receiverLabels === 'object') {
+          legacyLabels = stagedShow.receiverLabels;
+        } else if (stagedShow.receiver_labels) {
+          try { legacyLabels = JSON.parse(stagedShow.receiver_labels) || {}; }
+          catch { legacyLabels = {}; }
+        }
+        nextShowReceivers = deriveShowReceiversFromLegacy({
+          items: newItems,
+          receiverLabels: legacyLabels,
+          dbReceivers: activeReceivers,
+        });
+      }
+      setShowReceivers(nextShowReceivers);
     } else {
       // Clear editor when show is unstaged. Use a functional update so we
       // don't clobber fields that the auto-select-protocol effect (declared
@@ -2433,7 +2506,7 @@ const ShowBuilder = (props) => {
       setAudioCurrentTime(0);
       setIsAudioPlaying(false);
       setReceiverLocations({});
-      setReceiverLabels({});
+      setShowReceivers([]);
     }
   }, [stagedShow]);
 
@@ -2792,6 +2865,220 @@ const ShowBuilder = (props) => {
     }
   };
 
+  // ---- Show save (manual + auto) -----------------------------------------
+  //
+  // Single entry point for persisting the editor's full state. Used by
+  //   * The Save button in ShowStateHeader (manual; alerts on success).
+  //   * The debounced auto-save effect below (silent post-first-save).
+  //
+  // `silent` toggles BOTH suppressing the success alert AND skipping
+  // the auth-code prompt. The first save of a brand-new show MUST be
+  // manual so the operator gets to type the auth code; auto-save just
+  // bails out if no code has been set yet.
+  //
+  // After write we also re-stamp the saved-fingerprint so the auto-save
+  // effect doesn't see the post-save hydration as a fresh edit and
+  // immediately fire again.
+  const lastSavedFingerprintRef = useRef(null);
+  const dirtyRef = useRef(false);
+  // Concurrency guard. Two simultaneous PATCHes to the same row would
+  // race -- and even if the API serialised them, we'd still flicker
+  // saveStatus and double-prompt for an auth code. While a save is in
+  // flight we just skip; the autosave effect re-fires after the save
+  // completes (fingerprints diverge on whatever was edited mid-save)
+  // and schedules a fresh debounce.
+  const isSavingRef = useRef(false);
+  // 'idle'  -- no show selected yet
+  // 'dirty' -- changes pending, debounced auto-save scheduled
+  // 'saving'-- API write in flight
+  // 'saved' -- last write succeeded
+  // 'error' -- last write failed (operator can hit Save to retry)
+  const [saveStatus, setSaveStatus] = useState("idle");
+  const [lastSavedAt, setLastSavedAt] = useState(null);
+
+  const handleSaveShow = async ({ silent = false } = {}) => {
+    if (!showMetadata.name) return null; // UI gates this; defensive
+    if (isSavingRef.current) return null; // a save is already in flight
+
+    let authorization_code = showMetadata.authorization_code;
+    if (!authorization_code) {
+      if (silent) return null; // never prompt mid-edit
+      authorization_code = prompt(
+        "Please enter an auth code for this show. It will be used to both edit and launch the show.",
+      );
+      if (!authorization_code) return null;
+    }
+
+    const compressedItems = compressItemsForSave(items);
+    const tracksForState = Array.isArray(audioTracks) ? audioTracks : [];
+    const audioOffsetMsForState = Number.isFinite(showMetadata.audioOffsetMs)
+      ? showMetadata.audioOffsetMs
+      : 0;
+    const apiAudioBlob = tracksForState.length
+      ? audioFieldFromShow({
+          tracks: tracksForState,
+          audioOffsetMs: audioOffsetMsForState,
+        })
+      : showMetadata.audioFile || null;
+
+    const apiShowData = {
+      runtime_version: "0",
+      runtime_payload: "{}",
+      ...showMetadata,
+      authorization_code,
+      version: (parseInt(showMetadata.version) || 1) + 1,
+      duration: items.length > 0
+        ? Math.round(Math.max(...items.map((it) => it.startTime + it.duration)))
+        : 0,
+      display_payload: JSON.stringify(compressedItems),
+      audioFile: apiAudioBlob,
+      receiver_locations:
+        receiverLocations && Object.keys(receiverLocations).length > 0
+          ? JSON.stringify(receiverLocations)
+          : null,
+      receiver_labels:
+        receiverLabels && Object.keys(receiverLabels).length > 0
+          ? JSON.stringify(receiverLabels)
+          : null,
+      show_receivers: showReceivers.length > 0
+        ? JSON.stringify(showReceivers)
+        : null,
+    };
+
+    const stateShape = {
+      ...apiShowData,
+      audioFile: tracksForState[0] || null,
+      audioTracks: tracksForState,
+      audioOffsetMs: audioOffsetMsForState,
+      showReceivers,
+      receiverLocations,
+    };
+
+    setSaveStatus("saving");
+    isSavingRef.current = true;
+    try {
+      let savedId;
+      if (showMetadata.id) {
+        await updateShow(showMetadata.id, apiShowData);
+        savedId = showMetadata.id;
+      } else {
+        savedId = await createShow(apiShowData);
+      }
+      setShowMetadata((md) => ({ ...md, ...stateShape, id: savedId }));
+      setStagedShow({ ...stateShape, id: savedId, items });
+
+      // Mark "we just saved THIS exact shape" so the auto-save effect
+      // won't redundantly fire on the post-save state burst. Computed
+      // from the same inputs we just shipped to the API so it round-
+      // trips identically.
+      lastSavedFingerprintRef.current = computeSaveFingerprint({
+        name: showMetadata.name,
+        protocol: showMetadata.protocol,
+        authorization_code,
+        audioOffsetMs: audioOffsetMsForState,
+        items,
+        showReceivers,
+        audioTracks: tracksForState,
+        receiverLocations,
+        receiverLabels,
+      });
+      dirtyRef.current = false;
+      setSaveStatus("saved");
+      setLastSavedAt(Date.now());
+      if (!silent) alert("Updated Successfully!");
+      return savedId;
+    } catch (error) {
+      console.error("Failed to save show:", error);
+      setSaveStatus("error");
+      if (!silent) alert("Failed to save show. See console for details.");
+      return null;
+    } finally {
+      isSavingRef.current = false;
+    }
+  };
+
+  // Always-fresh ref so the debounced timer + unmount handler call the
+  // latest closure (with current state) without re-subscribing each
+  // render.
+  const handleSaveShowRef = useRef(handleSaveShow);
+  handleSaveShowRef.current = handleSaveShow;
+
+  // Fingerprint of the editor's persistable state. Recomputed only when
+  // a saveable input changes; the auto-save effect compares this to
+  // `lastSavedFingerprintRef` to decide whether to schedule a write.
+  const currentSaveFingerprint = useMemo(
+    () =>
+      computeSaveFingerprint({
+        name: showMetadata.name,
+        protocol: showMetadata.protocol,
+        authorization_code: showMetadata.authorization_code,
+        audioOffsetMs: showMetadata.audioOffsetMs,
+        items,
+        showReceivers,
+        audioTracks,
+        receiverLocations,
+        receiverLabels,
+      }),
+    [
+      showMetadata.name,
+      showMetadata.protocol,
+      showMetadata.authorization_code,
+      showMetadata.audioOffsetMs,
+      items,
+      showReceivers,
+      audioTracks,
+      receiverLocations,
+      receiverLabels,
+    ],
+  );
+
+  // Debounced auto-save. Only fires once the show has an id (i.e.
+  // the operator has done one explicit save) AND the fingerprint
+  // diverges from the last-saved one. Dep changes within the debounce
+  // window reset the timer so a flurry of edits collapses to a single
+  // write.
+  //
+  // Reset the baseline fingerprint whenever the staged show id flips
+  // (operator selected a different show, unstaged the current one,
+  // etc.) -- otherwise the first load of show B would diff against
+  // show A's last-saved fingerprint and trigger a spurious silent
+  // save of B.
+  useEffect(() => {
+    if (!showMetadata.id) {
+      lastSavedFingerprintRef.current = null;
+      dirtyRef.current = false;
+      return;
+    }
+    // Adopt the first stable fingerprint after a (re)hydration as the
+    // baseline. This covers both initial load (operator opened a saved
+    // show) and post-save hydration churn -- in either case the editor
+    // hasn't been "touched" yet, so it isn't dirty.
+    if (lastSavedFingerprintRef.current === null) {
+      lastSavedFingerprintRef.current = currentSaveFingerprint;
+      return;
+    }
+    if (currentSaveFingerprint === lastSavedFingerprintRef.current) return;
+    dirtyRef.current = true;
+    setSaveStatus("dirty");
+    const t = setTimeout(() => {
+      handleSaveShowRef.current?.({ silent: true });
+    }, 800);
+    return () => clearTimeout(t);
+  }, [currentSaveFingerprint, showMetadata.id]);
+
+  // Flush pending edits on unmount (typically when the user navigates
+  // away from the editor tab — MainNav unmounts the builder, so without
+  // this flush the in-flight debounce window would silently drop).
+  // Empty deps: this cleanup ONLY runs on unmount, not on every
+  // dep-change cleanup of the debounce effect above.
+  useEffect(() => {
+    return () => {
+      if (dirtyRef.current && handleSaveShowRef.current) {
+        handleSaveShowRef.current({ silent: true });
+      }
+    };
+  }, []);
+
   // Save receiver locations to show data
   const saveReceiverLocations = async () => {
     if (!stagedShow.id) {
@@ -2818,6 +3105,58 @@ const ShowBuilder = (props) => {
     // Clear existing items and set new ones
     setItems(newItems);
     setItemsFixed(false); // Allow ID reassignment
+  };
+
+  // ---- Show receivers (target grid) editing -----------------------------
+  // Open the add-receiver modal. We just toggle the flag; the modal seeds
+  // its own state from the `entry` prop (null for ADD).
+  const openAddReceiverModal = () => {
+    setEditingReceiverEntry(null);
+    setIsReceiverModalOpen(true);
+  };
+
+  const openEditReceiverModal = (receiverId) => {
+    const entry = showReceivers.find((e) => e && e.id === receiverId);
+    if (!entry) return;
+    setEditingReceiverEntry(entry);
+    setIsReceiverModalOpen(true);
+  };
+
+  const closeReceiverModal = () => {
+    setIsReceiverModalOpen(false);
+    setEditingReceiverEntry(null);
+  };
+
+  // Save handler for both add and edit. The modal has already validated
+  // that we won't shrink below the highest used cue; we only need to
+  // splice the entry into showReceivers and let the derived memos do the
+  // rest.
+  const handleReceiverModalSave = (entry) => {
+    setShowReceivers((prev) => {
+      const idx = prev.findIndex((e) => e && e.id === entry.id);
+      if (idx === -1) return [...prev, entry];
+      const next = prev.slice();
+      next[idx] = entry;
+      return next;
+    });
+    closeReceiverModal();
+  };
+
+  // Remove a receiver/zone from the show. Blocked when items still target
+  // it; the operator must delete those items first to avoid orphaning.
+  const handleRemoveReceiver = (receiverId) => {
+    const count = itemsCountForReceiver(items, receiverId);
+    if (count > 0) {
+      const highest = highestUsedCueForReceiver(items, receiverId);
+      alert(
+        `${count} item${count === 1 ? '' : 's'} on this show still target ` +
+          `${receiverId} (highest cue: ${highest}). Delete or move those ` +
+          `items first.`
+      );
+      return;
+    }
+    if (!window.confirm(`Remove ${receiverId} from this show?`)) return;
+    setShowReceivers((prev) => prev.filter((e) => !e || e.id !== receiverId));
   };
 
   // ---- Copy Item flow ----------------------------------------------------
@@ -2878,9 +3217,11 @@ const ShowBuilder = (props) => {
         setShowMetadata={setShowMetadata}
         clearEditor={clearEditorFnc}
         receiverLabels={receiverLabels}
+        onSaveShow={handleSaveShow}
+        saveStatus={saveStatus}
+        lastSavedAt={lastSavedAt}
       />
-      {availableDevices && Object.keys(availableDevices).length > 0 ? (
-        <div>
+      <div>
           {/* Audio editor: tab strip + per-track waveform/BPM card. */}
           <div className="mb-4">
             <AudioTrackTabs
@@ -3074,20 +3415,26 @@ const ShowBuilder = (props) => {
             {/* Tab Content */}
             <div className="tab-content">
               {activeTab === "target" && (
-                <ShowTargetGrid  
-                  items={items} 
-                  setItems={setItems} 
+                <ShowTargetGrid
+                  items={items}
+                  setItems={setItems}
                   availableDevices={availableDevices}
+                  showReceivers={showReceivers}
                   receiverLabels={receiverLabels}
-                  setReceiverLabels={(labels) => {
-                    setReceiverLabels(labels);
-                    setShowMetadata(prev => ({ ...prev, receiver_labels: labels }));
-                  }}
+                  verification={verification}
+                  onAddReceiver={openAddReceiverModal}
+                  onEditReceiver={openEditReceiverModal}
+                  onRemoveReceiver={handleRemoveReceiver}
                 />
               )}
               
               {activeTab === "racks" && (
-                <RacksTab inventory={inventory} showId={showMetadata.id} showItems={items} />
+                <RacksTab
+                  inventory={inventory}
+                  showId={showMetadata.id}
+                  showItems={items}
+                  setShowItems={setItems}
+                />
               )}
               
               {activeTab === "test" && (
@@ -3141,23 +3488,24 @@ const ShowBuilder = (props) => {
             receiverLabels={receiverLabels}
           />
           {selectedItem ? (
-            <VideoPreviewPopup 
-              items={[selectedItem]} 
-              isVisible={isPopupVisible} 
-              onClose={() => setPopupVisible(false)} 
+            <VideoPreviewPopup
+              items={[selectedItem]}
+              isVisible={isPopupVisible}
+              onClose={() => setPopupVisible(false)}
             />
           ) : (
             ""
           )}
+          <ShowReceiverModal
+            isOpen={isReceiverModalOpen}
+            onClose={closeReceiverModal}
+            onSave={handleReceiverModalSave}
+            entry={editingReceiverEntry}
+            dbReceivers={activeReceivers}
+            existingShowReceivers={showReceivers}
+            items={items}
+          />
         </div>
-      ) : (
-        <div className="text-center p-8">
-          <h2 className="text-xl font-bold text-gray-700 mb-4">Show Editor</h2>
-          <p className="text-gray-500 mb-4">
-            No receivers available. Please check your system configuration.
-          </p>
-        </div>
-      )}
     </div>
   );
 };

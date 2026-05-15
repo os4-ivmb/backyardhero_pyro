@@ -1,0 +1,45 @@
+# Production compose for Raspberry Pi / WiFi-AP deployment.
+#
+# Differences vs other platforms:
+#   * Binds host port 80 (in addition to 1776) so AP clients can hit the
+#     friendly URL http://backyardhero/ from a phone without typing :1776.
+#     Safe on a dedicated Pi where nothing else owns port 80.
+#   * extra_hosts: host.docker.internal -> host-gateway. Docker Engine on
+#     Linux doesn't auto-resolve that name; without this the Python
+#     daemon can't reach the host-side TCP-to-serial bridge at
+#     host.docker.internal:9000.
+#   * pull_policy: missing. Lets the stack come up on an AP-only Pi with
+#     no upstream connectivity, using whatever image was cached at install.
+#
+# Relative paths are resolved against this file's directory (host/run/pi/),
+# so the ../../ prefix points back at the host/ root where the bind-mount
+# sources live.
+
+services:
+  firework-system:
+    image: ${BYH_IMAGE:-os4ivmb/backyardhero:latest}
+    container_name: firework-system
+    restart: unless-stopped
+    pull_policy: missing
+    volumes:
+      - ../../data:/data
+      - ../../config:/config
+      - /tmp/d_cmd:/tmp/d_cmd
+      # Dongle-update staging dir, bind-mounted at the same path on
+      # both sides. The Next.js handler (in the container) writes
+      # uploaded firmware bins under /tmp/ota_staging/<job>/<kind>.bin;
+      # the host-side bridge process reads those same paths and hands
+      # them to esptool when the daemon kicks off a dongle update.
+      - /tmp/ota_staging:/tmp/ota_staging
+    ports:
+      - "80:1776"    # Friendly URL: http://backyardhero/
+      - "1776:1776"  # Historical URL: http://<host>:1776
+      - "8090:8090"  # WebSocket server
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - SERIAL_PORT=${SERIAL_PORT:-/dev/byh_dongle}
+      - SERIAL_BAUD=115200
+      - LED_STATE_FILE=/data/ledstate
+      - NODE_ENV=production
+    privileged: true
