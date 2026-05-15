@@ -11,6 +11,13 @@ REM   build_and_push_docker.bat --no-push       (local build only, host arch)
 
 setlocal enabledelayedexpansion
 
+REM The Dockerfile, the build context (byh_app\, pythings\, tcp_serial_bridge\,
+REM supervisord*.conf, ...) and config\systemcfg.json all live in host\.
+REM This script lives one level deeper at host\run\windows\, so cd up two
+REM levels and run docker buildx from there. Same shape as the osx build
+REM script and the windows start.bat.
+pushd "%~dp0..\.."
+
 set IMAGE=os4ivmb/backyardhero
 set PLATFORMS=linux/amd64,linux/arm64
 set PUSH=1
@@ -72,4 +79,5 @@ if not "%PLATFORMS%"=="" (
 )
 
 echo [build] done.
+popd
 endlocal

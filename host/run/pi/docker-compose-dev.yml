@@ -19,12 +19,12 @@ services:
     volumes:
       - ../../data:/data
       - ../../config:/config
-      # Dongle-update staging dir, bind-mounted at the same path on
-      # both sides. Next.js (in the container) writes uploaded
-      # firmware bins here; the host-side bridge process reads the
-      # same paths when invoking esptool. Pi's bridge runs natively
-      # outside the container even in dev, so this bind mount is
-      # required for UI-driven dongle updates to work.
+      # Mirror the prod compose's host-shared /tmp/* mounts. Strictly
+      # speaking only /tmp/ota_staging is required (it's the firmware
+      # handoff for dongle flash); /tmp/d_cmd is kept symmetric so an
+      # operator can also drop debug command files from the host shell
+      # to talk to the daemon, exactly like in prod.
+      - /tmp/d_cmd:/tmp/d_cmd
       - /tmp/ota_staging:/tmp/ota_staging
       - ../../pythings:/app/pythings
       - ../../byh_app/backyardhero:/app/byh_app/

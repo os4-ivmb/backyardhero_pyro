@@ -36,6 +36,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -292,9 +293,17 @@ def pick_port(prompt: bool = True) -> str:
 
 
 def run_esptool_flash(port: str, flash_pairs: list[tuple[str, Path]]) -> None:
-    """Try a normal flash; if auto-reset fails, prompt for manual
-    bootloader entry and retry with --before no_reset (mirroring
-    flash_receiver.py)."""
+    """Drive esptool through up to three attempts:
+
+      1. --before default_reset       (auto-reset into bootloader)
+      2. --before no_reset            (auto, no user input) -- empirically
+         the chip is often already sitting in a download-ready state after
+         a "failed" default_reset on the lolin_s2_mini, so this silent
+         retry succeeds on its own a large fraction of the time and saves
+         the operator from a spurious BOOT+RESET prompt.
+      3. --before no_reset, AFTER prompting the operator to manually
+         enter the ROM bootloader. Only reached if attempt #2 also fails.
+    """
     esptool_argv = find_esptool()
 
     cmd = build_esptool_cmd(esptool_argv, port, flash_pairs, before="default_reset")
@@ -304,6 +313,16 @@ def run_esptool_flash(port: str, flash_pairs: list[tuple[str, Path]]) -> None:
         return
     except subprocess.CalledProcessError:
         log("esptool auto-reset failed -- common on lolin_s2_mini USB-CDC boards.")
+
+    log("retrying once with --before no_reset before asking for manual BOOT+RESET...")
+    time.sleep(1.0)
+    cmd_noreset = build_esptool_cmd(esptool_argv, port, flash_pairs, before="no_reset")
+    log("running: " + " ".join(cmd_noreset))
+    try:
+        subprocess.run(cmd_noreset, check=True)
+        return
+    except subprocess.CalledProcessError:
+        log("silent no_reset retry also failed -- falling back to manual prompt.")
 
     print(
         "\n"
@@ -317,10 +336,9 @@ def run_esptool_flash(port: str, flash_pairs: list[tuple[str, Path]]) -> None:
     )
     input("  Press Enter once the dongle is in bootloader mode... ")
 
-    cmd = build_esptool_cmd(esptool_argv, port, flash_pairs, before="no_reset")
-    log("retrying: " + " ".join(cmd))
+    log("retrying: " + " ".join(cmd_noreset))
     try:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd_noreset, check=True)
     except subprocess.CalledProcessError as e:
         raise SystemExit(
             f"[flash_dongle] esptool failed again (exit {e.returncode}).\n"

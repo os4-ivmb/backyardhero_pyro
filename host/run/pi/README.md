@@ -9,6 +9,7 @@ Pis and on generic Ubuntu/Debian with minor variations.
 | File | What it does |
 | --- | --- |
 | `install.sh` | One-shot bare-OS installer. Installs Docker, hostapd, dnsmasq, udev rules, the dongle stable symlink, the `byh-host` systemd unit, WiFi AP, NAT for AP clients. |
+| `update.sh` | One-button update: `git pull` + `docker compose pull` + re-run `install.sh` + restart `byh-host`. The day-to-day "bring me up to latest". |
 | `start.sh` | Prod launcher (invoked by the systemd unit). Brings up the host-side TCP-to-serial bridge + the Docker stack via `docker-compose.yml`. |
 | `start-dev.sh` | Dev launcher. Same as `start.sh` but builds the image locally and bind-mounts source for hot reload. |
 | `docker-compose.yml` | Prod compose: pulls `os4ivmb/backyardhero:latest`, binds host ports 80+1776+8090, wires `host.docker.internal` for the bridge, tolerant of being offline. |
@@ -55,10 +56,11 @@ sudo systemctl restart byh-host        # restart after config changes
 sudo journalctl -u byh-host -f         # tail the stack logs
 sudo journalctl -u hostapd -u dnsmasq -f   # tail the AP logs
 
-# Pull a newer image and restart:
-cd /opt/backyardhero/host/run/pi
-sudo docker compose pull
-sudo systemctl restart byh-host
+# Update everything (source + image + system state + restart):
+sudo /opt/backyardhero/host/run/pi/update.sh
+
+# Pull a newer image only (skip git + install steps):
+sudo /opt/backyardhero/host/run/pi/update.sh --no-source --no-install
 
 # Flash the dongle from this Pi (pull latest firmware -> build -> flash):
 sudo /opt/backyardhero/host/run/pi/update_dongle.sh

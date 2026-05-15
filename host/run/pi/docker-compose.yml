@@ -24,12 +24,17 @@ services:
     volumes:
       - ../../data:/data
       - ../../config:/config
+      # /tmp/d_cmd is the daemon's command-file inbox. Inside-container
+      # writers (Next.js API routes) drop JSON files here; the daemon
+      # polls. Mounting it from the host as well lets an operator drop
+      # debug commands directly without going through the UI.
       - /tmp/d_cmd:/tmp/d_cmd
-      # Dongle-update staging dir, bind-mounted at the same path on
-      # both sides. The Next.js handler (in the container) writes
-      # uploaded firmware bins under /tmp/ota_staging/<job>/<kind>.bin;
-      # the host-side bridge process reads those same paths and hands
-      # them to esptool when the daemon kicks off a dongle update.
+      # /tmp/ota_staging is REQUIRED for the dongle-flash flow: the
+      # Next.js handler (in the container) writes uploaded firmware
+      # bins under /tmp/ota_staging/<job>/<kind>.bin, then tells the
+      # host-side flash_server their paths. The host has to be able
+      # to read those same paths for esptool. See the comment in
+      # host/byh_app/.../api/system/dongle_flash.js.
       - /tmp/ota_staging:/tmp/ota_staging
     ports:
       - "80:1776"    # Friendly URL: http://backyardhero/

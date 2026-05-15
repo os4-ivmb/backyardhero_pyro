@@ -21,8 +21,13 @@
 
 set -euo pipefail
 
+# The Dockerfile, the build context (byh_app/, pythings/, tcp_serial_bridge/,
+# supervisord*.conf, ...) and config/systemcfg.json all live in host/.
+# This script lives one level deeper at host/run/osx/, so resolve up two
+# levels and run docker buildx from there. Same pattern as start.sh.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "${SCRIPT_DIR}"
+HOST_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "${HOST_DIR}"
 
 IMAGE="os4ivmb/backyardhero"
 PLATFORMS="linux/amd64,linux/arm64"

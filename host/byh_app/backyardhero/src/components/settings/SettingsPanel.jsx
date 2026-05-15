@@ -21,6 +21,7 @@ import DongleFlashPanel from "./DongleFlashPanel";
 import ReceiverConfigSettings from "./ReceiverConfigSettings";
 import DefaultLocationSettings from "./DefaultLocationSettings";
 import AccessPointSettings from "./AccessPointSettings";
+import UpdateSettings from "./UpdateSettings";
 
 // Settings page. Top-level tabs:
 //   Dongle    — physical box knobs: LEDs, retransmit count, serial
@@ -53,7 +54,7 @@ const TABS = [
 const SUBTITLES = {
   dongle: "Brightness, serial connection, retransmit count, debug mode.",
   receivers: "Fleet-wide receiver runtime knobs (fire pulse width, etc.).",
-  network: "WiFi access point hosted by this Pi.",
+  network: "WiFi access point + system update.",
   debug: "Spectrum diagnostics and daemon timing.",
   show: "Pre-fire safety checks that apply to every show.",
 };
@@ -144,6 +145,13 @@ function NetworkTab() {
         eyebrow="On-board hotspot"
       >
         <AccessPointSettings />
+      </SettingCard>
+
+      <SettingCard
+        title="System update"
+        eyebrow="GitHub + Docker Hub"
+      >
+        <UpdateSettings />
       </SettingCard>
     </div>
   );

@@ -31,6 +31,41 @@ echo "BACKYARD HERO HOST (pi/prod) --- VERSION: ${VERSION}"
 echo "Host dir: ${HOST_DIR}"
 echo "Compose:  ${COMPOSE_FILE}"
 
+# Post-update reconciliation: if a previous run of byh-update.py left
+# the status file stuck on phase=restarting / phase=rebooting (because
+# the apply script got killed by the very restart it ordered before it
+# could write phase=done), flip it to "done" now that we're back up.
+# Without this the UI would render "Rebooting…" forever after a
+# successful reboot-style update. The check is deliberately narrow:
+# only flips successful exit_code=0 jobs, never an in-flight one.
+UPDATE_STATUS_FILE="${HOST_DIR}/data/byh_update_status.json"
+if [ -f "${UPDATE_STATUS_FILE}" ]; then
+  python3 - "${UPDATE_STATUS_FILE}" <<'PY' || true
+import json, os, sys, time
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        s = json.load(f)
+except Exception:
+    sys.exit(0)
+if not isinstance(s, dict):
+    sys.exit(0)
+if s.get("phase") in ("restarting", "rebooting") and s.get("exit_code", -1) == 0:
+    s["phase"] = "done"
+    s["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    s["updated_at"] = s["ended_at"]
+    s.setdefault("log_tail", []).append(
+        "[start.sh] post-boot: byh-host is up; marking update as done."
+    )
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(s, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+    print(f"[start.sh] post-update reconciliation: {path} -> phase=done")
+PY
+fi
+
 command -v docker  >/dev/null 2>&1 || { echo "ERROR: docker not installed.";  exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 not installed."; exit 1; }
 

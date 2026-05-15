@@ -87,6 +87,14 @@ AP_APPLY_SCRIPT_PATH="/usr/local/sbin/byh-ap-apply.py"
 AP_NAT_SERVICE_NAME="byh-ap-nat.service"
 AP_NAT_SCRIPT_PATH="/usr/local/sbin/byh-ap-nat.sh"
 AP_NAT_SYSCTL_PATH="/etc/sysctl.d/99-byh-ap-nat.conf"
+# UI-driven system update plumbing. Same shape as the AP apply units
+# above: a .path watches a request file the in-container Next.js writes
+# into the shared host/data volume, the .service runs the apply script
+# as a oneshot. The script then drives host/run/pi/update.sh and writes
+# back to /data/byh_update_status.json so the UI can render progress.
+UPDATE_APPLY_SERVICE_NAME="byh-update.service"
+UPDATE_APPLY_PATH_NAME="byh-update.path"
+UPDATE_APPLY_SCRIPT_PATH="/usr/local/sbin/byh-update.py"
 UDEV_RULE_PATH="/etc/udev/rules.d/99-byh-dongle.rules"
 HOSTAPD_CONF_PATH="/etc/hostapd/hostapd.conf"
 HOSTAPD_DEFAULT_PATH="/etc/default/hostapd"
@@ -1206,6 +1214,544 @@ install_ap_apply_service() {
 }
 
 # ---------------------------------------------------------------------------
+# UI-driven system update apply service.
+# ---------------------------------------------------------------------------
+#
+# Mirrors the AP apply plumbing above: a path-watcher fires a oneshot
+# service when the in-container Next.js app drops a request file onto
+# the host/data bind-mount. The oneshot runs an apply script that runs
+# update.sh and streams progress back into /data/byh_update_status.json
+# so the UI can show a live progress bar.
+
+write_update_apply_script() {
+  # Python helper that the UI invokes (indirectly, via a request file
+  # on the shared /data volume) to pull the latest source + Docker
+  # image and restart the byh-host service. See `install_update_service`
+  # below for the wiring.
+  cat >"${UPDATE_APPLY_SCRIPT_PATH}" <<'PY'
+#!/usr/bin/env python3
+"""byh-update.py -- apply a system update requested by the Backyard
+Hero web UI.
+
+Triggered by byh-update.path when the UI (running inside the docker
+container) writes a request file into the host/data volume that the
+container also has mounted at /data. We:
+
+  1. Run a small connectivity preflight (GitHub + Docker Hub).
+  2. Drive host/run/pi/update.sh with the requested flags, streaming
+     stdout into /data/byh_update_status.json so the UI can show a
+     live progress bar.
+  3. update.sh's last step restarts byh-host.service (or reboots the
+     Pi). That kills the docker container the UI lives in; when it
+     comes back up, it reads the same status file (which is on the
+     host filesystem via the bind mount) and shows the final result.
+
+Files (all on the host, under $BYH_DATA_DIR):
+  byh_update_request.json  - written by the UI; what to do.
+  byh_update_status.json   - written by us; current phase + log tail.
+
+The status file is written atomically (tmp + rename) so the UI never
+sees a half-written JSON document, even if the container is being
+torn down concurrently with our write.
+"""
+
+from __future__ import annotations
+import argparse
+import json
+import os
+import re
+import shutil
+import socket
+import ssl
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from pathlib import Path
+from urllib.error import URLError, HTTPError
+from urllib.request import urlopen, Request
+
+DATA_DIR    = Path(os.environ.get("BYH_DATA_DIR", "/opt/backyardhero/host/data"))
+REPO_DIR    = Path(os.environ.get("BYH_REPO_DIR", "/opt/backyardhero"))
+UPDATE_SH   = Path(os.environ.get("BYH_UPDATE_SH",
+                                  str(REPO_DIR / "host" / "run" / "pi" / "update.sh")))
+
+REQ_PATH    = DATA_DIR / "byh_update_request.json"
+STATUS_PATH = DATA_DIR / "byh_update_status.json"
+
+# Connectivity probes. Both are deliberately tiny endpoints that:
+#   - Return successfully on a correctly-configured network.
+#   - Validate DNS + TCP + TLS + HTTP at once.
+#   - Don't depend on the Backyard Hero project being well-known to
+#     the test endpoint (so they keep working forever).
+GITHUB_PROBE_URL    = "https://api.github.com/zen"
+DOCKERHUB_PROBE_URL = "https://registry-1.docker.io/v2/"
+PROBE_TIMEOUT_S     = 5.0
+
+# How many lines of update.sh stdout we keep in the status file.
+# Sized to comfortably cover the longest legible progress dump (git
+# pull + docker compose pull + install.sh re-run) without bloating
+# the JSON file the UI re-fetches every couple seconds.
+LOG_TAIL_LINES      = 200
+
+# Status-file write coalescing. update.sh emits a lot of progress
+# lines from `docker compose pull`; we don't want to write the
+# status file on every one of them. This caps writes to ~10/s
+# regardless of subprocess output rate.
+MIN_WRITE_INTERVAL_S = 0.1
+
+# update.sh prints section headers like:
+#     ==[ Pulling latest source ]==
+# We map those to a 'step' enum the UI can render specifically.
+SECTION_RE = re.compile(r"^==\[\s*(.*?)\s*\]==\s*$")
+STEP_FROM_SECTION = {
+    "Pulling latest source":          "git_pull",
+    "Pulling latest Docker image":    "docker_pull",
+    "Re-running install.sh (idempotent re-apply)": "install",
+    "Restarting byh-host.service":    "restart",
+    "Rebooting Pi":                   "reboot",
+    "Done":                           "done",
+}
+
+
+# ---------------------------------------------------------------------------
+# Shared status-file helpers
+# ---------------------------------------------------------------------------
+
+def now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def write_json_atomic(path: Path, data: dict) -> None:
+    """Write JSON via tmp + rename so concurrent readers (the Next.js
+    GET handler) never see a torn file. Required because the docker
+    container restart races with our final phase=done write."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+# ---------------------------------------------------------------------------
+# Connectivity preflight
+# ---------------------------------------------------------------------------
+
+def probe_url(url: str, timeout: float = PROBE_TIMEOUT_S) -> tuple[bool, str]:
+    """Return (ok, detail). ok=True iff we got an HTTP response (even 4xx);
+    a 401 from registry-1.docker.io is fine -- it means we reached the
+    server. Network-level failures (DNS, refused, TLS) return ok=False."""
+    try:
+        req = Request(url, headers={"User-Agent": "byh-update/1.0"})
+        ctx = ssl.create_default_context()
+        with urlopen(req, timeout=timeout, context=ctx) as r:
+            return True, f"HTTP {r.status}"
+    except HTTPError as e:
+        # Reached the server, server returned a status. Good enough --
+        # registry-1.docker.io v2/ returns 401 because we didn't send
+        # an auth token; that still proves connectivity.
+        return True, f"HTTP {e.code}"
+    except (URLError, ssl.SSLError, socket.timeout, socket.gaierror, OSError) as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def preflight() -> dict:
+    """Probe GitHub and Docker Hub. Returns a dict suitable for
+    embedding in the status file. internet_ok=True iff both probes
+    succeeded; we soft-block updates when either fails because the
+    relevant `git pull` / `docker pull` will then hang indefinitely
+    or fail with confusing errors."""
+    gh_ok,  gh_detail  = probe_url(GITHUB_PROBE_URL)
+    dh_ok,  dh_detail  = probe_url(DOCKERHUB_PROBE_URL)
+    return {
+        "internet_ok": bool(gh_ok and dh_ok),
+        "probes": {
+            "github":     {"ok": gh_ok, "detail": gh_detail, "url": GITHUB_PROBE_URL},
+            "dockerhub":  {"ok": dh_ok, "detail": dh_detail, "url": DOCKERHUB_PROBE_URL},
+        },
+        "checked_at": now_iso(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Update job state
+# ---------------------------------------------------------------------------
+
+class UpdateJob:
+    """Mutable state for one in-flight (or finished) update.
+
+    Status-file writes go through `_write()` which always re-serialises
+    the full snapshot. Cheap, and means partial-update bugs can't leak
+    a stale field into the next phase."""
+
+    def __init__(self, request_id: str, options: dict, do_source: bool, do_image: bool,
+                 do_install: bool, restart_mode: str, force: bool):
+        self.request_id   = request_id
+        self.options      = options          # echoed back in status for the UI
+        self.do_source    = do_source
+        self.do_image     = do_image
+        self.do_install   = do_install
+        self.restart_mode = restart_mode      # "service" | "reboot" | "none"
+        self.force        = force
+
+        self.phase: str       = "preparing"
+        self.step:  str|None  = None
+        self.error: str|None  = None
+        self.exit_code: int|None = None
+        self.started_at: str  = now_iso()
+        self.updated_at: str  = self.started_at
+        self.ended_at: str|None = None
+        self.preflight: dict|None = None
+        self._log_tail: list[str] = []
+        self._lock = threading.Lock()
+        self._last_write_ts = 0.0
+
+    def _snapshot(self) -> dict:
+        return {
+            "request_id":    self.request_id,
+            "phase":         self.phase,
+            "step":          self.step,
+            "error":         self.error,
+            "exit_code":     self.exit_code,
+            "started_at":    self.started_at,
+            "updated_at":    self.updated_at,
+            "ended_at":      self.ended_at,
+            "options":       self.options,
+            "restart_mode":  self.restart_mode,
+            "preflight":     self.preflight,
+            "log_tail":      list(self._log_tail),
+        }
+
+    def _write(self, *, force: bool = False) -> None:
+        """Persist the current snapshot. Coalesces writes to MIN_WRITE_INTERVAL_S
+        unless `force=True` (used at phase boundaries so the UI sees
+        the new phase immediately)."""
+        now = time.monotonic()
+        if not force and (now - self._last_write_ts) < MIN_WRITE_INTERVAL_S:
+            return
+        self._last_write_ts = now
+        self.updated_at = now_iso()
+        try:
+            write_json_atomic(STATUS_PATH, self._snapshot())
+        except OSError as e:
+            sys.stderr.write(f"[byh-update] failed to write status: {e}\n")
+
+    def set_phase(self, phase: str, *, step: str|None = None, error: str|None = None,
+                  exit_code: int|None = None) -> None:
+        with self._lock:
+            self.phase = phase
+            if step is not None:
+                self.step = step
+            if error is not None:
+                self.error = error
+            if exit_code is not None:
+                self.exit_code = exit_code
+            if phase in ("done", "error"):
+                self.ended_at = now_iso()
+            self._write(force=True)
+
+    def set_preflight(self, pre: dict) -> None:
+        with self._lock:
+            self.preflight = pre
+            self._write(force=True)
+
+    def append_log(self, line: str) -> None:
+        line = line.rstrip("\n")
+        if not line:
+            return
+        with self._lock:
+            self._log_tail.append(line)
+            if len(self._log_tail) > LOG_TAIL_LINES:
+                self._log_tail = self._log_tail[-LOG_TAIL_LINES:]
+            # Auto-classify section headers so the UI gets phase/step
+            # transitions for free.
+            m = SECTION_RE.match(line)
+            if m:
+                section_name = m.group(1)
+                step_key = STEP_FROM_SECTION.get(section_name)
+                if step_key:
+                    self.step = step_key
+                    if step_key == "restart":
+                        self.phase = "restarting"
+                    elif step_key == "reboot":
+                        self.phase = "rebooting"
+                    elif step_key == "done":
+                        # The "Done" section is the last thing
+                        # update.sh prints BEFORE issuing the systemctl
+                        # restart, so don't flip to "done" here -- the
+                        # final phase transition happens after the
+                        # subprocess actually exits.
+                        pass
+            self._write()
+
+
+# ---------------------------------------------------------------------------
+# Driving update.sh
+# ---------------------------------------------------------------------------
+
+def build_update_argv(job: UpdateJob) -> list[str]:
+    """Translate the job's high-level toggles to the flags update.sh
+    actually understands."""
+    argv = [str(UPDATE_SH), "-y"]
+    if not job.do_source:  argv.append("--no-source")
+    if not job.do_image:   argv.append("--no-image")
+    if not job.do_install: argv.append("--no-install")
+    if   job.restart_mode == "none":   argv.append("--no-restart")
+    elif job.restart_mode == "reboot": argv.append("--reboot")
+    # restart_mode == "service" is update.sh's default; no flag needed.
+    return argv
+
+
+def run_update(job: UpdateJob) -> int:
+    """Spawn update.sh and stream its stdout into the status file's
+    log_tail. Returns the subprocess exit code."""
+    argv = build_update_argv(job)
+    job.append_log(f"$ {' '.join(argv)}")
+
+    env = os.environ.copy()
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    # update.sh uses ANSI colour escapes via printf "\033[...m"; the
+    # log_tail UI renders them as raw bytes, which looks like garbage.
+    # Easiest fix: ask update.sh nicely to skip them by un-setting
+    # TERM and forcing NO_COLOR=1 (curl, git, install.sh respect it;
+    # update.sh itself uses unconditional escapes but those are easy
+    # to strip on the way past).
+    env["NO_COLOR"] = "1"
+    env.pop("TERM", None)
+
+    proc = subprocess.Popen(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+        text=True,
+        env=env,
+    )
+    assert proc.stdout is not None
+
+    ansi_re = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+    for raw in proc.stdout:
+        clean = ansi_re.sub("", raw)
+        job.append_log(clean)
+
+    rc = proc.wait()
+    return rc
+
+
+# ---------------------------------------------------------------------------
+# Top-level apply path
+# ---------------------------------------------------------------------------
+
+def parse_request() -> tuple[dict|None, str|None]:
+    """Read /data/byh_update_request.json. Returns (request_dict, error_str)."""
+    try:
+        with open(REQ_PATH) as f:
+            req = json.load(f)
+    except FileNotFoundError:
+        return None, "no request file (path watcher fired with no request payload)"
+    except (json.JSONDecodeError, OSError) as e:
+        return None, f"failed to parse request: {e}"
+    if not isinstance(req, dict):
+        return None, "request must be a JSON object"
+    return req, None
+
+
+def apply_request() -> int:
+    req, err = parse_request()
+    if req is None:
+        # Write a synthetic error status with a stable request_id so
+        # the UI's poll has something to display rather than spinning
+        # on a stale "preparing" snapshot.
+        request_id = f"unsolicited-{int(time.time())}"
+        write_json_atomic(STATUS_PATH, {
+            "request_id": request_id,
+            "phase": "error",
+            "error": err,
+            "started_at": now_iso(),
+            "updated_at": now_iso(),
+            "ended_at":   now_iso(),
+        })
+        return 1
+
+    # Idempotency: if we just successfully serviced this request_id,
+    # don't re-run it. systemd .path units can fire multiple times for
+    # a single write event (atomic-rename on the request file looks
+    # like a CHANGED+CREATED to inotify).
+    request_id = str(req.get("request_id") or f"unsolicited-{int(time.time())}")
+    if STATUS_PATH.exists():
+        try:
+            prev = json.loads(STATUS_PATH.read_text())
+            if (prev.get("request_id") == request_id
+                    and prev.get("phase") in ("done", "error", "restarting", "rebooting")):
+                return 0
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    do_source    = bool(req.get("do_source",  True))
+    do_image     = bool(req.get("do_image",   True))
+    do_install   = bool(req.get("do_install", True))
+    restart_mode = str(req.get("restart_mode", "service")).lower()
+    force        = bool(req.get("force",      False))
+
+    if restart_mode not in ("service", "reboot", "none"):
+        write_json_atomic(STATUS_PATH, {
+            "request_id": request_id,
+            "phase": "error",
+            "error": f"restart_mode must be one of service/reboot/none (got {restart_mode!r})",
+            "started_at": now_iso(),
+            "updated_at": now_iso(),
+            "ended_at":   now_iso(),
+        })
+        return 1
+
+    job = UpdateJob(
+        request_id=request_id,
+        options={
+            "do_source": do_source,
+            "do_image":  do_image,
+            "do_install": do_install,
+            "restart_mode": restart_mode,
+            "force": force,
+        },
+        do_source=do_source,
+        do_image=do_image,
+        do_install=do_install,
+        restart_mode=restart_mode,
+        force=force,
+    )
+
+    # ----- preflight -----
+    job.set_phase("preflight")
+    pre = preflight()
+    job.set_preflight(pre)
+    if not pre["internet_ok"] and not force:
+        gh = pre["probes"]["github"]["detail"]
+        dh = pre["probes"]["dockerhub"]["detail"]
+        job.set_phase("error", error=(
+            "No internet connectivity (github: " + gh + "; dockerhub: " + dh + "). "
+            "Re-run with force=true if you want to attempt an update against "
+            "cached state."
+        ))
+        return 1
+
+    # ----- run update.sh -----
+    if not UPDATE_SH.exists():
+        job.set_phase("error", error=f"update.sh not found at {UPDATE_SH}")
+        return 1
+    if not os.access(UPDATE_SH, os.X_OK):
+        try:
+            os.chmod(UPDATE_SH, 0o755)
+        except OSError:
+            pass
+
+    job.set_phase("updating")
+    try:
+        rc = run_update(job)
+    except (OSError, subprocess.SubprocessError) as e:
+        job.set_phase("error", error=f"update.sh failed to launch: {e}")
+        return 1
+
+    # ----- finish up -----
+    if rc != 0:
+        # Last log line tends to be the most informative ("die ..." line
+        # from update.sh). Surface it inline.
+        last = ""
+        if job._log_tail:
+            last = job._log_tail[-1]
+        job.set_phase(
+            "error",
+            error=f"update.sh exited {rc}. Last: {last[-300:]}",
+            exit_code=rc,
+        )
+        return 1
+
+    # update.sh succeeded. The systemctl restart / reboot it issued at
+    # the very end is async, so this status write races with the docker
+    # container being torn down. write_json_atomic gives us either the
+    # old file or the new file -- never a half-written one -- so the
+    # post-restart UI poll will see a consistent snapshot regardless.
+    #
+    # We write phase=done for all three restart_mode values; which
+    # method was used is preserved in restart_mode so the UI can render
+    # "Service restarted" vs "Pi rebooted" vs "Update staged" in the
+    # success message. (Earlier versions wrote phase=rebooting for the
+    # reboot case, which left the UI stuck on "Rebooting…" forever
+    # once the Pi came back online.)
+    job.set_phase("done", exit_code=rc)
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Apply Backyard Hero system update")
+    args = parser.parse_args()
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    return apply_request()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+PY
+  chmod 0755 "${UPDATE_APPLY_SCRIPT_PATH}"
+}
+
+write_update_apply_units() {
+  local data_dir="${REPO_DIR}/host/data"
+  mkdir -p "${data_dir}"
+
+  cat >"/etc/systemd/system/${UPDATE_APPLY_SERVICE_NAME}" <<EOF
+[Unit]
+Description=Apply Backyard Hero system update requested by the UI
+Documentation=https://github.com/Os4ivmb/backyardhero
+After=network.target docker.service
+
+[Service]
+Type=oneshot
+# Run update.sh from a clean cwd so anything that's relative to \$PWD
+# (there shouldn't be any but it's cheap insurance) works the same way
+# whether the unit fires on its own or from a manual systemctl start.
+WorkingDirectory=${REPO_DIR}
+ExecStart=${UPDATE_APPLY_SCRIPT_PATH}
+Environment=BYH_DATA_DIR=${data_dir}
+Environment=BYH_REPO_DIR=${REPO_DIR}
+Environment=BYH_UPDATE_SH=${REPO_DIR}/host/run/pi/update.sh
+# Don't retry on its own -- the .path unit will fire again the next
+# time the UI writes a request file.
+SuccessExitStatus=0
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat >"/etc/systemd/system/${UPDATE_APPLY_PATH_NAME}" <<EOF
+[Unit]
+Description=Watch for Backyard Hero system update requests
+After=local-fs.target
+
+[Path]
+PathChanged=${data_dir}/byh_update_request.json
+Unit=${UPDATE_APPLY_SERVICE_NAME}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  chmod 0644 "/etc/systemd/system/${UPDATE_APPLY_SERVICE_NAME}"
+  chmod 0644 "/etc/systemd/system/${UPDATE_APPLY_PATH_NAME}"
+}
+
+install_update_service() {
+  log "installing system-update apply service (UI-driven update.sh runner)"
+  write_update_apply_script
+  write_update_apply_units
+  systemctl daemon-reload
+  systemctl enable  "${UPDATE_APPLY_PATH_NAME}"
+  systemctl restart "${UPDATE_APPLY_PATH_NAME}" \
+    || warn "couldn't start ${UPDATE_APPLY_PATH_NAME}"
+}
+
+# ---------------------------------------------------------------------------
 # NAT: let AP clients reach the internet through the Pi's wired uplink.
 # ---------------------------------------------------------------------------
 #
@@ -1403,13 +1949,15 @@ setup_ap() {
 
 uninstall() {
   section "Uninstalling Backyard Hero services"
-  systemctl disable --now "${SERVICE_NAME}"          2>/dev/null || true
-  systemctl disable --now "${AP_IFACE_SERVICE_NAME}" 2>/dev/null || true
-  systemctl disable --now "${AP_APPLY_PATH_NAME}"    2>/dev/null || true
-  systemctl disable --now "${AP_APPLY_SERVICE_NAME}" 2>/dev/null || true
-  systemctl disable --now "${AP_NAT_SERVICE_NAME}"   2>/dev/null || true
-  systemctl disable --now hostapd.service            2>/dev/null || true
-  systemctl disable --now dnsmasq.service            2>/dev/null || true
+  systemctl disable --now "${SERVICE_NAME}"            2>/dev/null || true
+  systemctl disable --now "${AP_IFACE_SERVICE_NAME}"   2>/dev/null || true
+  systemctl disable --now "${AP_APPLY_PATH_NAME}"      2>/dev/null || true
+  systemctl disable --now "${AP_APPLY_SERVICE_NAME}"   2>/dev/null || true
+  systemctl disable --now "${AP_NAT_SERVICE_NAME}"     2>/dev/null || true
+  systemctl disable --now "${UPDATE_APPLY_PATH_NAME}"    2>/dev/null || true
+  systemctl disable --now "${UPDATE_APPLY_SERVICE_NAME}" 2>/dev/null || true
+  systemctl disable --now hostapd.service              2>/dev/null || true
+  systemctl disable --now dnsmasq.service              2>/dev/null || true
 
   # Best-effort tear-down of the NAT/forwarding rules we added. If
   # the AP_IFACE / AP_IP defaults differ from what was used at install
@@ -1431,7 +1979,10 @@ uninstall() {
   rm -f "/etc/systemd/system/${AP_APPLY_SERVICE_NAME}"
   rm -f "/etc/systemd/system/${AP_APPLY_PATH_NAME}"
   rm -f "/etc/systemd/system/${AP_NAT_SERVICE_NAME}"
+  rm -f "/etc/systemd/system/${UPDATE_APPLY_SERVICE_NAME}"
+  rm -f "/etc/systemd/system/${UPDATE_APPLY_PATH_NAME}"
   rm -f "${AP_APPLY_SCRIPT_PATH}"
+  rm -f "${UPDATE_APPLY_SCRIPT_PATH}"
   rm -f "${AP_NAT_SCRIPT_PATH}"
   rm -f "${AP_NAT_SYSCTL_PATH}"
   rm -f "${UDEV_RULE_PATH}"
@@ -1513,6 +2064,8 @@ Useful commands:
   Show NAT rules:  sudo iptables -t nat -L POSTROUTING -n -v
   Restart stack:   sudo systemctl restart ${SERVICE_NAME}
   Stop stack:      sudo systemctl stop ${SERVICE_NAME}
+  Update Pi:       sudo ${REPO_DIR}/host/run/pi/update.sh         (source + image + install + restart)
+                   ...or just open Settings -> Network -> System update in the UI.
   Update image:    cd ${REPO_DIR}/host/run/pi && sudo docker compose pull && sudo systemctl restart ${SERVICE_NAME}
   Update dongle:   sudo ${REPO_DIR}/host/run/pi/update_dongle.sh -y
   Uninstall:       sudo $0 --uninstall
@@ -1561,6 +2114,7 @@ main() {
   update_systemcfg
   prepull_image
   install_host_service
+  install_update_service
   setup_ap
 
   print_summary

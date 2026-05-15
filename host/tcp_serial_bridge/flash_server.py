@@ -95,12 +95,30 @@ from dongle_flasher import (  # noqa: E402
 )
 
 
-# Listen address for the flasher HTTP API. 127.0.0.1 keeps the surface
-# off the LAN; the daemon (running in docker) reaches us via
-# host.docker.internal which docker maps to the host loopback. Add
-# extra_hosts: ["host.docker.internal:host-gateway"] in compose for
-# Linux hosts, which we already do for the existing :9000 forwarder.
-FLASH_HTTP_HOST = "127.0.0.1"
+# Listen address for the flasher HTTP API.
+#
+# We bind to 0.0.0.0 deliberately, mirroring the :9000 TCP forwarder
+# in tcp_serial_bridge.py. The reason 127.0.0.1 doesn't work:
+#
+#   * Docker Desktop (mac/Windows): host.docker.internal is provided
+#     by Docker Desktop's networking proxy, which makes the host's
+#     127.0.0.1 reachable from inside the container. 127.0.0.1
+#     binding works here.
+#   * Docker Engine on Linux (Raspberry Pi, generic Linux server):
+#     host.docker.internal -> host-gateway resolves to the docker
+#     bridge gateway IP (e.g. 172.17.0.1). A server bound to
+#     127.0.0.1 is NOT reachable from that interface, so the daemon
+#     gets ECONNREFUSED. Binding to 0.0.0.0 makes us reachable on
+#     both the loopback AND the docker bridge.
+#
+# Exposing port 9001 on 0.0.0.0 means anyone on the host's network
+# (e.g. clients on the Pi's WiFi AP) can hit /flash_dongle directly.
+# That's an acceptable surface for this deployment -- the dongle is
+# only reachable when the operator has physical USB access anyway,
+# and the AP is meant to be a trusted private network. If you ever
+# wire the Pi up to a hostile network, add an iptables DROP for 9001
+# on the upstream interface.
+FLASH_HTTP_HOST = "0.0.0.0"
 FLASH_HTTP_PORT = 9001
 
 # Cap on log buffer kept in memory per job. esptool produces ~1KB of
@@ -505,18 +523,41 @@ def _run_job(job: FlashJob, state: FlashServerState) -> None:
                 return
 
             if rc != 0:
-                # Auto-reset failed. Park in needs_manual_reset and wait
-                # for the operator to BOOT+RESET the dongle and click
+                # Phase 1.5: before bothering the operator, try a silent
+                # retry with --before no_reset. On lolin_s2_mini USB-CDC
+                # the chip is often already sitting in a download-ready
+                # state after a "failed" default_reset, and this silent
+                # retry succeeds outright a large fraction of the time.
+                # It saves a manual BOOT+RESET dance the operator
+                # otherwise has to click through every flash.
+                job._append_log(
+                    "auto-reset failed -- retrying once with no_reset before "
+                    "asking for manual BOOT+RESET..."
+                )
+                time.sleep(1.0)
+                job._set_phase("connecting")
+                job._process = _spawn_esptool(job, port, before="no_reset")
+                rc = _drive_subprocess(job)
+                job.exit_code = rc
+                if job._abort_event.is_set():
+                    job._set_phase("aborted", error="aborted by operator")
+                    return
+
+            if rc != 0:
+                # Silent retry also failed. Now we actually do need the
+                # operator to BOOT+RESET the dongle. Park in
+                # needs_manual_reset and wait for them to click
                 # Continue, or for the timeout to expire.
                 job._append_log(
-                    "auto-reset failed -- BOOT+RESET on the dongle, then click Continue."
+                    "silent no_reset retry also failed -- BOOT+RESET the "
+                    "dongle, then click Continue."
                 )
                 job._set_phase(
                     "needs_manual_reset",
                     error=(
-                        "esptool couldn't auto-reset the dongle into the "
-                        "bootloader (common on lolin_s2_mini USB-CDC). Hold "
-                        "BOOT, tap RESET, release BOOT, then click Continue."
+                        "esptool couldn't talk to the dongle on its own "
+                        "(common on lolin_s2_mini USB-CDC). Hold BOOT, "
+                        "tap RESET, release BOOT, then click Continue."
                     ),
                 )
                 got_continue = job._continue_event.wait(timeout=NEEDS_MANUAL_RESET_TIMEOUT_S)
@@ -534,7 +575,7 @@ def _run_job(job: FlashJob, state: FlashServerState) -> None:
                     return
 
                 # Phase 2: retry with --before no_reset. The operator has
-                # already put the chip into the ROM bootloader manually.
+                # now put the chip into the ROM bootloader manually.
                 # Clear the previous error so the UI badge flips back to
                 # "in progress" while the retry runs.
                 with job._lock:
@@ -561,7 +602,7 @@ def _run_job(job: FlashJob, state: FlashServerState) -> None:
                     )
                     return
 
-            # Made it through one of the two paths with rc==0.
+            # Made it through one of the paths with rc==0.
             job._set_phase("done")
         finally:
             # Always give the port back, even on error / abort, so the
