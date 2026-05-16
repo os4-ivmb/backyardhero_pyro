@@ -17,6 +17,7 @@ from protocol_handler.BYHProtocolHandler import BYHProtocolHandler
 LED_FILE_PATH = "/data/ledstate"
 LED_FILE_PATH_WEB = "/data/webactstate"
 COMMAND_DIR = "/tmp/d_cmd"
+COMMAND_POLL_INTERVAL_S = 0.05
 CURSOR_FILE = "/tmp/fw_cursor"
 SERIAL_PORT = "/dev/ttyACM0"
 BAUD_RATE = 115200
@@ -378,6 +379,7 @@ class FireworkDaemon:
                 self.tcp_socket.close()
                 
             self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.tcp_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.tcp_socket.connect(('host.docker.internal', 9000))  # Use the service name in Docker Compose
             
             # Configure the serial port on the bridge
@@ -613,17 +615,19 @@ class FireworkDaemon:
     def poll_command_dir(self):
         """Poll the /tmp/d_cmd directory for command files."""
         while self.running:
+            handled_command = False
             try:
                 if not os.path.exists(COMMAND_DIR):
                     os.makedirs(COMMAND_DIR)
 
-                for filename in os.listdir(COMMAND_DIR):
+                for filename in sorted(os.listdir(COMMAND_DIR)):
                     file_path = os.path.join(COMMAND_DIR, filename)
                     if os.path.isfile(file_path):
                         with open(file_path, 'r') as file:
                             command = json.load(file)
                             print(f"Loaded command from file: {command}")
                             self.handle_command(command)
+                            handled_command = True
 
                         os.remove(file_path)
                         print(f"Deleted command file: {file_path}")
@@ -631,8 +635,9 @@ class FireworkDaemon:
             except Exception as e:
                 print(f"Error polling command directory: {e}")
 
-            self.mark_state_dirty()
-            time.sleep(0.5)  # Poll every 500ms
+            if handled_command:
+                self.mark_state_dirty()
+            time.sleep(COMMAND_POLL_INTERVAL_S)
 
     def write_error(self, err_msg):
         """Appends a line to a file with a timestamp prepended in square brackets."""

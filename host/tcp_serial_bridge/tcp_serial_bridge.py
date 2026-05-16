@@ -317,6 +317,7 @@ def tcp_to_serial(client):
 
 def handle_client(client_socket):
     """Handle a client connection"""
+    client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     print("Client connected")
     
     # Create threads for bidirectional communication

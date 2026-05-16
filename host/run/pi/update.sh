@@ -77,6 +77,17 @@ die()     { err "$*"; exit 1; }
 section() { printf "\n\033[1;35m==[ %s ]==\033[0m\n" "$*"; }
 git_repo() { git -c safe.directory="${REPO_DIR}" "$@"; }
 
+ensure_git_safe_directory() {
+  # UI-triggered updates run from a root systemd oneshot against a checkout
+  # owned by the install target user. Persist the trust entry for that account
+  # before Git has a chance to reject the repo as "dubious ownership".
+  if git config --global --get-all safe.directory 2>/dev/null | grep -Fxq "${REPO_DIR}"; then
+    return
+  fi
+  git config --global --add safe.directory "${REPO_DIR}" 2>/dev/null \
+    || warn "couldn't add Git safe.directory for ${REPO_DIR}; continuing with per-command override"
+}
+
 [[ -f "${INSTALL_SCRIPT}" ]] || die "install.sh not found at ${INSTALL_SCRIPT}"
 [[ -f "${COMPOSE_FILE}"   ]] || die "compose file not found at ${COMPOSE_FILE}"
 
@@ -122,6 +133,7 @@ fi
 if [[ "${DO_SOURCE}" -eq 1 ]]; then
   section "Pulling latest source"
   cd "${REPO_DIR}"
+  ensure_git_safe_directory
 
   if [[ -n "${BRANCH}" ]]; then
     log "switching to branch ${BRANCH}"

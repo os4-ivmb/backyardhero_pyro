@@ -289,6 +289,16 @@ git_repo() {
   git -c safe.directory="${REPO_DIR}" -C "${REPO_DIR}" "$@"
 }
 
+ensure_git_safe_directory() {
+  # The installer often runs as root, then hands the checkout to TARGET_USER.
+  # Record the repo as safe for the current account before any follow-up pull.
+  if git config --global --get-all safe.directory 2>/dev/null | grep -Fxq "${REPO_DIR}"; then
+    return
+  fi
+  git config --global --add safe.directory "${REPO_DIR}" 2>/dev/null \
+    || warn "couldn't add Git safe.directory for ${REPO_DIR}; continuing with per-command override"
+}
+
 # ---------------------------------------------------------------------------
 # Step 1: apt deps
 # ---------------------------------------------------------------------------
@@ -418,6 +428,7 @@ locate_repo() {
   REPO_DIR="${REPO_DIR:-${DEFAULT_REPO_DIR}}"
   if [[ -d "${REPO_DIR}/.git" ]]; then
     log "updating existing clone at ${REPO_DIR}"
+    ensure_git_safe_directory
     GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true \
       git_repo fetch --depth 1 origin "${BRANCH}" || true
     git_repo checkout "${BRANCH}" || true
@@ -1495,6 +1506,41 @@ class UpdateJob:
 # Driving update.sh
 # ---------------------------------------------------------------------------
 
+def ensure_git_safe_directory(job: UpdateJob) -> None:
+    """Persist Git's safe.directory for the account running this systemd unit.
+
+    The UI updater runs as root while the checkout is usually owned by
+    byhuser. Newer Git rejects that as dubious ownership unless root's config
+    explicitly trusts the checkout path.
+    """
+    repo = str(REPO_DIR)
+    try:
+        existing = subprocess.run(
+            ["git", "config", "--global", "--get-all", "safe.directory"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        if repo in {line.strip() for line in existing.stdout.splitlines()}:
+            return
+        added = subprocess.run(
+            ["git", "config", "--global", "--add", "safe.directory", repo],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if added.returncode != 0:
+            detail = (added.stderr or "").strip()
+            job.append_log(
+                f"[byh-update] WARN: couldn't add Git safe.directory for {repo}"
+                + (f": {detail}" if detail else "")
+            )
+    except OSError as e:
+        job.append_log(f"[byh-update] WARN: couldn't check Git safe.directory: {e}")
+
+
 def build_update_argv(job: UpdateJob) -> list[str]:
     """Translate the job's high-level toggles to the flags update.sh
     actually understands."""
@@ -1511,6 +1557,9 @@ def build_update_argv(job: UpdateJob) -> list[str]:
 def run_update(job: UpdateJob) -> int:
     """Spawn update.sh and stream its stdout into the status file's
     log_tail. Returns the subprocess exit code."""
+    if job.do_source:
+        ensure_git_safe_directory(job)
+
     argv = build_update_argv(job)
     job.append_log(f"$ {' '.join(argv)}")
 

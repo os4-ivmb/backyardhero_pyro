@@ -92,6 +92,7 @@
 //   * Per-receiver entries in the per-second status JSON now include
 //     `fw` / `bv` / `nb` / `nbd` / `ca` / `fd` so the host can recover
 //     full receiver state (e.g. post-restart) without re-querying.
+// v18: 2026-05-XX -Command priority. 
 // v17: 2026-05-XX - OTA begin handshake recovery:
 //   * `flash_begin` now clears half-open OTA sessions by sending best-effort
 //     OTA_ABORT probes at both 250kbps and the requested OTA rate before
@@ -144,7 +145,7 @@
 //     drops from ~2.1s to ~600ms, so a transient burst of interference
 //     no longer chokes the serial pipe for seconds at a time -- the host
 //     gets the NACK and decides whether to retry or recover.
-#define FW_VERSION 17
+#define FW_VERSION 18
 
 #define RF24_CE_PIN 37
 #define RF24_CSN_PIN 36
@@ -622,6 +623,16 @@ void enqueueCommand(const QueuedCommand& cmd) {
   }
   commandBuffer[cmdQueueTail] = cmd;
   cmdQueueTail = (cmdQueueTail + 1) % MAX_COMMANDS_IN_QUEUE;
+  cmdQueueCount++;
+}
+
+void enqueuePriorityCommand(const QueuedCommand& cmd) {
+  if (isQueueFull()) {
+    Serial.println(F("ERR: Command queue full. Priority command dropped."));
+    return;
+  }
+  cmdQueueHead = (cmdQueueHead - 1 + MAX_COMMANDS_IN_QUEUE) % MAX_COMMANDS_IN_QUEUE;
+  commandBuffer[cmdQueueHead] = cmd;
   cmdQueueCount++;
 }
 
@@ -2672,12 +2683,48 @@ void processSerialCommand(String inStr) {
   }
 
   if (qc.messageType != 0) {
-    enqueueCommand(qc);
+    if (qc.messageType == MANUAL_FIRE) enqueuePriorityCommand(qc);
+    else enqueueCommand(qc);
     if (debugMode > 0) {
       Serial.print(F("C+ Q (repeat=")); Serial.print(qc.repeat_count); Serial.println(F(")"));
     }
   } else {
     Serial.println(F("C? PE"));
+  }
+}
+
+void serviceSerialInput() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (serialBufferIndex > 0) {
+        serialLineBuffer[serialBufferIndex] = '\0';
+        // OTA hot-path commands are parsed as C strings to avoid thousands of
+        // Arduino String heap allocations during a firmware image transfer.
+        // Heap fragmentation here can make the dongle appear to "quit" after
+        // a few thousand chunks.
+        if (strncmp(serialLineBuffer, "flash_data ", 11) == 0) {
+          handleFlashDataC(serialLineBuffer + 11);
+        } else if (strncmp(serialLineBuffer, "flash_recover ", 14) == 0) {
+          handleFlashRecoverC(serialLineBuffer + 14);
+        } else if (strcmp(serialLineBuffer, "flash_ping") == 0) {
+          // Hot-path liveness probe -- bypass String parsing so a
+          // wedged-by-backpressure dongle can still reply quickly
+          // once it catches up on the inbound buffer.
+          handleFlashPing();
+        } else {
+          String s = String(serialLineBuffer);
+          processSerialCommand(s);
+        }
+        serialBufferIndex = 0;
+      }
+      if (c == '\r' && Serial.available() > 0 && Serial.peek() == '\n') Serial.read();
+    } else if (serialBufferIndex < (SERIAL_BUFFER_SIZE - 1)) {
+      serialLineBuffer[serialBufferIndex++] = c;
+    } else {
+      serialBufferIndex = 0;
+      if (debugMode > 0) Serial.println(F("WARN: Serial buffer overflow"));
+    }
   }
 }
 
@@ -2889,6 +2936,11 @@ void loop() {
   // bursts) also feed it inline -- this is the baseline tick.
   esp_task_wdt_reset();
 
+  // Pull host commands in before routine LED/status/poll work. Manual fire
+  // commands also enter the front of the queue, so the next dispatch can send
+  // them ahead of background CLOCK_SYNC traffic.
+  serviceSerialInput();
+
   checkGpioStatus();
   updateLEDs();
 
@@ -3038,37 +3090,6 @@ void loop() {
     }
   }
 
-  // Non-blocking serial input.
-  while (Serial.available() > 0) {
-    char c = Serial.read();
-    if (c == '\n' || c == '\r') {
-      if (serialBufferIndex > 0) {
-        serialLineBuffer[serialBufferIndex] = '\0';
-        // OTA hot-path commands are parsed as C strings to avoid thousands of
-        // Arduino String heap allocations during a firmware image transfer.
-        // Heap fragmentation here can make the dongle appear to "quit" after
-        // a few thousand chunks.
-        if (strncmp(serialLineBuffer, "flash_data ", 11) == 0) {
-          handleFlashDataC(serialLineBuffer + 11);
-        } else if (strncmp(serialLineBuffer, "flash_recover ", 14) == 0) {
-          handleFlashRecoverC(serialLineBuffer + 14);
-        } else if (strcmp(serialLineBuffer, "flash_ping") == 0) {
-          // Hot-path liveness probe -- bypass String parsing so a
-          // wedged-by-backpressure dongle can still reply quickly
-          // once it catches up on the inbound buffer.
-          handleFlashPing();
-        } else {
-          String s = String(serialLineBuffer);
-          processSerialCommand(s);
-        }
-        serialBufferIndex = 0;
-      }
-      if (c == '\r' && Serial.available() > 0 && Serial.peek() == '\n') Serial.read();
-    } else if (serialBufferIndex < (SERIAL_BUFFER_SIZE - 1)) {
-      serialLineBuffer[serialBufferIndex++] = c;
-    } else {
-      serialBufferIndex = 0;
-      if (debugMode > 0) Serial.println(F("WARN: Serial buffer overflow"));
-    }
-  }
+  // Service any bytes that arrived while we were doing RF/status work.
+  serviceSerialInput();
 }

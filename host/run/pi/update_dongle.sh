@@ -70,6 +70,14 @@ err()  { printf "\033[1;31m[update_dongle] ERROR:\033[0m %s\n" "$*" >&2; }
 die()  { err "$*"; exit 1; }
 git_repo() { git -c safe.directory="${REPO_DIR}" "$@"; }
 
+ensure_git_safe_directory() {
+  if git config --global --get-all safe.directory 2>/dev/null | grep -Fxq "${REPO_DIR}"; then
+    return
+  fi
+  git config --global --add safe.directory "${REPO_DIR}" 2>/dev/null \
+    || warn "couldn't add Git safe.directory for ${REPO_DIR}; continuing with per-command override"
+}
+
 section() { printf "\n\033[1;35m==[ %s ]==\033[0m\n" "$*"; }
 
 [[ -x "${BUILD_SCRIPT}" ]] || die "build script not found / not executable: ${BUILD_SCRIPT}"
@@ -140,6 +148,7 @@ fi
 if [[ "${DO_PULL}" -eq 1 ]]; then
   section "Pulling latest from git"
   cd "${REPO_DIR}"
+  ensure_git_safe_directory
   if [[ -n "${BRANCH}" ]]; then
     git_repo fetch --depth 1 origin "${BRANCH}" || die "git fetch failed"
     git_repo checkout "${BRANCH}" || die "git checkout ${BRANCH} failed"
