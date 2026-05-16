@@ -92,6 +92,14 @@
 //   * Per-receiver entries in the per-second status JSON now include
 //     `fw` / `bv` / `nb` / `nbd` / `ca` / `fd` so the host can recover
 //     full receiver state (e.g. post-restart) without re-querying.
+// v17: 2026-05-XX - OTA begin handshake recovery:
+//   * `flash_begin` now clears half-open OTA sessions by sending best-effort
+//     OTA_ABORT probes at both 250kbps and the requested OTA rate before
+//     starting a new begin. This recovers quick retries after a prior Phase A
+//     success stranded the receiver at 1M/2M.
+//   * If the initial 250kbps begin gets no hardware ACK, the dongle also
+//     probes the requested OTA rate before failing. Error strings now
+//     distinguish no begin ACK from no PREP_OK ACK.
 // v15: 2026-05-XX - Non-blocking OTA serial writes + faster WDT recovery:
 //   * emitOtaAck/Nack/Pong/heartbeat now build their line into a stack
 //     buffer and check Serial.availableForWrite() *before* writing. If
@@ -136,7 +144,7 @@
 //     drops from ~2.1s to ~600ms, so a transient burst of interference
 //     no longer chokes the serial pipe for seconds at a time -- the host
 //     gets the NACK and decides whether to retry or recover.
-#define FW_VERSION 16
+#define FW_VERSION 17
 
 #define RF24_CE_PIN 37
 #define RF24_CSN_PIN 36
@@ -1773,6 +1781,23 @@ bool otaRecoverChunkAtCurrentRate(const void* payload, uint8_t payloadLen,
   return false;
 }
 
+// Best-effort cleanup before starting a new OTA session. A prior failed
+// begin can leave the receiver parked at the target OTA rate until its
+// inactivity watchdog fires. Sending OTA_ABORT at both possible rates pulls
+// that half-open session back to normal polling before we try OTA_BEGIN again.
+bool otaSendAbortAtRate(rf24_datarate_e rate) {
+  OtaAbortMessage abortMsg;
+  abortMsg.type = OTA_ABORT;
+
+  ReceiverOtaStatusMessage ack;
+  bool gotAck = false;
+  otaReassertRadioConfig(rate);
+  delay(5);
+  bool ok = sendOtaFrame(&abortMsg, sizeof(abortMsg), &ack, &gotAck);
+  delay(15);
+  return ok || gotAck;
+}
+
 bool otaProbeReceiverAtNormalRate(const void* payload, uint8_t payloadLen) {
   otaReassertRadioConfig(RF24_250KBPS);
   delay(5);
@@ -1926,6 +1951,18 @@ void handleFlashBegin(const String& args) {
   msg.dataRate = rate;
   msg.crc32 = crc32;
 
+  // Start from a known radio state and clear any half-open OTA session left
+  // behind by a previous failed begin. Target-rate abort is the important
+  // one: after Phase A succeeds, a receiver immediately hops to the requested
+  // OTA rate, so a quick user retry would otherwise start at 250kbps while
+  // the receiver is still listening at 1M/2M.
+  otaReassertRadioConfig(RF24_250KBPS);
+  otaSendAbortAtRate(RF24_250KBPS);
+  if (rate != 0) {
+    otaSendAbortAtRate(otaWireRate(rate));
+  }
+  otaReassertRadioConfig(RF24_250KBPS);
+
   // OTA_BEGIN handshake -- two-phase, retried on a marginal link.
   //
   // Why two phases: the very first OTA_BEGIN we send at 250kbps causes the
@@ -1949,8 +1986,10 @@ void handleFlashBegin(const String& args) {
   //   * Phase A is needed only ONCE per OTA session. After it succeeds
   //     once, the receiver is in OTA mode at the target rate; we stay at
   //     the target rate and keep retrying Phase B until PREP_OK arrives.
-  //   * If Phase A itself fails repeatedly (no_rf_ack at 250kbps) the
-  //     link is too lossy to even initiate OTA -- bail with no_rf_ack.
+  //   * If Phase A itself misses at 250kbps, also probe at the target
+  //     rate. This catches the common retry-after-failure case where the
+  //     receiver was already pushed into OTA mode by the previous attempt
+  //     and has not hit its 30s inactivity watchdog yet.
   //   * If Phase A succeeded but Phase B never sees PREP_OK, the receiver
   //     will tear itself down via OTA_INACTIVITY_TIMEOUT_MS (30s) and
   //     rejoin normal polling. Operator can retry.
@@ -1960,7 +1999,8 @@ void handleFlashBegin(const String& args) {
   bool any_tx_ok = false;
   bool receiver_pushed = false;  // Phase A succeeded at least once
   bool dongle_at_target = false;
-  const uint8_t BEGIN_HOST_RETRIES = 8;
+  bool tried_target_recovery = false;
+  const uint8_t BEGIN_HOST_RETRIES = 16;
   for (uint8_t attempt = 0; attempt < BEGIN_HOST_RETRIES; attempt++) {
     if (!receiver_pushed) {
       // Phase A: send OTA_BEGIN at 250kbps to push the receiver into
@@ -1977,14 +2017,34 @@ void handleFlashBegin(const String& args) {
       if (ok_a) {
         any_tx_ok = true;
         receiver_pushed = true;
-        // Receiver has now processed OTA_BEGIN -> Update.begin -> hopped.
-        // Give it ~15ms to settle on the new rate before we probe.
-        delay(15);
+        // radio.write() returns after the hardware auto-ACK, before the
+        // receiver CPU has necessarily finished Update.begin() and hopped.
+        // Give flash prep real breathing room before the target-rate probe.
+        delay(80);
       } else {
-        // TX failed at 250kbps. Marginal link or radio busy -- back off
-        // and retry the whole thing.
-        delay(15);
-        continue;
+        // TX failed at 250kbps. This can be a genuinely marginal link, but
+        // it can also mean a previous begin already pushed the receiver to
+        // the target OTA rate. Probe there before declaring no begin ACK.
+        if (rate != 0) {
+          tried_target_recovery = true;
+          radio.setDataRate(otaWireRate(rate));
+          dongle_at_target = true;
+          delay(5);
+          bool ok_recover = sendOtaFrame(&msg, sizeof(msg), &ack, &gotAck);
+          if (ok_recover) {
+            any_tx_ok = true;
+            receiver_pushed = true;
+            delay(40);
+          } else {
+            radio.setDataRate(RF24_250KBPS);
+            dongle_at_target = false;
+            delay(40);
+            continue;
+          }
+        } else {
+          delay(40);
+          continue;
+        }
       }
     }
 
@@ -2016,7 +2076,7 @@ void handleFlashBegin(const String& args) {
     // Phase B again on next iteration -- the receiver is in OTA mode
     // at the target rate now, so dropping back to 250kbps would just
     // make us miss it entirely.
-    delay(15);
+    delay(40);
   }
 
   if (!got_prep_ok) {
@@ -2026,9 +2086,13 @@ void handleFlashBegin(const String& args) {
     // down via OTA_INACTIVITY_TIMEOUT_MS (30s) and rejoin normally.
     if (dongle_at_target) radio.setDataRate(RF24_250KBPS);
     const char* errStr;
-    if (!any_tx_ok)            errStr = "no_rf_ack";
-    else if (!receiver_pushed) errStr = "no_rf_ack";
-    else                       errStr = "no_prep_ok_ack";
+    if (!any_tx_ok) {
+      errStr = tried_target_recovery ? "no_begin_ack_250_or_target" : "no_begin_ack_250";
+    } else if (!receiver_pushed) {
+      errStr = tried_target_recovery ? "no_begin_ack_250_or_target" : "no_begin_ack_250";
+    } else {
+      errStr = "no_prep_ok_ack";
+    }
     otaFinishMode("error", "err", errStr);
     return;
   }

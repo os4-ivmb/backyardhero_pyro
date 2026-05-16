@@ -16,6 +16,15 @@ import { cn } from "@/design";
 // `armedRail` is preserved verbatim from the desktop AppShell -- the
 // barber-pole hairline is the single strongest peripheral cue we have
 // and we want it on a phone, too.
+//
+// Height note: we deliberately use `100svh` (small viewport height) for
+// the grid container instead of `100dvh`. On Android Chrome the URL bar
+// (and on some devices the gesture-nav inset) frequently leaves
+// `100dvh` reporting the *large* viewport, which pushed our 4th grid
+// row (the bottom nav) below the visible area. `svh` is the worst-case
+// "all browser/system chrome visible" viewport so the bottom nav is
+// guaranteed to be reachable. iOS gets the same treatment for free,
+// and we still respect the home-indicator inset via `safe-bottom`.
 export default function MobileShell({
   topBar,
   bottomNav,
@@ -27,7 +36,7 @@ export default function MobileShell({
     <div
       className={cn(
         "w-full grid bg-surface-base text-fg-primary",
-        "h-screen h-[100dvh]",
+        "h-screen h-[100svh]",
         "grid-rows-[auto_minmax(0,1fr)_auto_auto]"
       )}
     >
