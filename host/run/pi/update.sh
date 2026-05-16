@@ -42,6 +42,8 @@ INSTALL_SCRIPT="${SCRIPT_DIR}/install.sh"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
 
 SERVICE_NAME="byh-host.service"
+SYSTEMCFG_REL="host/config/systemcfg.json"
+SYSTEMCFG_BACKUP=""
 
 DO_SOURCE=1
 DO_IMAGE=1
@@ -86,6 +88,57 @@ ensure_git_safe_directory() {
   fi
   git config --global --add safe.directory "${REPO_DIR}" 2>/dev/null \
     || warn "couldn't add Git safe.directory for ${REPO_DIR}; continuing with per-command override"
+}
+
+preserve_local_systemcfg_for_pull() {
+  if [[ -z "$(git_repo status --porcelain -- "${SYSTEMCFG_REL}")" ]]; then
+    return
+  fi
+
+  local backup_dir="${REPO_DIR}/host/data/update-backups"
+  mkdir -p "${backup_dir}"
+  SYSTEMCFG_BACKUP="${backup_dir}/systemcfg.$(date +%Y%m%d-%H%M%S).json"
+  cp "${REPO_DIR}/${SYSTEMCFG_REL}" "${SYSTEMCFG_BACKUP}"
+  log "preserving local systemcfg.json runtime settings at ${SYSTEMCFG_BACKUP}"
+
+  # Put the tracked file back to HEAD so `git pull --ff-only` can advance.
+  # The backup is merged back after the pull succeeds.
+  git_repo reset -q HEAD -- "${SYSTEMCFG_REL}" || die "couldn't unstage ${SYSTEMCFG_REL}"
+  git_repo checkout -- "${SYSTEMCFG_REL}" || die "couldn't restore tracked ${SYSTEMCFG_REL}"
+}
+
+restore_local_systemcfg_backup() {
+  if [[ -n "${SYSTEMCFG_BACKUP}" && -f "${SYSTEMCFG_BACKUP}" ]]; then
+    cp "${SYSTEMCFG_BACKUP}" "${REPO_DIR}/${SYSTEMCFG_REL}" || true
+  fi
+}
+
+merge_local_systemcfg_runtime_fields() {
+  if [[ -z "${SYSTEMCFG_BACKUP}" || ! -f "${SYSTEMCFG_BACKUP}" ]]; then
+    return
+  fi
+
+  python3 - "${REPO_DIR}/${SYSTEMCFG_REL}" "${SYSTEMCFG_BACKUP}" <<'PY'
+import json
+import sys
+
+current_path, local_path = sys.argv[1], sys.argv[2]
+with open(current_path) as f:
+    current = json.load(f)
+with open(local_path) as f:
+    local = json.load(f)
+
+# Keep source-owned schema/version/protocol/type updates from the freshly
+# pulled file, but preserve fields the Pi/UI mutates at runtime.
+for key in ("system", "default_location"):
+    if key in local:
+        current[key] = local[key]
+
+with open(current_path, "w") as f:
+    json.dump(current, f, indent=2)
+    f.write("\n")
+PY
+  log "restored local systemcfg.json runtime settings"
 }
 
 [[ -f "${INSTALL_SCRIPT}" ]] || die "install.sh not found at ${INSTALL_SCRIPT}"
@@ -134,6 +187,7 @@ if [[ "${DO_SOURCE}" -eq 1 ]]; then
   section "Pulling latest source"
   cd "${REPO_DIR}"
   ensure_git_safe_directory
+  preserve_local_systemcfg_for_pull
 
   if [[ -n "${BRANCH}" ]]; then
     log "switching to branch ${BRANCH}"
@@ -149,7 +203,8 @@ if [[ "${DO_SOURCE}" -eq 1 ]]; then
   fi
 
   GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true \
-    git_repo pull --ff-only || die "git pull failed (resolve and retry, or pass --no-source)"
+    git_repo pull --ff-only || { restore_local_systemcfg_backup; die "git pull failed (resolve and retry, or pass --no-source)"; }
+  merge_local_systemcfg_runtime_fields
 fi
 
 # ---------------------------------------------------------------------------

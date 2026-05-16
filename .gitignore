@@ -12,6 +12,7 @@ host/data/ledstate
 host/data/state
 host/data/leddata
 host/data/webactstate
+host/data/update-backups/
 *.state.*
 
 **/.DS_Store
