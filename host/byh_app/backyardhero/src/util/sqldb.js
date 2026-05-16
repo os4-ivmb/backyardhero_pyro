@@ -2,7 +2,8 @@ import Database from 'better-sqlite3';
 const path = require('path');
 const fs = require('fs');
 
-const db = new Database('/data/backyardhero.db', { verbose: console.log });
+export const DB_PATH = '/data/backyardhero.db';
+export const db = new Database(DB_PATH, { verbose: console.log });
 
 const SYSTEM_CFG_PATH = '/config/systemcfg.json';
 

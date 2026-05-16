@@ -68,10 +68,55 @@ if ! ps -p "${DOCKER_PID}" >/dev/null 2>&1; then
   exit 1
 fi
 
+# LAN URL detection. Docker Desktop already exposes mapped ports
+# (1776, 8090) on all host interfaces by default, and both the
+# Next.js dev server and the websocket are bound to 0.0.0.0 inside
+# the container -- so a phone or laptop on the same LAN can reach
+# this stack as soon as we know the Mac's address.
+#
+# We pick the IP attached to the default-route interface first
+# (almost always the right one), and fall back to the first en*
+# interface that has an address. Both `route` and `ipconfig` ship
+# with macOS so there's nothing to install.
+detect_lan_ips() {
+  local primary_iface ip ifaces=()
+  primary_iface="$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')"
+  if [ -n "${primary_iface}" ]; then
+    ifaces+=("${primary_iface}")
+  fi
+  while IFS= read -r line; do
+    ifaces+=("${line}")
+  done < <(ifconfig -l 2>/dev/null | tr ' ' '\n' | grep -E '^en[0-9]+$' || true)
+
+  local seen=""
+  for iface in "${ifaces[@]}"; do
+    case " ${seen} " in *" ${iface} "*) continue ;; esac
+    seen="${seen} ${iface}"
+    ip="$(ipconfig getifaddr "${iface}" 2>/dev/null || true)"
+    if [ -n "${ip}" ]; then
+      echo "${ip} ${iface}"
+    fi
+  done
+}
+
 echo ""
 echo "------------------------------------------------------------"
 echo "  Backyard Hero (dev) is running."
 echo "  Open: http://localhost:1776"
+
+LAN_IP_LINES="$(detect_lan_ips || true)"
+if [ -n "${LAN_IP_LINES}" ]; then
+  echo ""
+  echo "  LAN access (from another device on this network):"
+  while IFS=' ' read -r ip iface; do
+    [ -z "${ip}" ] && continue
+    echo "    http://${ip}:1776   (${iface})"
+  done <<< "${LAN_IP_LINES}"
+  echo ""
+  echo "  If a LAN device can't connect, check the macOS firewall:"
+  echo "    System Settings → Network → Firewall → allow incoming"
+  echo "    connections for Docker (or temporarily disable the firewall)."
+fi
 echo "------------------------------------------------------------"
 
 wait "${BRIDGE_PID}" "${DOCKER_PID}"

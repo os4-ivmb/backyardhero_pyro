@@ -68,6 +68,7 @@ log()  { printf "\033[1;36m[update_dongle]\033[0m %s\n" "$*"; }
 warn() { printf "\033[1;33m[update_dongle] WARN:\033[0m %s\n" "$*" >&2; }
 err()  { printf "\033[1;31m[update_dongle] ERROR:\033[0m %s\n" "$*" >&2; }
 die()  { err "$*"; exit 1; }
+git_repo() { git -c safe.directory="${REPO_DIR}" "$@"; }
 
 section() { printf "\n\033[1;35m==[ %s ]==\033[0m\n" "$*"; }
 
@@ -140,17 +141,17 @@ if [[ "${DO_PULL}" -eq 1 ]]; then
   section "Pulling latest from git"
   cd "${REPO_DIR}"
   if [[ -n "${BRANCH}" ]]; then
-    git fetch --depth 1 origin "${BRANCH}" || die "git fetch failed"
-    git checkout "${BRANCH}" || die "git checkout ${BRANCH} failed"
+    git_repo fetch --depth 1 origin "${BRANCH}" || die "git fetch failed"
+    git_repo checkout "${BRANCH}" || die "git checkout ${BRANCH} failed"
   fi
   # Tolerate dirty working tree but warn about it -- the most common
   # cause is the operator hand-editing the dongle .ino, which we should
   # NOT silently revert. `pull --ff-only` will refuse a merge.
-  if [[ -n "$(git status --porcelain)" ]]; then
+  if [[ -n "$(git_repo status --porcelain)" ]]; then
     warn "working tree has local changes; git pull --ff-only may fail."
   fi
   GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true \
-    git pull --ff-only || die "git pull failed (use --no-pull to skip)"
+    git_repo pull --ff-only || die "git pull failed (use --no-pull to skip)"
 fi
 
 # ---------------------------------------------------------------------------

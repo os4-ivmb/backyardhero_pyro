@@ -2340,6 +2340,7 @@ const ShowBuilder = (props) => {
     () => verifyShowReceivers(showReceivers, activeReceivers),
     [showReceivers, activeReceivers]
   );
+  const hasShowReceivers = showReceivers.some((entry) => entry?.id);
 
   const handleTabChange = (tabName) => {
     // Save current scroll position
@@ -3319,28 +3320,56 @@ const ShowBuilder = (props) => {
               variant={copyMode ? "danger" : "outline"}
               onClick={copyMode ? cancelCopyItem : startCopyItem}
               title="Copy an existing timeline item to another receiver/cue"
+              disabled={!hasShowReceivers && !copyMode}
             >
               {copyMode ? "Cancel copy" : "Copy item"}
             </Button>
           </div>
 
-          <Timeline
-            items={items}
-            setItems={setItems}
-            openAddModal={openAddModal}
-            setSelectedItem={(item) => handleItemSelect(item, false)}
-            selectedItems={selectedItems}
-            onItemSelect={handleItemSelect}
-            clearSelection={clearSelection}
-            timeCursor={audioCurrentTime}
-            setTimeCursor={handleShowCursorChange}
-            receiverLabels={receiverLabels}
-            copyMode={copyMode}
-            onCopySourceClick={handleCopySourceClick}
-            onCopyPlaceClick={handleCopyPlaceClick}
-            audioTracks={audioTracks}
-            audioDurationSec={totalAudioDuration}
-          />
+          <div className="relative">
+            <div className={cn(!hasShowReceivers && "opacity-35 grayscale pointer-events-none")}>
+              <Timeline
+                items={items}
+                setItems={setItems}
+                openAddModal={openAddModal}
+                setSelectedItem={(item) => handleItemSelect(item, false)}
+                selectedItems={selectedItems}
+                onItemSelect={handleItemSelect}
+                clearSelection={clearSelection}
+                timeCursor={audioCurrentTime}
+                setTimeCursor={handleShowCursorChange}
+                receiverLabels={receiverLabels}
+                copyMode={copyMode}
+                onCopySourceClick={handleCopySourceClick}
+                onCopyPlaceClick={handleCopyPlaceClick}
+                audioTracks={audioTracks}
+                audioDurationSec={totalAudioDuration}
+              />
+            </div>
+
+            {!hasShowReceivers ? (
+              <div className="absolute inset-0 z-10 flex items-center justify-center rounded-md border border-border-subtle bg-surface-base/70 backdrop-blur-[1px]">
+                <Card tone="raised" padding="md" className="max-w-md text-center shadow-e3">
+                  <div className="text-base font-semibold text-fg-primary">
+                    Add a receiver to start building
+                  </div>
+                  <p className="mt-1 text-sm text-fg-secondary leading-snug">
+                    The timeline needs at least one receiver so each cue has a
+                    target. Add one in the Target Grid below, then come back here
+                    to place items.
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    onClick={openAddReceiverModal}
+                    className="mt-3"
+                  >
+                    Add receiver
+                  </Button>
+                </Card>
+              </div>
+            ) : null}
+          </div>
           
           {/* Tabs Section */}
           <div className="mt-4">

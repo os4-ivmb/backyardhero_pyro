@@ -19,4 +19,5 @@ export {
 export { Slider } from "./Slider";
 export { Toggle } from "./Toggle";
 export { default as useAppMode, APP_MODES } from "./useAppMode";
+export { default as useIsMobile } from "./useIsMobile";
 export { cn } from "./cn";

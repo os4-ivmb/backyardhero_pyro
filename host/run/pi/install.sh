@@ -285,6 +285,10 @@ confirm() {
   esac
 }
 
+git_repo() {
+  git -c safe.directory="${REPO_DIR}" -C "${REPO_DIR}" "$@"
+}
+
 # ---------------------------------------------------------------------------
 # Step 1: apt deps
 # ---------------------------------------------------------------------------
@@ -415,10 +419,10 @@ locate_repo() {
   if [[ -d "${REPO_DIR}/.git" ]]; then
     log "updating existing clone at ${REPO_DIR}"
     GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true \
-      git -C "${REPO_DIR}" fetch --depth 1 origin "${BRANCH}" || true
-    git -C "${REPO_DIR}" checkout "${BRANCH}" || true
+      git_repo fetch --depth 1 origin "${BRANCH}" || true
+    git_repo checkout "${BRANCH}" || true
     GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true \
-      git -C "${REPO_DIR}" pull --ff-only || true
+      git_repo pull --ff-only || true
   else
     log "cloning ${REPO_URL} -> ${REPO_DIR} (branch ${BRANCH})"
     mkdir -p "$(dirname "${REPO_DIR}")"

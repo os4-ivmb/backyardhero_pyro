@@ -5,6 +5,7 @@ import { MdAssignment, MdHome } from "react-icons/md";
 
 import useAppStore from "@/store/useAppStore";
 import useAppMode from "@/design/useAppMode";
+import useIsMobile from "@/design/useIsMobile";
 import useShowReceiverVerification from "@/util/useShowReceiverVerification";
 import AppShell from "./shell/AppShell";
 import TopBar from "./shell/TopBar";
@@ -17,6 +18,8 @@ import SettingsPanel from "./settings/SettingsPanel";
 import ShowBuilder from "./builder/ShowBuilder";
 import ReceiverDisplay from "./receivers/ReceiverDisplay";
 import ShowLoadout from "./receivers/ShowLoadout";
+
+import MobileMainNav from "./mobile/MobileMainNav";
 
 // ---------------------------------------------------------------------------
 // MainNav is now a thin shell wrapper. All the per-tab logic moved to
@@ -36,7 +39,7 @@ const TABS = [
   { key: "setting",   label: "Settings",  icon: <FaGear /> },
 ];
 
-export default function MainNav() {
+function DesktopMainNav() {
   const {
     fetchInventory, fetchShows, fetchSystemConfig,
     stagedShow, shows, inventoryById, hydrateStagedShowFromId,
@@ -104,4 +107,15 @@ export default function MainNav() {
       {currTab === "setting"   && <SettingsPanel />}
     </AppShell>
   );
+}
+
+// Top-level chrome dispatcher. The mobile path is *physically* a
+// different component tree (different shell, different panels) rather
+// than CSS variations, so we mount one or the other based on the
+// viewport. Mounting/unmounting either branch is cheap because each
+// path owns its own data fetching effects -- never mounted in
+// parallel, never double-fetching.
+export default function MainNav() {
+  const isMobile = useIsMobile();
+  return isMobile ? <MobileMainNav /> : <DesktopMainNav />;
 }

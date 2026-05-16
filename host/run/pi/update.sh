@@ -75,6 +75,7 @@ warn()    { printf "\033[1;33m[update] WARN:\033[0m %s\n" "$*" >&2; }
 err()     { printf "\033[1;31m[update] ERROR:\033[0m %s\n" "$*" >&2; }
 die()     { err "$*"; exit 1; }
 section() { printf "\n\033[1;35m==[ %s ]==\033[0m\n" "$*"; }
+git_repo() { git -c safe.directory="${REPO_DIR}" "$@"; }
 
 [[ -f "${INSTALL_SCRIPT}" ]] || die "install.sh not found at ${INSTALL_SCRIPT}"
 [[ -f "${COMPOSE_FILE}"   ]] || die "compose file not found at ${COMPOSE_FILE}"
@@ -125,18 +126,18 @@ if [[ "${DO_SOURCE}" -eq 1 ]]; then
   if [[ -n "${BRANCH}" ]]; then
     log "switching to branch ${BRANCH}"
     GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true \
-      git fetch --depth 1 origin "${BRANCH}" || die "git fetch failed"
-    git checkout "${BRANCH}" || die "git checkout ${BRANCH} failed"
+      git_repo fetch --depth 1 origin "${BRANCH}" || die "git fetch failed"
+    git_repo checkout "${BRANCH}" || die "git checkout ${BRANCH} failed"
   fi
 
-  if [[ -n "$(git status --porcelain)" ]]; then
+  if [[ -n "$(git_repo status --porcelain)" ]]; then
     warn "working tree has local changes; git pull --ff-only may fail."
     warn "If it does, either commit/stash them or rsync them onto the Pi"
     warn "AFTER this update finishes."
   fi
 
   GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true \
-    git pull --ff-only || die "git pull failed (resolve and retry, or pass --no-source)"
+    git_repo pull --ff-only || die "git pull failed (resolve and retry, or pass --no-source)"
 fi
 
 # ---------------------------------------------------------------------------

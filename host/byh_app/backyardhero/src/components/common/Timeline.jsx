@@ -490,6 +490,11 @@ const Timeline = memo((props) => {
   // local state so it persists across drag operations within a session.
   const [snapToBeat, setSnapToBeat] = useState(false);
 
+  // Toolbar toggle: when on, each item's label includes the zone:cue
+  // badge (e.g. "RX142:1"). Defaults off so the timeline reads cleaner;
+  // operators flip it on when they need the routing at a glance.
+  const [showZoneCue, setShowZoneCue] = useState(false);
+
   // Quantise an absolute timeline time (seconds) to the nearest beat in
   // whichever track contains that time. Returns the input unchanged
   // when the grid isn't on or no track at that position has BPM set.
@@ -562,6 +567,17 @@ const Timeline = memo((props) => {
               Snap to beat
             </label>
           )}
+          <label
+            className="ml-1 inline-flex items-center gap-1.5 text-xs text-fg-secondary cursor-pointer select-none"
+            title="Show the zone:cue badge (e.g. RX142:1) on each timeline item."
+          >
+            <input
+              type="checkbox"
+              checked={showZoneCue}
+              onChange={(e) => setShowZoneCue(e.target.checked)}
+            />
+            Show zone:cue
+          </label>
         </div>
         {!isReadOnly && (
           <div
@@ -957,9 +973,11 @@ const Timeline = memo((props) => {
                   >
                     {item.name}
                   </span>
-                  <span className="shrink-0 rounded-xs bg-white/80 border border-white/40 px-1 py-px text-[10px] font-semibold leading-none text-black shadow-e2">
-                    {props.receiverLabels?.[item.zone] || item.zone}:{item.target}
-                  </span>
+                  {showZoneCue && (
+                    <span className="shrink-0 rounded-xs bg-white/80 border border-white/40 px-1 py-px text-[10px] font-semibold leading-none text-black shadow-e2">
+                      {props.receiverLabels?.[item.zone] || item.zone}:{item.target}
+                    </span>
+                  )}
                   {Number.isFinite(item.multiple) && item.multiple > 1 && (
                     <span className="ml-auto shrink-0 px-1 text-[10px] font-mono leading-tight bg-surface-base/85 text-fg-primary rounded-sm">
                       ×{item.multiple}

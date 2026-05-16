@@ -5,6 +5,7 @@ import {
   MdOutlineRocketLaunch,
   MdOutlineRouter,
   MdOutlineWifi,
+  MdStorage,
 } from "react-icons/md";
 import { Section, Card, CardHeader, cn } from "@/design";
 import useAppStore from "@/store/useAppStore";
@@ -22,6 +23,7 @@ import ReceiverConfigSettings from "./ReceiverConfigSettings";
 import DefaultLocationSettings from "./DefaultLocationSettings";
 import AccessPointSettings from "./AccessPointSettings";
 import UpdateSettings from "./UpdateSettings";
+import DataSettings from "./DataSettings";
 
 // Settings page. Top-level tabs:
 //   Dongle    — physical box knobs: LEDs, retransmit count, serial
@@ -37,6 +39,8 @@ import UpdateSettings from "./UpdateSettings";
 //   Show      — pre-fire safety knobs that travel with the show
 //               (minimum battery, continuity check). Was previously
 //               "Firing handler config".
+//   Data      — operator-owned SQLite database export / import for moving
+//               between host devices.
 
 // Tabs are rendered in this order, but `visible` can hide one based on the
 // host environment (see buildVisibleTabs). The Network tab is the only
@@ -47,6 +51,7 @@ const TABS = [
   { key: "dongle", label: "Dongle", icon: <MdOutlineSettingsRemote />, visible: () => true },
   { key: "receivers", label: "Receivers", icon: <MdOutlineRouter />, visible: () => true },
   { key: "network", label: "Network", icon: <MdOutlineWifi />, visible: (host) => !!host?.is_raspberry_pi },
+  { key: "data", label: "Data", icon: <MdStorage />, visible: () => true },
   { key: "debug", label: "Debug", icon: <MdOutlineBugReport />, visible: () => true },
   { key: "show", label: "Show config", icon: <MdOutlineRocketLaunch />, visible: () => true },
 ];
@@ -55,6 +60,7 @@ const SUBTITLES = {
   dongle: "Brightness, serial connection, retransmit count, debug mode.",
   receivers: "Fleet-wide receiver runtime knobs (fire pulse width, etc.).",
   network: "WiFi access point + system update.",
+  data: "Export or import your Backyard Hero database.",
   debug: "Spectrum diagnostics and daemon timing.",
   show: "Pre-fire safety checks that apply to every show.",
 };
@@ -130,6 +136,7 @@ export default function SettingsPanel() {
         {tab === "dongle" ? <DongleTab /> : null}
         {tab === "receivers" ? <ReceiversTab /> : null}
         {tab === "network" ? <NetworkTab /> : null}
+        {tab === "data" ? <DataTab /> : null}
         {tab === "debug" ? <DebugTab /> : null}
         {tab === "show" ? <ShowTab /> : null}
       </Section>
@@ -165,6 +172,16 @@ function ReceiversTab() {
         eyebrow="Broadcast to all"
       >
         <ReceiverConfigSettings />
+      </SettingCard>
+    </div>
+  );
+}
+
+function DataTab() {
+  return (
+    <div className="grid grid-cols-1 gap-4">
+      <SettingCard title="Backup and transfer" eyebrow="Database">
+        <DataSettings />
       </SettingCard>
     </div>
   );

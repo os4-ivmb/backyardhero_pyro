@@ -18,6 +18,7 @@ host/data/webactstate
 host/byh_app/backyardhero/public/uploads/
 devices/os4_receiver/.build/
 devices/os4_dongle/.build/
+host/data/backyardhero.db.backup*
 
 
 # Next.js

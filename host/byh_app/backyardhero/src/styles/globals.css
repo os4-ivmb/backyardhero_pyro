@@ -297,6 +297,21 @@ a { color: inherit; text-decoration: none; }
   background: rgb(var(--surface-3)) !important;
 }
 
+/* Mobile shell: respect iOS / Android home-indicator safe areas so
+   the bottom nav doesn't sit underneath the OS gesture area. Used by
+   `MobileShell`'s footer and the bottom-sheet inventory editor. */
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.pb-safe {
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 0.5rem);
+}
+
+/* Hide the scrollbar on the mobile inventory tab strip so the
+   horizontally-scrollable section header reads as a clean strip. */
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
 /* Live indicator dot; used in the topbar mode badge during STARTED. */
 .dot-live {
   width: 8px;
