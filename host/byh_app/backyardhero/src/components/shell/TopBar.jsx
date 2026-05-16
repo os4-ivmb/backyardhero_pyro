@@ -26,7 +26,7 @@ export default function TopBar({
     <div className="flex items-stretch h-12 px-2 gap-2 select-none">
       <a
         href="/"
-        className="flex items-center gap-3 px-2 shrink-0"
+        className="flex items-center px-2 shrink-0"
         aria-label="Backyard Hero home"
       >
         <span className="relative h-12 w-28 overflow-hidden shrink-0 flex items-center justify-center">
@@ -40,9 +40,6 @@ export default function TopBar({
               filter: "invert(1) brightness(1.08)",
             }}
           />
-        </span>
-        <span className="hidden sm:inline-block text-fg-secondary text-sm font-semibold tracking-wide">
-          Backyard Hero
         </span>
       </a>
 

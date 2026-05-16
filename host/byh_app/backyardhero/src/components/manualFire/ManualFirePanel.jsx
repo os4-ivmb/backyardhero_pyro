@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { FaKey, FaTriangleExclamation } from "react-icons/fa6";
-import { FiTarget } from "react-icons/fi";
 
 import useStateAppStore from "@/store/useStateAppStore";
 import useAppStore from "@/store/useAppStore";
@@ -63,12 +62,76 @@ function cueHasContinuity(receiver, target) {
   }
 }
 
+function formatCueAssignment(item) {
+  if (!item) return null;
+
+  if (item.type === "FUSED_LINE" && Array.isArray(item.steps)) {
+    const stepNames = item.steps.map((step) => step?.name).filter(Boolean);
+    return item.name || stepNames.join(" + ") || "Fused line";
+  }
+
+  const qty = Number.isFinite(item.multiple) && item.multiple > 1
+    ? ` x${item.multiple}`
+    : "";
+  return `${item.name || item.type || "Assigned item"}${qty}`;
+}
+
+function formatCueType(item) {
+  if (!item?.type) return null;
+  return item.type
+    .replace(/_/g, " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function cueAssignmentImage(item) {
+  if (!item) return null;
+  if (item.image) return item.image;
+
+  if (item.type === "FUSED_LINE" && Array.isArray(item.steps)) {
+    return item.steps.find((step) => step?.image)?.image || null;
+  }
+
+  return null;
+}
+
+function CueAssignmentBackground({ image, label }) {
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [image]);
+
+  if (!image || failed) return null;
+
+  return (
+    <img
+      src={image}
+      alt={label || "Assigned item"}
+      className="absolute inset-0 h-full w-full rounded-md object-cover opacity-25 pointer-events-none"
+      loading="lazy"
+      onError={() => setFailed(true)}
+      aria-hidden="true"
+    />
+  );
+}
+
+function buildCueAssignmentMap(items) {
+  if (!Array.isArray(items)) return {};
+
+  return items.reduce((map, item) => {
+    if (item?.zone == null || item?.target == null) return map;
+    map[`${item.zone}:${item.target}`] = item;
+    return map;
+  }, {});
+}
+
 export default function ManualFirePanel() {
   const [zone, setZone] = useState(0);
   const [targets, setTargets] = useState([]);
   const [devMap, setDevMap] = useState({});
   const { stateData } = useStateAppStore();
-  const { systemConfig } = useAppStore();
+  const { systemConfig, stagedShow } = useAppStore();
 
   const fw = stateData.fw_state || {};
   const receiverMap = fw.receivers || systemConfig.receivers || EMPTY_RECEIVER_MAP;
@@ -154,6 +217,12 @@ export default function ManualFirePanel() {
     selectedReceiver?.status?.node ||
     null;
 
+  const cueAssignmentMap = useMemo(
+    () => buildCueAssignmentMap(stagedShow?.items),
+    [stagedShow?.items]
+  );
+  const showCueAssignments = !showLoaded && !!stagedShow?.id;
+
   // Pick a sensible default zone when devMap loads.
   useEffect(() => {
     if (!zones.length) return;
@@ -195,6 +264,7 @@ export default function ManualFirePanel() {
               <p className="text-xs text-fg-muted max-w-xs">
                 Choose a zone, then tap a target below to fire it once. Fire
                 commands are dispatched directly to the receiver.
+                {showCueAssignments ? " Staged show assignments are shown on matching cues." : ""}
               </p>
             </div>
             {selectedReceiver ? (
@@ -228,26 +298,48 @@ export default function ManualFirePanel() {
                 const continuity = selectedReceiver
                   ? cueHasContinuity(selectedReceiver, t)
                   : null;
+                const assignedItem = showCueAssignments
+                  ? cueAssignmentMap[`${zone}:${t}`]
+                  : null;
+                const assignmentLabel = formatCueAssignment(assignedItem);
+                const assignmentType = formatCueType(assignedItem);
+                const assignmentImage = cueAssignmentImage(assignedItem);
+                const continuityLabel =
+                  continuity === true
+                    ? "continuity present"
+                    : continuity === false
+                    ? "no continuity"
+                    : "continuity unknown";
                 return (
                   <Button
                     key={t}
                     size="xl"
                     variant="armed"
                     onClick={() => fireLocation(t)}
-                    className="relative h-20 flex-col gap-0 text-2xl"
-                    leading={<FiTarget className="text-base opacity-60" />}
+                    className={cn(
+                      "relative h-24 px-2 flex-col gap-1",
+                      assignmentLabel ? "ring-2 ring-accent/60" : ""
+                    )}
                     title={
                       selectedReceiver
-                        ? `Cue ${t}: ${continuity === true ? "continuity present" : continuity === false ? "no continuity" : "continuity unknown"}`
-                        : `Fire cue ${t}`
+                        ? `Cue ${t}: ${continuityLabel}${assignmentLabel ? ` · ${assignmentLabel}` : ""}`
+                        : `Fire cue ${t}${assignmentLabel ? ` · ${assignmentLabel}` : ""}`
                     }
                   >
-                    {t}
+                    <CueAssignmentBackground
+                      image={assignmentImage}
+                      label={assignmentLabel}
+                    />
+                    {assignmentType ? (
+                      <span className="absolute left-1.5 top-1.5 z-10 max-w-[55%] truncate rounded bg-surface-base/70 px-1.5 py-0.5 text-[9px] leading-none font-semibold uppercase tracking-wider text-fg-secondary">
+                        {assignmentType}
+                      </span>
+                    ) : null}
                     {selectedReceiver ? (
                       <span
                         className={cn(
-                          "absolute bottom-1.5 left-1/2 -translate-x-1/2",
-                          "inline-flex items-center gap-1 text-[10px] leading-none font-medium uppercase tracking-wider",
+                          "absolute bottom-1.5 left-1/2 z-10 -translate-x-1/2",
+                          "inline-flex items-center gap-1 rounded bg-surface-base/70 px-1.5 py-0.5 text-[9px] leading-none font-medium uppercase tracking-wider",
                           continuity === true && "text-ok-fg",
                           continuity === false && "text-danger-fg",
                           continuity == null && "text-fg-muted"
@@ -267,6 +359,12 @@ export default function ManualFirePanel() {
                           : continuity === false
                           ? "Open"
                           : "Unknown"}
+                      </span>
+                    ) : null}
+                    <span className="relative z-10 block text-2xl leading-none">{t}</span>
+                    {assignmentLabel ? (
+                      <span className="relative z-10 mx-auto mt-0.5 block max-w-full truncate rounded bg-surface-base/65 px-1 text-[10px] leading-tight text-fg-primary normal-case tracking-normal">
+                        {assignmentLabel}
                       </span>
                     ) : null}
                   </Button>
