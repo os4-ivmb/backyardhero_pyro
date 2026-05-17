@@ -81,14 +81,57 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
-# Bridge venv (one-time). Use absolute paths to the venv's pip/python
-# so dash's lack of `source` doesn't matter and pip can't accidentally
-# fall through to the PEP 668-protected system pip.
-if [ ! -d "${BRIDGE_VENV}" ]; then
-  echo "Creating bridge venv at ${BRIDGE_VENV}..."
-  python3 -m venv "${BRIDGE_VENV}"
-fi
-"${BRIDGE_VENV}/bin/pip" install -q -r "${REQUIREMENTS}"
+bridge_deps_ready() {
+  [ -x "${BRIDGE_VENV}/bin/python" ] || return 1
+  "${BRIDGE_VENV}/bin/python" <<'PY' >/dev/null 2>&1
+import sys
+try:
+    import serial  # pyserial
+    import esptool
+except Exception:
+    sys.exit(1)
+
+version = getattr(esptool, "__version__", "0")
+parts = []
+for chunk in version.split("."):
+    try:
+        parts.append(int(chunk.split("-", 1)[0]))
+    except ValueError:
+        parts.append(0)
+while len(parts) < 2:
+    parts.append(0)
+sys.exit(0 if tuple(parts[:2]) >= (4, 9) else 1)
+PY
+}
+
+ensure_bridge_venv() {
+  # Normal boot must work without internet. install.sh pre-populates this
+  # venv; only hit pip when the venv is missing or stale.
+  if [ ! -x "${BRIDGE_VENV}/bin/python" ]; then
+    echo "Creating bridge venv at ${BRIDGE_VENV}..."
+    python3 -m venv "${BRIDGE_VENV}"
+  fi
+
+  if bridge_deps_ready; then
+    echo "Bridge Python dependencies ready (offline-safe)."
+    return 0
+  fi
+
+  echo "Bridge Python dependencies missing/stale; installing from ${REQUIREMENTS}..."
+  if ! "${BRIDGE_VENV}/bin/pip" install -q -r "${REQUIREMENTS}"; then
+    echo "ERROR: Bridge dependencies are missing and pip install failed."
+    echo "       If this Pi is offline, reconnect temporarily or rerun install.sh"
+    echo "       while online so ${BRIDGE_VENV} can be populated."
+    exit 1
+  fi
+
+  if ! bridge_deps_ready; then
+    echo "ERROR: Bridge dependencies still not usable after pip install."
+    exit 1
+  fi
+}
+
+ensure_bridge_venv
 
 echo "Starting TCP-to-serial bridge..."
 "${BRIDGE_VENV}/bin/python" "${BRIDGE_SCRIPT}" &

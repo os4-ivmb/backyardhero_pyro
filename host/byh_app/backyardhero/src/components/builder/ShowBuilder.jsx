@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef, useMemo } from "react";
+import axios from "axios";
 import Timeline from "../common/Timeline";
 import useAppStore from '@/store/useAppStore';
 import FusedLineBuilderModal from "./FusedLineBuilderModal";
@@ -19,6 +20,7 @@ import {
   trackAtShowTime,
   trackOffsets,
 } from "@/utils/audioTracks";
+import { rankShotProfilesForBpm } from "@/utils/rhythmMatch";
 import {
   Modal,
   Button,
@@ -1305,7 +1307,7 @@ const AudioTrackTabs = ({
             <span className="num text-xs text-gray-500">
               {fmtOffset(audioOffsets?.[idx] || 0)}
             </span>
-            {tracks.length > 1 && (
+            {typeof onRemove === "function" && (
               <button
                 type="button"
                 onClick={(e) => {
@@ -1555,6 +1557,130 @@ const TrackPlayer = ({
   );
 };
 
+function RhythmMatchesModal({ isOpen, onClose, trackLabel, bpm, matches }) {
+  const [failedImages, setFailedImages] = useState(() => new Set());
+
+  useEffect(() => {
+    if (isOpen) setFailedImages(new Set());
+  }, [isOpen]);
+
+  if (!isOpen) return null;
+
+  const top = matches || [];
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/60 flex items-start justify-center overflow-y-auto py-8"
+      onClick={onClose}
+    >
+      <div
+        className="bg-gray-800 border border-gray-700 rounded-lg p-5 w-full max-w-5xl mx-4 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-3 mb-4">
+          <div>
+            <h2 className="text-xl font-semibold text-white">
+              Cake rhythm matches
+            </h2>
+            <p className="text-sm text-gray-400">
+              {trackLabel || "Current track"} · {Number(bpm).toFixed(2)} BPM
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-gray-400 hover:text-white text-3xl leading-none"
+            aria-label="Close rhythm matches"
+          >
+            &times;
+          </button>
+        </div>
+
+        {top.length === 0 ? (
+          <div className="rounded border border-gray-700 bg-gray-900/50 p-6 text-sm text-gray-400 text-center">
+            No usable cake shot profiles matched this BPM yet.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm text-gray-300">
+              <thead>
+                <tr className="border-b border-gray-700 text-left text-xs uppercase tracking-wide text-gray-500">
+                  <th className="py-2 pr-3">Item</th>
+                  <th className="py-2 px-3 text-right">Fit</th>
+                  <th className="py-2 px-3">Grid</th>
+                  <th className="py-2 px-3">Timing</th>
+                  <th className="py-2 px-3 text-right">Shots</th>
+                  <th className="py-2 pl-3 text-right">Avg miss</th>
+                </tr>
+              </thead>
+              <tbody>
+                {top.map((match) => {
+                  const imageFailed = failedImages.has(match.id);
+                  return (
+                    <tr key={match.id} className="border-b border-gray-700/70 hover:bg-gray-700/40">
+                      <td className="py-2 pr-3">
+                        <div className="flex items-center gap-3 min-w-[260px]">
+                          {match.image && !imageFailed ? (
+                            <img
+                              src={match.image}
+                              alt={match.name}
+                              className="h-11 w-11 rounded object-cover bg-gray-900 border border-gray-700"
+                              loading="lazy"
+                              onError={() =>
+                                setFailedImages((prev) => {
+                                  const next = new Set(prev);
+                                  next.add(match.id);
+                                  return next;
+                                })
+                              }
+                            />
+                          ) : (
+                            <div className="h-11 w-11 rounded bg-gray-900 border border-gray-700 flex items-center justify-center text-gray-500 text-xs">
+                              BYH
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <div className="font-medium text-white truncate">{match.name}</div>
+                            <div className="text-xs text-gray-500">{match.type}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-2 px-3 text-right">
+                        <span className="num text-white font-semibold">{match.score}%</span>
+                      </td>
+                      <td className="py-2 px-3">
+                        <div className="text-gray-200">{match.fit.grid}</div>
+                        <div className="text-xs text-gray-500">
+                          {match.fit.relation}
+                          {match.fit.relation !== "exact"
+                            ? ` · ${match.fit.effectiveBpm.toFixed(2)} effective BPM`
+                            : ""}
+                        </div>
+                      </td>
+                      <td className="py-2 px-3">
+                        <div className="text-gray-200">
+                          {match.fit.hits}/{match.shotCount} hits
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          start +{match.fit.suggestedOffsetSec.toFixed(3)}s from grid
+                        </div>
+                      </td>
+                      <td className="py-2 px-3 text-right num">{match.shotCount}</td>
+                      <td className="py-2 pl-3 text-right num">
+                        {Math.round(match.fit.avgErrorMs)} ms
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // Multi-track audio editor. Owns the BPM/upload/tap UI bound to the
 // currently active track, and renders one TrackPlayer per track in the
 // show. Only the active player's container is visible; all others stay
@@ -1591,8 +1717,16 @@ const AudioWaveform = ({
   const tapTimesRef = useRef([]);
   const tapTimeoutRef = useRef(null);
   const [tapCount, setTapCount] = useState(0);
+  const [profileMatches, setProfileMatches] = useState([]);
+  const [profileMatchCount, setProfileMatchCount] = useState(0);
+  const [isMatchingProfiles, setIsMatchingProfiles] = useState(false);
+  const [profileMatchError, setProfileMatchError] = useState(null);
+  const [isMatchModalOpen, setIsMatchModalOpen] = useState(false);
+  const [profileCatalog, setProfileCatalog] = useState(null);
+  const [processedProfileMatchKey, setProcessedProfileMatchKey] = useState(null);
 
   const trackUrl = track?.url || null;
+  const hasAudio = !!trackUrl;
   const isReady = activeTrackId ? readyTrackIds.has(activeTrackId) : false;
   const localDuration = activeTrackId ? trackDurations[activeTrackId] || 0 : 0;
 
@@ -1636,6 +1770,55 @@ const AudioWaveform = ({
   const patchBpmInfo = (patch) => {
     if (typeof onBpmInfoChange === "function") {
       onBpmInfoChange({ ...info, ...patch });
+    }
+  };
+
+  const profileMatchKey = info.bpm
+    ? `${activeTrackId || "track"}:${info.bpm}:${info.beatsPerMeasure}`
+    : null;
+  const profileMatchesProcessed =
+    !!profileMatchKey && processedProfileMatchKey === profileMatchKey;
+
+  useEffect(() => {
+    setProfileMatches([]);
+    setProfileMatchCount(0);
+    setProfileMatchError(null);
+    setIsMatchingProfiles(false);
+    setIsMatchModalOpen(false);
+    setProcessedProfileMatchKey(null);
+  }, [profileMatchKey]);
+
+  const handleFindProfileMatches = async () => {
+    if (!hasAudio || !info.bpm || info.bpm <= 0 || !profileMatchKey) return;
+
+    setIsMatchingProfiles(true);
+    setProfileMatchError(null);
+    setProfileMatches([]);
+    setProfileMatchCount(0);
+    setProcessedProfileMatchKey(null);
+
+    try {
+      let catalog = profileCatalog;
+      if (!catalog) {
+        const { data } = await axios.get("/api/inventory/firing-profiles");
+        catalog = Array.isArray(data) ? data : [];
+        setProfileCatalog(catalog);
+      }
+
+      const matches = rankShotProfilesForBpm({
+        profiles: catalog,
+        bpm: info.bpm,
+        beatsPerMeasure: info.beatsPerMeasure,
+        limit: 75,
+      });
+      setProfileMatches(matches);
+      setProfileMatchCount(matches.length);
+      setProcessedProfileMatchKey(profileMatchKey);
+    } catch (err) {
+      console.error("Failed to rank firing profiles for rhythm matching:", err);
+      setProfileMatchError("Could not rank shot profiles.");
+    } finally {
+      setIsMatchingProfiles(false);
     }
   };
 
@@ -1760,8 +1943,6 @@ const AudioWaveform = ({
     const remainingSeconds = Math.floor(seconds % 60);
     return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
   };
-
-  const hasAudio = !!trackUrl;
 
   return (
     <div className="p-4 bg-gray-800 rounded-b-lg border border-t-0 border-gray-700">
@@ -2011,6 +2192,58 @@ const AudioWaveform = ({
             {analysisError && (
               <span className="text-red-400">{analysisError}</span>
             )}
+            {info.bpm ? (
+              <span className="inline-flex items-center gap-2">
+                {isMatchingProfiles ? (
+                  <>
+                    <span
+                      className="inline-block h-3 w-3 rounded-full border-2 border-gray-500 border-r-transparent animate-spin"
+                      aria-hidden
+                    />
+                    <span>finding cake matches…</span>
+                  </>
+                ) : profileMatchError ? (
+                  <>
+                    <span className="text-red-400">{profileMatchError}</span>
+                    <button
+                      type="button"
+                      onClick={handleFindProfileMatches}
+                      className="text-accent hover:brightness-125 underline"
+                    >
+                      retry
+                    </button>
+                  </>
+                ) : !profileMatchesProcessed ? (
+                  <button
+                    type="button"
+                    onClick={handleFindProfileMatches}
+                    className="text-accent hover:brightness-125 underline"
+                    title="Rank inventory items whose shot profiles fit this song BPM"
+                  >
+                    Find cake rhythm matches
+                  </button>
+                ) : profileMatchCount === 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => setIsMatchModalOpen(true)}
+                    className="text-gray-400 hover:text-gray-200 underline"
+                    title="View rhythm match results"
+                  >
+                    No cake rhythm matches
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setIsMatchModalOpen(true)}
+                    className="text-accent hover:brightness-125 underline"
+                    title="View inventory items whose shot profiles fit this song BPM"
+                  >
+                    {profileMatchCount} cake rhythm match{profileMatchCount === 1 ? "" : "es"}
+                    {profileMatches[0] ? ` · best ${profileMatches[0].score}%` : ""}
+                  </button>
+                )}
+              </span>
+            ) : null}
             <span className="text-gray-500 ml-auto">
               Tip: if Detect comes back at half/double the right tempo, hit ×2 or ÷2.
             </span>
@@ -2018,6 +2251,13 @@ const AudioWaveform = ({
         </div>
       )}
 
+      <RhythmMatchesModal
+        isOpen={isMatchModalOpen}
+        onClose={() => setIsMatchModalOpen(false)}
+        trackLabel={trackLabel || track?.name}
+        bpm={info.bpm || 0}
+        matches={profileMatches}
+      />
     </div>
   );
 };
@@ -3254,11 +3494,7 @@ const ShowBuilder = (props) => {
                 onBpmInfoChange={(next) =>
                   handleTrackBpmChange(activeTrack.id, next)
                 }
-                onTrackRemove={
-                  audioTracks.length > 1
-                    ? () => handleRemoveTrack(activeTrack.id)
-                    : undefined
-                }
+                onTrackRemove={() => handleRemoveTrack(activeTrack.id)}
                 trackLabel={activeTrack.name}
                 isUploading={uploadingForTrackId === activeTrack.id}
                 isAutoDetecting={autoDetectingTrackIds.has(activeTrack.id)}

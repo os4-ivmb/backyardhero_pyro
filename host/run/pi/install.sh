@@ -573,6 +573,61 @@ PY
 }
 
 # ---------------------------------------------------------------------------
+# Step 3.5: bridge venv
+# ---------------------------------------------------------------------------
+
+bridge_deps_ready() {
+  local venv="${REPO_DIR}/host/tcp_serial_bridge/venv"
+  [[ -x "${venv}/bin/python" ]] || return 1
+  "${venv}/bin/python" <<'PY' >/dev/null 2>&1
+import sys
+try:
+    import serial  # pyserial
+    import esptool
+except Exception:
+    sys.exit(1)
+
+version = getattr(esptool, "__version__", "0")
+parts = []
+for chunk in version.split("."):
+    try:
+        parts.append(int(chunk.split("-", 1)[0]))
+    except ValueError:
+        parts.append(0)
+while len(parts) < 2:
+    parts.append(0)
+sys.exit(0 if tuple(parts[:2]) >= (4, 9) else 1)
+PY
+}
+
+install_bridge_venv() {
+  section "Preparing TCP-to-serial bridge Python venv"
+  local bridge_dir="${REPO_DIR}/host/tcp_serial_bridge"
+  local venv="${bridge_dir}/venv"
+  local requirements="${bridge_dir}/requirements.txt"
+
+  [[ -f "${requirements}" ]] || die "bridge requirements not found at ${requirements}"
+
+  if [[ ! -x "${venv}/bin/python" ]]; then
+    log "creating bridge venv at ${venv}"
+    python3 -m venv "${venv}"
+  fi
+
+  if bridge_deps_ready; then
+    log "bridge dependencies already installed"
+  else
+    log "installing bridge dependencies into ${venv}"
+    "${venv}/bin/pip" install -q -r "${requirements}" \
+      || die "failed to install bridge Python dependencies"
+    bridge_deps_ready || die "bridge Python dependencies failed validation after install"
+  fi
+
+  if [[ -n "${TARGET_USER}" && "${REPO_DIR}" != "/root/"* ]]; then
+    chown -R "${TARGET_USER}":"${TARGET_USER}" "${venv}" || true
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Step 4: docker image
 # ---------------------------------------------------------------------------
 
@@ -2165,6 +2220,7 @@ main() {
   locate_repo
   install_udev_rule
   update_systemcfg
+  install_bridge_venv
   prepull_image
   install_host_service
   install_update_service
