@@ -1001,8 +1001,17 @@ class FireworkDaemon:
             with sqlite3.connect(DB_PATH) as conn:
                 cursor = conn.cursor()
 
-                # Fetch the show data
-                cursor.execute("SELECT name, display_payload, protocol FROM Show WHERE id = ?", (show_id,))
+                # Fetch the show data, including the per-show receivers
+                # column. show_receivers is a JSON list of entries like
+                # { id, kind, cues, label? }; the protocol handler uses
+                # it to materialize ephemeral 4-cue rows for any
+                # `kind: 'bilusocn'` zones the show owns. Older shows
+                # with no show_receivers column populated just pass
+                # None through and the daemon's behaviour is unchanged.
+                cursor.execute(
+                    "SELECT name, display_payload, protocol, show_receivers FROM Show WHERE id = ?",
+                    (show_id,),
+                )
                 row = cursor.fetchone()
 
                 if row is None:
@@ -1016,16 +1025,26 @@ class FireworkDaemon:
                     return
 
                 display_payload = json.loads(row[1])
+                show_receivers = None
+                if row[3]:
+                    try:
+                        show_receivers = json.loads(row[3])
+                    except (TypeError, ValueError) as e:
+                        # Bad JSON shouldn't block a load -- the show
+                        # may still address only native receivers, in
+                        # which case we just skip the Bilusocn-zone
+                        # synthesis. Surface for diagnosis.
+                        print(f"Warning: failed to parse show_receivers for show {show_id}: {e}")
                 firing_array = self.process_display_payload(display_payload)
-                
+
                 # Save the processed firing array back to the database
                 cursor.execute(
                     "UPDATE Show SET runtime_payload = ? WHERE id = ?",
                     (json.dumps(firing_array), show_id)
                 )
                 conn.commit()
-                
-                if(self.protocol_handler.load_show(firing_array, show_id)):
+
+                if(self.protocol_handler.load_show(firing_array, show_id, show_receivers=show_receivers)):
                     self.led_handler.update("show_load_state", LOAD_STATE.LOADED.value)
                     print(f"Show ID {show_id} loaded and processed.")
                     self.loaded_show_name = row[0]

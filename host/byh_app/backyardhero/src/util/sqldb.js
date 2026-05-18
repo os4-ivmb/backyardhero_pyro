@@ -71,7 +71,7 @@ function initializeDatabase() {
       audio_file TEXT, -- To store audio file path and metadata as JSON
       receiver_locations TEXT, -- To store receiver positions as JSON
       receiver_labels TEXT, -- To store receiver labels as JSON
-      show_receivers TEXT -- To store per-show receiver list as JSON: [{ id, label?, cues }]
+      show_receivers TEXT -- Per-show receiver list as JSON: [{ id, kind: 'native'|'bilusocn', cues, label? }]. Bilusocn entries have no DB receiver row -- the daemon synthesizes 4-cue shadows on stage.
     );
   `;
 

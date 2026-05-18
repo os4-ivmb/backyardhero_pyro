@@ -117,22 +117,14 @@ function buildCuesData(ident, count) {
 }
 
 // ---------------------------------------------------------------------------
-// Bilusocn 4ch (BILUSOCN_433_TX_ONLY) helpers.
+// Bilusocn 4ch (BILUSOCN_433_TX_ONLY) legacy helpers.
 //
-// Each Bilusocn module is a 4-channel transmitter dipswitched onto a shared
-// zone. Multiple modules typically share one zone (e.g. zone 1 ⇒ modules
-// covering cues 1-4, 5-8, 9-12). So unlike BYH receivers (where ident ==
-// zone), the user has to set zone and channel range independently per module.
+// New 433MHz zones are configured per-show in the show builder; the
+// daemon synthesizes 4-cue receiver rows on the fly at stage time. The
+// helpers below only exist to render any pre-rework Bilusocn rows that
+// still live in the DB so operators can recognise + delete them.
 // ---------------------------------------------------------------------------
 const BILUSOCN_TYPE = 'BILUSOCN_433_TX_ONLY';
-
-// Channel ranges available on a Bilusocn 4ch dipswitch. The `start` is the
-// first cue number, length is always 4 — we render labels like "1-4".
-const BILUSOCN_RANGES = [
-  { label: '1-4', start: 1 },
-  { label: '5-8', start: 5 },
-  { label: '9-12', start: 9 },
-];
 const BILUSOCN_RANGE_LEN = 4;
 const DEFAULT_BILUSOCN_ZONE = 1;
 const DEFAULT_BILUSOCN_RANGE_START = 1;
@@ -283,12 +275,6 @@ function SingleReceiver({
   // since it can never not be 4.
   const isBilusocn = isBilusocnType(receiver.type);
   const bilusocnCurrent = isBilusocn ? parseBilusocnCues(receiver.cues) : null;
-  const editBilusocnZone = pendingEdit?.zone !== undefined
-    ? pendingEdit.zone
-    : (bilusocnCurrent?.zone ?? DEFAULT_BILUSOCN_ZONE);
-  const editBilusocnRangeStart = pendingEdit?.rangeStart !== undefined
-    ? pendingEdit.rangeStart
-    : (bilusocnCurrent?.rangeStart ?? DEFAULT_BILUSOCN_RANGE_START);
 
   // Host-side "Force zones" override. 0 means "don't force" (use the
   // receiver-reported cues_available). Pending value falls back to the
@@ -310,8 +296,27 @@ function SingleReceiver({
   return (
     <div
       ref={receiverRef}
-      className={`border rounded-xl p-4 ${bgColor} text-white shadow-md dark:bg-gray-700 dark:border-gray-600 flex flex-col gap-3 w-72 relative`}
+      className={`border rounded-xl p-4 ${bgColor} text-white shadow-md dark:bg-gray-700 dark:border-gray-600 flex flex-col gap-3 w-72 relative ${
+        isBilusocn ? "border-amber-500/60" : ""
+      }`}
     >
+      {/* Deprecation banner for legacy Bilusocn rows. New 433MHz zones
+          live on the show, not in the receivers DB; we leave existing
+          rows visible (read-mostly) so operators can clean them up
+          themselves -- delete is the only edit we still allow. See
+          `availableTypes` in the parent for the add-side block. */}
+      {isBilusocn && (
+        <div className="rounded-md border border-amber-500/50 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
+          <div className="font-semibold mb-0.5">Deprecated Bilusocn row</div>
+          <div className="text-amber-300/90">
+            Bilusocn 433MHz zones are now configured per-show in the show builder
+            ("Bilusocn / 433 MHz" tab on Add Receiver/Zone). Delete this row and
+            re-add the zone in your shows -- the daemon synthesizes the modules
+            ephemerally at stage time.
+          </div>
+        </div>
+      )}
+
       {/* Receiver Header */}
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold flex items-center gap-2">
@@ -583,44 +588,25 @@ function SingleReceiver({
             />
           </label>
           {isBilusocn ? (
-            <>
-              <label className="flex items-center gap-2">
-                <span className="text-xs text-gray-400 whitespace-nowrap">Zone</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={256}
-                  value={editBilusocnZone}
-                  onChange={(e) =>
-                    onPendingEditChange?.(rcv_name, {
-                      zone: Math.max(
-                        1,
-                        Math.min(256, parseInt(e.target.value, 10) || 1)
-                      ),
-                    })
-                  }
-                  className="w-20 px-2 py-1 rounded bg-gray-900 border border-gray-600 text-white"
-                />
-                <span className="text-xs text-gray-500">1–256 (shared with sibling modules)</span>
-              </label>
-              <label className="flex items-center gap-2">
-                <span className="text-xs text-gray-400 whitespace-nowrap">Cues</span>
-                <select
-                  value={editBilusocnRangeStart}
-                  onChange={(e) =>
-                    onPendingEditChange?.(rcv_name, {
-                      rangeStart: parseInt(e.target.value, 10) || DEFAULT_BILUSOCN_RANGE_START,
-                    })
-                  }
-                  className="px-2 py-1 rounded bg-gray-900 border border-gray-600 text-white"
-                >
-                  {BILUSOCN_RANGES.map((r) => (
-                    <option key={r.start} value={r.start}>{r.label}</option>
-                  ))}
-                </select>
-                <span className="text-xs text-gray-500">dipswitch range</span>
-              </label>
-            </>
+            // Legacy Bilusocn rows are read-mostly: the only edit we
+            // still surface in the locked panel is enable/disable +
+            // label (above) so operators can quiet them while they
+            // migrate. Zone / range edits are intentionally gone --
+            // delete the row and re-add the zone in the show builder.
+            <div className="rounded border border-amber-500/40 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+              Zone <span className="num text-amber-100">{bilusocnCurrent?.zone ?? '—'}</span>{' '}
+              · cues{' '}
+              <span className="num text-amber-100">
+                {bilusocnCurrent?.rangeStart ?? '—'}-
+                {bilusocnCurrent
+                  ? bilusocnCurrent.rangeStart + BILUSOCN_RANGE_LEN - 1
+                  : '—'}
+              </span>
+              <div className="mt-1 text-amber-300/80">
+                Editing zone / dipswitch range is no longer supported here.
+                Delete this row and re-add the zone in the show builder.
+              </div>
+            </div>
           ) : (
             <div className="flex flex-col gap-1">
               <span className="text-xs text-gray-400">Force zones (optional)</span>
@@ -759,8 +745,6 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       label: "",
       type: "",
       cueCount: 8,
-      bilusocnZone: DEFAULT_BILUSOCN_ZONE,
-      bilusocnRangeStart: DEFAULT_BILUSOCN_RANGE_START,
     });
     const [addBusy, setAddBusy] = useState(false);
     const [addError, setAddError] = useState(null);
@@ -1051,9 +1035,14 @@ export default function ReceiverDisplay({ setCurrentTab }) {
 
     // ---- Add-receiver form -------------------------------------------------
     // The list of selectable receiver types comes from systemcfg.json's
-    // `types` block (still the source of truth for hardware capabilities).
+    // `types` block (still the source of truth for hardware
+    // capabilities). BILUSOCN_433_TX_ONLY is intentionally filtered out:
+    // Bilusocn 433MHz zones are now defined per-show in the show
+    // builder ("Bilusocn / 433 MHz" tab on Add Receiver/Zone), and the
+    // daemon synthesizes ephemeral receiver rows for them at stage
+    // time. There is nothing to save on /receivers anymore.
     const availableTypes = useMemo(
-      () => Object.keys(systemConfig?.types || {}),
+      () => Object.keys(systemConfig?.types || {}).filter((t) => t !== BILUSOCN_TYPE),
       [systemConfig?.types]
     );
 
@@ -1065,8 +1054,6 @@ export default function ReceiverDisplay({ setCurrentTab }) {
         label: "",
         type: "",
         cueCount: 8,
-        bilusocnZone: DEFAULT_BILUSOCN_ZONE,
-        bilusocnRangeStart: DEFAULT_BILUSOCN_RANGE_START,
       });
     }, []);
 
@@ -1094,9 +1081,18 @@ export default function ReceiverDisplay({ setCurrentTab }) {
         return;
       }
       if (!type) { setAddError("Type is required."); return; }
-      // The dongle parses node IDs out of "RX<digits>". We don't enforce it
-      // strictly (BILUSOCN_433_TX_ONLY doesn't go over the dongle), but we
-      // warn when it's clearly going to break addressing.
+      // Defensive guard: BILUSOCN_433_TX_ONLY is filtered out of the
+      // type dropdown (Bilusocn zones live on shows now), but block at
+      // submit too in case stale form state slips through.
+      if (isBilusocnType(type)) {
+        setAddError(
+          'Bilusocn 433MHz zones are now configured per-show. ' +
+          'Add the zone in the show builder under "Bilusocn / 433 MHz".'
+        );
+        return;
+      }
+      // The dongle parses node IDs out of "RX<digits>". Warn when the
+      // pattern won't match -- the dongle won't be able to address it.
       if (type === "BKYD_TS_24_1" && !/^RX\d+$/i.test(id)) {
         setAddError(
           'BKYD_TS_24_1 receivers must be named "RX<digits>" (e.g. RX163) — ' +
@@ -1105,17 +1101,8 @@ export default function ReceiverDisplay({ setCurrentTab }) {
         return;
       }
 
-      // Bilusocn modules carry zone + dipswitch range instead of a free-form
-      // cue count, since each unit is a fixed 4-channel TX.
-      let cuesData;
-      if (isBilusocnType(type)) {
-        const zone = Math.max(1, Math.min(256, parseInt(addForm.bilusocnZone, 10) || DEFAULT_BILUSOCN_ZONE));
-        const rangeStart = parseInt(addForm.bilusocnRangeStart, 10) || DEFAULT_BILUSOCN_RANGE_START;
-        cuesData = buildBilusocnCuesData(zone, rangeStart);
-      } else {
-        const cueCount = Math.max(0, Math.min(256, parseInt(addForm.cueCount, 10) || 0));
-        cuesData = buildCuesData(id, cueCount);
-      }
+      const cueCount = Math.max(0, Math.min(256, parseInt(addForm.cueCount, 10) || 0));
+      const cuesData = buildCuesData(id, cueCount);
 
       setAddBusy(true);
       try {
@@ -1469,54 +1456,19 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                       ))}
                     </select>
                   </label>
-                  {isBilusocnType(addForm.type) ? (
-                    <>
-                      <label className="flex flex-col gap-1">
-                        <span className="text-xs text-gray-400">Zone</span>
-                        <input
-                          type="number"
-                          min={1}
-                          max={256}
-                          value={addForm.bilusocnZone}
-                          onChange={(e) =>
-                            setAddForm((f) => ({ ...f, bilusocnZone: e.target.value }))
-                          }
-                          className="bg-gray-900 text-white text-sm rounded border border-gray-600 px-2 py-1 w-24"
-                        />
-                      </label>
-                      <label className="flex flex-col gap-1">
-                        <span className="text-xs text-gray-400">Cues</span>
-                        <select
-                          value={addForm.bilusocnRangeStart}
-                          onChange={(e) =>
-                            setAddForm((f) => ({
-                              ...f,
-                              bilusocnRangeStart: parseInt(e.target.value, 10) || DEFAULT_BILUSOCN_RANGE_START,
-                            }))
-                          }
-                          className="bg-gray-900 text-white text-sm rounded border border-gray-600 px-2 py-1"
-                        >
-                          {BILUSOCN_RANGES.map((r) => (
-                            <option key={r.start} value={r.start}>{r.label}</option>
-                          ))}
-                        </select>
-                      </label>
-                    </>
-                  ) : (
-                    <label className="flex flex-col gap-1">
-                      <span className="text-xs text-gray-400"># Cues</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={256}
-                        value={addForm.cueCount}
-                        onChange={(e) =>
-                          setAddForm((f) => ({ ...f, cueCount: e.target.value }))
-                        }
-                        className="bg-gray-900 text-white text-sm rounded border border-gray-600 px-2 py-1 w-24"
-                      />
-                    </label>
-                  )}
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-gray-400"># Cues</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={256}
+                      value={addForm.cueCount}
+                      onChange={(e) =>
+                        setAddForm((f) => ({ ...f, cueCount: e.target.value }))
+                      }
+                      className="bg-gray-900 text-white text-sm rounded border border-gray-600 px-2 py-1 w-24"
+                    />
+                  </label>
                   <button
                     type="submit"
                     disabled={addBusy}

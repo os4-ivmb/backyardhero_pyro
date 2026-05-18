@@ -9,7 +9,7 @@ import {
 import { MdEdit, MdSwapHoriz, MdAdd, MdDeleteOutline } from "react-icons/md";
 import { FaX, FaTriangleExclamation, FaCircleQuestion } from "react-icons/fa6";
 import { INV_COLOR_CODE } from "@/constants";
-import { SHOW_RECEIVER_STATUS } from "@/util/showReceivers";
+import { SHOW_RECEIVER_STATUS, isBilusocnEntry } from "@/util/showReceivers";
 
 // Target Grid surface.
 //
@@ -170,10 +170,25 @@ export default function ShowTargetGrid({
             // soft-capped via the Force zones override on the Receivers
             // page. The under-cued state is shown on the Receivers
             // page card instead, where the operator can resolve it.
+            // Bilusocn zones never error here -- the verifier marks
+            // them OK unconditionally (no DB row to be missing or
+            // disabled), so the red treatment is implicitly skipped.
             const isMissing = status?.status === SHOW_RECEIVER_STATUS.MISSING;
             const isDisabled = status?.status === SHOW_RECEIVER_STATUS.DISABLED;
             const hasError = isMissing || isDisabled;
-            const displayLabel = receiverLabels[zoneName] || entry.label;
+            const isBilusocn = isBilusocnEntry(entry);
+            const displayLabel = isBilusocn
+              ? entry.label || `Bilusocn zone ${zoneName}`
+              : receiverLabels[zoneName] || entry.label;
+            // Bilusocn zones display as "Zone <n>" instead of just the
+            // raw id so they read as zones rather than receiver idents.
+            // The bracketed locator under the name shows the zone
+            // number for native receivers (the ident) and "433 MHz" for
+            // Bilusocn so the operator can tell at a glance which
+            // protocol pipeline a row is on.
+            const locator = isBilusocn
+              ? "433 MHz"
+              : zoneName;
 
             return (
               <div
@@ -184,18 +199,14 @@ export default function ShowTargetGrid({
               >
                 <div className="flex items-center gap-2 mb-2">
                   <h3 className="text-lg font-semibold flex items-center gap-2">
-                    {displayLabel ? (
-                      <>
-                        <span>{displayLabel}</span>
-                        <span className="text-gray-500 text-sm font-normal">
-                          ({zoneName})
-                        </span>
-                      </>
-                    ) : (
-                      <span>{zoneName}</span>
-                    )}
+                    <span>{displayLabel}</span>
+                    {locator && locator !== displayLabel ? (
+                      <span className="text-gray-500 text-sm font-normal">
+                        ({locator})
+                      </span>
+                    ) : null}
                     <span className="text-xs text-gray-500 font-normal">
-                      · {entry.cues} cues
+                      · {isBilusocn ? `${targets.length} cues · zone ${zoneName}` : `${entry.cues} cues`}
                     </span>
                   </h3>
                   <button
@@ -292,8 +303,11 @@ export default function ShowTargetGrid({
           {!hasAnyReceivers && (
             <div className="text-center py-10 px-4 border border-dashed border-gray-700 rounded-md text-gray-400 text-sm">
               Click <span className="text-gray-200 font-semibold">Add Receiver / Zone</span>{" "}
-              above to wire a receiver into this show. You'll pick how many
-              cues you want (in multiples of 8) and an optional label.
+              above to wire a receiver into this show. Pick the
+              <span className="text-gray-200"> Native</span> tab for a
+              DB-registered receiver (multiples of 8 cues), or the
+              <span className="text-gray-200"> Bilusocn / 433 MHz</span> tab
+              for a 12-cue dipswitch zone.
             </div>
           )}
         </div>

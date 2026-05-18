@@ -32,12 +32,29 @@ import {
   cn,
 } from "@/design";
 import {
+  RECEIVER_KIND_NATIVE,
   availableDevicesFromShowReceivers,
   deriveShowReceiversFromLegacy,
+  entryKind,
   highestUsedCueForReceiver,
+  isBilusocnEntry,
   itemsCountForReceiver,
+  materializeReceiversForShow,
   verifyShowReceivers,
 } from "@/util/showReceivers";
+
+// Stamp a kind on every entry that lacks one. Legacy showReceivers
+// payloads (saved before the Bilusocn-zone rework) only carry id/cues/
+// label, so we treat them as native receivers. Always returns a fresh
+// array so callers can setState with it without aliasing.
+const normalizeShowReceivers = (entries) => {
+  if (!Array.isArray(entries)) return [];
+  return entries.map((e) => {
+    if (!e) return e;
+    if (e.kind) return e;
+    return { ...e, kind: RECEIVER_KIND_NATIVE };
+  });
+};
 
 // Item type catalogue surfaced in the Add Item modal. Centralised so the
 // dropdown order stays predictable and labels stay in one place.
@@ -2560,18 +2577,34 @@ const ShowBuilder = (props) => {
       : systemConfig.receivers;
 
   // Test Show Builder used to filter the DB receivers by the show's
-  // protocol; under per-show receivers it's simply the DB rows referenced
-  // by the show. This is a memo on activeReceivers so it stays live as
-  // receiver edits stream in.
+  // protocol; under per-show receivers it's simply the DB rows
+  // referenced by the show. Bilusocn-zone entries are intentionally
+  // excluded -- the Test Show Builder generates probe items and cares
+  // about feedback (battery, continuity), which one-way 433MHz TX
+  // doesn't provide. This is a memo on activeReceivers so it stays
+  // live as receiver edits stream in.
   const filteredReceivers = useMemo(() => {
     const out = {};
     for (const entry of showReceivers) {
       if (!entry || !entry.id) continue;
+      if (isBilusocnEntry(entry)) continue;
       const row = (activeReceivers || {})[entry.id];
       if (row) out[entry.id] = row;
     }
     return out;
   }, [showReceivers, activeReceivers]);
+
+  // "All receivers in this show" view, including synthesized ephemeral
+  // rows for Bilusocn zones. Used by surfaces that need to render or
+  // address every cue target (e.g. spatial layout map, future grid
+  // overlays). Native entries pass through `activeReceivers` unchanged;
+  // each Bilusocn entry contributes 3 ephemeral 4-cue rows (1-4, 5-8,
+  // 9-12) tiling the zone. The same shape the daemon synthesizes
+  // server-side at stage time.
+  const materializedReceivers = useMemo(
+    () => materializeReceiversForShow(activeReceivers, showReceivers),
+    [activeReceivers, showReceivers],
+  );
 
   // Live verification of the show's receivers against the DB. Used by
   // ShowTargetGrid (error tiles, red outlines), the Receivers menu badge
@@ -2738,7 +2771,11 @@ const ShowBuilder = (props) => {
           dbReceivers: activeReceivers,
         });
       }
-      setShowReceivers(nextShowReceivers);
+      // Pre-rework payloads have entries with no `kind`; stamp them as
+      // 'native' so downstream code can branch on entryKind() without
+      // null-checks. The Bilusocn-zone codepath only kicks in for
+      // entries explicitly saved with kind: 'bilusocn' (post-rework).
+      setShowReceivers(normalizeShowReceivers(nextShowReceivers));
     } else {
       // Clear editor when show is unstaged. Use a functional update so we
       // don't clobber fields that the auto-select-protocol effect (declared

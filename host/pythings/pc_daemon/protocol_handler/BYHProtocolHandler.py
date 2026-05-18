@@ -90,6 +90,12 @@ class BYHProtocolHandler:
         self.types = {}
         self.async_load_targets = {}
         self.show_start_time = 0
+        # Idents of receiver rows that exist only in self.receivers
+        # because the currently-loaded show owns a Bilusocn 433MHz zone
+        # and we need three 4-cue rows (1-4, 5-8, 9-12) per zone for
+        # resolve_zone_target_to_device_id to find them. Cleared on
+        # unload_show. NEVER persisted to the DB.
+        self.ephemeral_receiver_idents = set()
         
         # Track latency samples for sliding average (max 20 samples per receiver).
         # deque(maxlen=20) gives us O(1) append + automatic eviction instead of
@@ -252,6 +258,14 @@ class BYHProtocolHandler:
                 continue
             if prev.get('type') == 'BILUSOCN_433_TX_ONLY':
                 continue
+            # Ephemeral rows (synthesized for a Bilusocn show zone) are
+            # not in the DB by design, so they trivially won't be in
+            # `new_map` -- but they aren't registered with the dongle
+            # either, and we want to preserve them across reloads (a
+            # show stays loaded across a Receivers-page edit). Skip the
+            # forget AND keep them in self.receivers below.
+            if prev.get('__ephemeral'):
+                continue
             self._forget_receiver_on_dongle(ident)
             forgotten.append(ident)
             time.sleep(0.03)
@@ -271,6 +285,15 @@ class BYHProtocolHandler:
         for ident in list(self.latency_samples.keys()):
             if ident not in new_map:
                 self.latency_samples.pop(ident, None)
+
+        # Carry forward any ephemeral rows the currently-loaded show
+        # synthesized for its Bilusocn zones. They live solely on the
+        # protocol handler (no DB row) and would otherwise be wiped by
+        # this DB-driven rebuild, breaking fire resolution mid-show.
+        for ident in self.ephemeral_receiver_idents:
+            prev = old_map.get(ident)
+            if prev is not None:
+                new_map[ident] = prev
 
         self.receivers = new_map
         print(
@@ -1099,7 +1122,7 @@ class BYHProtocolHandler:
                 print("Firing instant 433")
                 msg = BSCFireTranslator.translate_zone_target_to_tx_pkg(zone, target)
                 if(msg):
-                    self.parent.send_serial_command(f"433fire {msg} x")
+                    self.parent.send_serial_command(f"433fire {msg}")
                 else:
                     self.parent.write_error("Can not manually fire Bilusocn as the zone/target couldnt be parsed... did you put a letter in a zone?")
             else:
@@ -1236,12 +1259,25 @@ class BYHProtocolHandler:
         self.firing_array = final_fire_array
         return True
 
-    def load_show(self, firing_array, show_id):
+    def load_show(self, firing_array, show_id, show_receivers=None):
+        """Load a parsed firing array.
+
+        `show_receivers` is the per-show receiver list as parsed JSON
+        (the list-of-dicts shape from the Show table's `show_receivers`
+        column). When the show owns Bilusocn 433MHz zones (entries with
+        `kind == 'bilusocn'`), we synthesize ephemeral receiver rows for
+        each zone before resolving fire targets so the existing
+        zone/target -> device_id resolver finds them. The rows are
+        cleared on unload_show. None / empty list is the no-op path
+        for shows that only use native receivers (i.e. everything that
+        was authorable before the rework).
+        """
         self.show_id=show_id
         self.errors = []
         if(len(firing_array) == 0):
             self.parent.write_error("Loaded a show with an empty firing array? No")
             return False
+        self._materialize_show_bilusocn_receivers(show_receivers)
         self.load_targets_to_devices(firing_array, show_id)
         
         if(self.errors):
@@ -1292,6 +1328,82 @@ class BYHProtocolHandler:
         self.show_loaded = False
 
         self.send_to_active_nodes("reset", " 0")
+        # Drop any ephemeral Bilusocn rows the previously-loaded show
+        # had us synthesize. They're recreated from the new show's
+        # show_receivers on the next load_show; leaving stale entries
+        # would just confuse the next zone/target resolver pass.
+        self._clear_ephemeral_receivers()
+
+    # -----------------------------------------------------------------
+    # Ephemeral Bilusocn receivers
+    #
+    # When a show owns a Bilusocn 433MHz zone (showReceivers entry with
+    # `kind == 'bilusocn'`), there is no DB receiver row backing it --
+    # the show owns the zone outright. To keep resolve_zone_target_to_
+    # device_id working unchanged, we synthesize three 4-cue rows per
+    # zone (dipswitch ranges 1-4, 5-8, 9-12) into self.receivers at
+    # load_show time and drop them on unload_show.
+    #
+    # These rows are flagged with `__ephemeral=True` so any code that
+    # accidentally tries to persist them can bail; the daemon currently
+    # never writes self.receivers back to disk so this is belt-and-
+    # suspenders. Idents start with double underscore to make them
+    # easy to spot in logs and to keep them well clear of the dongle's
+    # `RX<digits>` namespace.
+    # -----------------------------------------------------------------
+
+    BILUSOCN_RANGE_LEN = 4
+    BILUSOCN_RANGE_STARTS = (1, 5, 9)
+
+    def _materialize_show_bilusocn_receivers(self, show_receivers):
+        # Always start from a clean slate; the previous load may have
+        # left rows for a different show / different zones. unload_show
+        # also clears, but loads can chain (re-load with same id) so
+        # we don't rely on the unload pass.
+        self._clear_ephemeral_receivers()
+        if not show_receivers:
+            return
+        if not isinstance(show_receivers, list):
+            return
+        for entry in show_receivers:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("kind") != "bilusocn":
+                continue
+            zone_raw = entry.get("id")
+            if zone_raw is None:
+                continue
+            try:
+                zone = int(zone_raw)
+            except (TypeError, ValueError):
+                print(f"Skipping malformed Bilusocn show entry: {entry!r}")
+                continue
+            zone_str = str(zone)
+            label = entry.get("label") or f"Bilusocn zone {zone_str}"
+            for start in self.BILUSOCN_RANGE_STARTS:
+                ident = f"__bilusocn_z{zone_str}_{start}"
+                # Last-write-wins if the operator double-added a zone
+                # somehow; the React side enforces zone uniqueness on
+                # save so this is defensive.
+                self.receivers[ident] = {
+                    "type": "BILUSOCN_433_TX_ONLY",
+                    "label": label,
+                    "enabled": True,
+                    "cues": {
+                        zone_str: [
+                            start + i for i in range(self.BILUSOCN_RANGE_LEN)
+                        ],
+                    },
+                    "__ephemeral": True,
+                }
+                self.ephemeral_receiver_idents.add(ident)
+
+    def _clear_ephemeral_receivers(self):
+        if not self.ephemeral_receiver_idents:
+            return
+        for ident in list(self.ephemeral_receiver_idents):
+            self.receivers.pop(ident, None)
+        self.ephemeral_receiver_idents.clear()
 
     def get_fc_failures(self):
         self.errors = []
