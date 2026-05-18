@@ -2664,10 +2664,18 @@ const ShowBuilder = (props) => {
     }
     lastHydratedIdRef.current = sid;
 
-    if (stagedShow.id) {
+    if (stagedShow?.id) {
       setShowMetadata(stagedShow);
-      const newItems = JSON.parse(stagedShow.display_payload);
-      const maxId = newItems.reduce((max, obj) => (obj.id > max.id ? obj : max), newItems[0]).id;
+      let newItems = [];
+      try {
+        const parsed = JSON.parse(stagedShow.display_payload || "[]");
+        newItems = Array.isArray(parsed) ? parsed : [];
+      } catch (e) {
+        console.error('Failed to parse display_payload for show:', stagedShow.id, e);
+      }
+      const maxId = newItems.length > 0
+        ? newItems.reduce((max, obj) => (obj.id > max.id ? obj : max), newItems[0]).id
+        : 0;
       refreshInventory(newItems);
       console.log(`CURRENT INDEX IS ${maxId}`);
       // Multi-track hydration. The store normalises legacy single-track
