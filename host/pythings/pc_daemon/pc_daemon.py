@@ -666,7 +666,12 @@ class FireworkDaemon:
         self.serial_baud = baud
         self.setup_serial()
 
-    def handle_manual_fire(self, zone, target):
+    def handle_manual_fire(self, zone, target, kind=None):
+        # `kind` is the optional receiver-class hint from the host. When
+        # set to "bilusocn" the protocol handler skips the DB-resolver
+        # and broadcasts a 433MHz TX packet straight from (zone, target)
+        # -- there are no DB rows backing Bilusocn zones now (they live
+        # on shows). Native (or omitted) keeps the existing behaviour.
         if(gpio_handler.read_key(ARMING_GPIO_KEY) != LOW):
             self.write_error(f"Cannot manually fire zone:{zone} target:{target} if arming switch is not on.")
         elif(self.last_switch_state != LOW):
@@ -674,7 +679,7 @@ class FireworkDaemon:
         elif(self.last_man_fire_state != LOW):
             self.write_error(f"Cannot manually fire zone:{zone} target:{target} if system is not in manual fire mode.")
         else:
-            self.protocol_handler.handle_manual_fire(zone, target)
+            self.protocol_handler.handle_manual_fire(zone, target, kind=kind)
 
     def handle_command(self, command):
         """Handle a single command."""
@@ -683,7 +688,11 @@ class FireworkDaemon:
                 self.send_serial_command(command.get('data', ''))
             elif command['type'] == 'manual_fire':
                 cmddata = command.get('data', {})
-                self.handle_manual_fire(cmddata['zone'], cmddata['target'])
+                self.handle_manual_fire(
+                    cmddata['zone'],
+                    cmddata['target'],
+                    kind=cmddata.get('kind'),
+                )
             elif command['type'] == 'db_query':
                 query = command.get('query', '')
                 self.query_database(query)

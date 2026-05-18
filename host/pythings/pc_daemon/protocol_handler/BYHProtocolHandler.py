@@ -1114,7 +1114,27 @@ class BYHProtocolHandler:
             msg = BSCFireTranslator.translate_zone_target_to_tx_pkg(item['zone'], item['target'])
             self.parent.send_serial_command(f"433fire {msg} x")
 
-    def handle_manual_fire(self, zone, target):
+    def handle_manual_fire(self, zone, target, kind=None):
+        # Bilusocn manual fire is a direct broadcast: there is no DB
+        # receiver row to resolve, since 433MHz zones now live on shows
+        # and the manual-fire screen is gated to "no show loaded". The
+        # host sends `kind="bilusocn"` to opt into the resolver bypass;
+        # we just translate (zone, target) into a TX packet and ship it.
+        if kind == "bilusocn":
+            try:
+                msg = BSCFireTranslator.translate_zone_target_to_tx_pkg(zone, target)
+            except (TypeError, ValueError):
+                msg = None
+            if msg:
+                print(f"Manual Bilusocn fire {zone}:{target}")
+                self.parent.send_serial_command(f"433fire {msg}")
+                return True
+            self.parent.write_error(
+                f"Manual Bilusocn fire failed: could not translate zone:{zone} target:{target} "
+                "into a TX packet (zone must be numeric and within range)."
+            )
+            return False
+
         dev_id = self.resolve_zone_target_to_device_id(zone, target)
         if(dev_id):
             print(f"Firing {zone}:{target} on {dev_id}")

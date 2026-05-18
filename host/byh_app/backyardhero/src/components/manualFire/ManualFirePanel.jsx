@@ -7,6 +7,11 @@ import useAppStore from "@/store/useAppStore";
 import { Card, Button, Section, Badge, Dot, cn } from "@/design";
 import { mergeCues } from "../builder/ShowBuilder";
 import { isPollableReceiver } from "@/util/receivers";
+import {
+  BILUSOCN_ZONE_CUES,
+  RECEIVER_KIND_BILUSOCN,
+  RECEIVER_KIND_NATIVE,
+} from "@/util/showReceivers";
 
 // ---------------------------------------------------------------------------
 // ManualFirePanel: redesigned around the mode-gate pattern.
@@ -18,6 +23,16 @@ import { isPollableReceiver } from "@/util/receivers";
 // show). Otherwise we show a clear, large "gate" describing the missing
 // condition.
 //
+// Two tabs split the firing surface by RF transport:
+//   - Native: DB-backed receivers (BKYD_TS_24_1 etc.) -- the operator picks
+//     a zone (== receiver ident) and we render one cue per slot the
+//     receiver actually exposes, with continuity/online/battery readouts.
+//   - Bilusocn / 433 MHz: one-way TX broadcast. There is no DB receiver
+//     row in the new world (Bilusocn zones live on shows now), so there's
+//     nothing to poll. Operator types a dipswitch zone (1-128) and we
+//     render the fixed 12-cue grid -- the daemon translates straight to
+//     a TX packet without going through the resolver.
+//
 // Affordances:
 //   - "Turn key" / "ARM switch" gates are the focal pieces when manual fire
 //     isn't actually fire-capable.
@@ -26,6 +41,13 @@ import { isPollableReceiver } from "@/util/receivers";
 // ---------------------------------------------------------------------------
 
 const EMPTY_RECEIVER_MAP = {};
+
+// Manual-fire zone bound for Bilusocn. We deliberately cap below the
+// modal's 1-256 because the BSC TX packet encoder folds zone numbers
+// above ~123 into negative bits (see `BSCFireTranslator.translate_zone_
+// target_to_tx_pkg` on the daemon). 128 keeps the input round and well
+// inside the safe range without exposing the encoder quirk to ops.
+const BILUSOCN_MANUAL_FIRE_ZONE_MAX = 128;
 
 function GateCard({ icon, title, body, tone = "warn" }) {
   return (
@@ -130,6 +152,11 @@ export default function ManualFirePanel() {
   const [zone, setZone] = useState(0);
   const [targets, setTargets] = useState([]);
   const [devMap, setDevMap] = useState({});
+  const [activeKind, setActiveKind] = useState(RECEIVER_KIND_NATIVE);
+  // Bilusocn-tab state: a free-form zone number the operator types, kept
+  // as a string for the input field so we can render an empty box. The
+  // fire handlers parse + clamp on send.
+  const [bilusocnZoneInput, setBilusocnZoneInput] = useState("1");
   const { stateData } = useStateAppStore();
   const { systemConfig, stagedShow } = useAppStore();
 
@@ -179,11 +206,34 @@ export default function ManualFirePanel() {
     }
   }, [blocker, receiverMap]);
 
-  const fireLocation = async (target) => {
+  // Native fire goes through the daemon's DB-resolved path; Bilusocn
+  // bypasses resolution entirely (no DB row exists for the zone) and
+  // is dispatched as a direct TX packet on the daemon side. We tag the
+  // payload with `kind` so the daemon picks the right path.
+  const fireNative = async (target) => {
     if (blocker) return;
-    await axios.post("/api/system/cmd_daemon",
-      { type: "manual_fire", data: { zone, target } },
-      { headers: { "Content-Type": "application/json" } });
+    await axios.post(
+      "/api/system/cmd_daemon",
+      {
+        type: "manual_fire",
+        data: { zone, target, kind: RECEIVER_KIND_NATIVE },
+      },
+      { headers: { "Content-Type": "application/json" } },
+    );
+  };
+
+  const fireBilusocn = async (target) => {
+    if (blocker) return;
+    const z = parseInt(bilusocnZoneInput, 10);
+    if (!Number.isFinite(z) || z < 1 || z > BILUSOCN_MANUAL_FIRE_ZONE_MAX) return;
+    await axios.post(
+      "/api/system/cmd_daemon",
+      {
+        type: "manual_fire",
+        data: { zone: String(z), target, kind: RECEIVER_KIND_BILUSOCN },
+      },
+      { headers: { "Content-Type": "application/json" } },
+    );
   };
 
   const handleZoneChange = (e) => {
@@ -232,6 +282,24 @@ export default function ManualFirePanel() {
     }
   }, [zones.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ---- Bilusocn fixed cue grid -----------------------------------------
+  // Bilusocn zones always expose 12 cues (three 4ch dipswitch ranges
+  // tile 1-4 / 5-8 / 9-12). We synthesize the array client-side instead
+  // of consulting devMap because Bilusocn fire bypasses DB receivers
+  // entirely.
+  const bilusocnTargets = useMemo(
+    () => Array.from({ length: BILUSOCN_ZONE_CUES }, (_, i) => i + 1),
+    [],
+  );
+  const bilusocnZoneNum = useMemo(() => {
+    const n = parseInt(bilusocnZoneInput, 10);
+    return Number.isFinite(n) ? n : null;
+  }, [bilusocnZoneInput]);
+  const bilusocnZoneValid =
+    bilusocnZoneNum != null
+    && bilusocnZoneNum >= 1
+    && bilusocnZoneNum <= BILUSOCN_MANUAL_FIRE_ZONE_MAX;
+
   return (
     <Section
       title="Manual fire"
@@ -248,132 +316,259 @@ export default function ManualFirePanel() {
         <GateCard icon={blocker.icon} title={blocker.title} body={blocker.body} tone={blocker.tone} />
       ) : (
         <div className="space-y-4">
-          {/* Zone selector */}
-          <Card padding="md" tone="raised">
-            <div className="flex flex-wrap items-end gap-3">
-              <div className="flex-1 min-w-[160px]">
-                <label className="eyebrow block mb-1">Zone</label>
-                <select
-                  value={zone}
-                  onChange={handleZoneChange}
-                  className="h-10 w-full rounded-sm bg-surface-1 border border-border px-2.5 text-sm text-fg-primary focus:border-accent"
-                >
-                  {zones.map((z) => <option key={z} value={z}>{z}</option>)}
-                </select>
-              </div>
-              <p className="text-xs text-fg-muted max-w-xs">
-                Choose a zone, then tap a target below to fire it once. Fire
-                commands are dispatched directly to the receiver.
-                {showCueAssignments ? " Staged show assignments are shown on matching cues." : ""}
-              </p>
-            </div>
-            {selectedReceiver ? (
-              <div className="mt-3 pt-3 border-t border-border-subtle flex flex-wrap items-center gap-2 text-xs">
-                <Badge
-                  tone={selectedReceiverOnline ? "ok" : "danger"}
-                  leading={<Dot tone={selectedReceiverOnline ? "ok" : "danger"} pulse={selectedReceiverOnline} />}
-                >
-                  {selectedReceiverOnline ? "Receiver online" : "Receiver offline"}
-                </Badge>
-                <span className="text-fg-secondary truncate">
-                  {selectedReceiverLabel}
-                </span>
-                {selectedReceiver.status?.battery != null ? (
-                  <span className="num text-fg-muted">
-                    Battery {Math.floor((selectedReceiver.status.battery / 256) * 100)}%
-                  </span>
-                ) : null}
-              </div>
-            ) : null}
-          </Card>
+          {/* Tab strip: Native vs Bilusocn / 433 MHz. Mirrors the same
+              two-kind split used by the show builder's Add Receiver
+              modal so the operator's mental model stays consistent
+              across the app. */}
+          <div className="flex border-b border-border-subtle">
+            <ManualFireKindTab
+              active={activeKind === RECEIVER_KIND_NATIVE}
+              onClick={() => setActiveKind(RECEIVER_KIND_NATIVE)}
+              label="Native"
+            />
+            <ManualFireKindTab
+              active={activeKind === RECEIVER_KIND_BILUSOCN}
+              onClick={() => setActiveKind(RECEIVER_KIND_BILUSOCN)}
+              label="Bilusocn / 433 MHz"
+            />
+          </div>
 
-          {/* Fire grid */}
-          <Card padding="md" tone="armed">
-            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
-              {targets.length === 0 ? (
-                <p className="col-span-full text-fg-muted text-sm text-center py-8">
-                  No targets registered for this zone.
-                </p>
-              ) : targets.map((t) => {
-                const continuity = selectedReceiver
-                  ? cueHasContinuity(selectedReceiver, t)
-                  : null;
-                const assignedItem = showCueAssignments
-                  ? cueAssignmentMap[`${zone}:${t}`]
-                  : null;
-                const assignmentLabel = formatCueAssignment(assignedItem);
-                const assignmentType = formatCueType(assignedItem);
-                const assignmentImage = cueAssignmentImage(assignedItem);
-                const continuityLabel =
-                  continuity === true
-                    ? "continuity present"
-                    : continuity === false
-                    ? "no continuity"
-                    : "continuity unknown";
-                return (
-                  <Button
-                    key={t}
-                    size="xl"
-                    variant="armed"
-                    onClick={() => fireLocation(t)}
-                    className={cn(
-                      "relative h-24 px-2 flex-col gap-1",
-                      assignmentLabel ? "ring-2 ring-accent/60" : ""
-                    )}
-                    title={
-                      selectedReceiver
-                        ? `Cue ${t}: ${continuityLabel}${assignmentLabel ? ` · ${assignmentLabel}` : ""}`
-                        : `Fire cue ${t}${assignmentLabel ? ` · ${assignmentLabel}` : ""}`
-                    }
-                  >
-                    <CueAssignmentBackground
-                      image={assignmentImage}
-                      label={assignmentLabel}
-                    />
-                    {assignmentType ? (
-                      <span className="absolute left-1.5 top-1.5 z-10 max-w-[55%] truncate rounded bg-surface-base/70 px-1.5 py-0.5 text-[9px] leading-none font-semibold uppercase tracking-wider text-fg-secondary">
-                        {assignmentType}
+          {activeKind === RECEIVER_KIND_NATIVE ? (
+            <>
+              {/* Zone selector */}
+              <Card padding="md" tone="raised">
+                <div className="flex flex-wrap items-end gap-3">
+                  <div className="flex-1 min-w-[160px]">
+                    <label className="eyebrow block mb-1">Zone</label>
+                    <select
+                      value={zone}
+                      onChange={handleZoneChange}
+                      className="h-10 w-full rounded-sm bg-surface-1 border border-border px-2.5 text-sm text-fg-primary focus:border-accent"
+                    >
+                      {zones.map((z) => <option key={z} value={z}>{z}</option>)}
+                    </select>
+                  </div>
+                  <p className="text-xs text-fg-muted max-w-xs">
+                    Choose a zone, then tap a target below to fire it once. Fire
+                    commands are dispatched directly to the receiver.
+                    {showCueAssignments ? " Staged show assignments are shown on matching cues." : ""}
+                  </p>
+                </div>
+                {selectedReceiver ? (
+                  <div className="mt-3 pt-3 border-t border-border-subtle flex flex-wrap items-center gap-2 text-xs">
+                    <Badge
+                      tone={selectedReceiverOnline ? "ok" : "danger"}
+                      leading={<Dot tone={selectedReceiverOnline ? "ok" : "danger"} pulse={selectedReceiverOnline} />}
+                    >
+                      {selectedReceiverOnline ? "Receiver online" : "Receiver offline"}
+                    </Badge>
+                    <span className="text-fg-secondary truncate">
+                      {selectedReceiverLabel}
+                    </span>
+                    {selectedReceiver.status?.battery != null ? (
+                      <span className="num text-fg-muted">
+                        Battery {Math.floor((selectedReceiver.status.battery / 256) * 100)}%
                       </span>
                     ) : null}
-                    {selectedReceiver ? (
-                      <span
+                  </div>
+                ) : null}
+              </Card>
+
+              {/* Fire grid (native) */}
+              <Card padding="md" tone="armed">
+                <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
+                  {targets.length === 0 ? (
+                    <p className="col-span-full text-fg-muted text-sm text-center py-8">
+                      No targets registered for this zone.
+                    </p>
+                  ) : targets.map((t) => {
+                    const continuity = selectedReceiver
+                      ? cueHasContinuity(selectedReceiver, t)
+                      : null;
+                    const assignedItem = showCueAssignments
+                      ? cueAssignmentMap[`${zone}:${t}`]
+                      : null;
+                    const assignmentLabel = formatCueAssignment(assignedItem);
+                    const assignmentType = formatCueType(assignedItem);
+                    const assignmentImage = cueAssignmentImage(assignedItem);
+                    const continuityLabel =
+                      continuity === true
+                        ? "continuity present"
+                        : continuity === false
+                        ? "no continuity"
+                        : "continuity unknown";
+                    return (
+                      <Button
+                        key={t}
+                        size="xl"
+                        variant="armed"
+                        onClick={() => fireNative(t)}
                         className={cn(
-                          "absolute bottom-1.5 left-1/2 z-10 -translate-x-1/2",
-                          "inline-flex items-center gap-1 rounded bg-surface-base/70 px-1.5 py-0.5 text-[9px] leading-none font-medium uppercase tracking-wider",
-                          continuity === true && "text-ok-fg",
-                          continuity === false && "text-danger-fg",
-                          continuity == null && "text-fg-muted"
+                          "relative h-24 px-2 flex-col gap-1",
+                          assignmentLabel ? "ring-2 ring-accent/60" : ""
                         )}
+                        title={
+                          selectedReceiver
+                            ? `Cue ${t}: ${continuityLabel}${assignmentLabel ? ` · ${assignmentLabel}` : ""}`
+                            : `Fire cue ${t}${assignmentLabel ? ` · ${assignmentLabel}` : ""}`
+                        }
                       >
-                        <Dot
-                          tone={
-                            continuity === true
-                              ? "ok"
-                              : continuity === false
-                              ? "danger"
-                              : "neutral"
-                          }
+                        <CueAssignmentBackground
+                          image={assignmentImage}
+                          label={assignmentLabel}
                         />
-                        {continuity === true
-                          ? "Cont."
-                          : continuity === false
-                          ? "Open"
-                          : "Unknown"}
-                      </span>
-                    ) : null}
-                    <span className="relative z-10 block text-2xl leading-none">{t}</span>
-                    {assignmentLabel ? (
-                      <span className="relative z-10 mx-auto mt-0.5 block max-w-full truncate rounded bg-surface-base/65 px-1 text-[10px] leading-tight text-fg-primary normal-case tracking-normal">
-                        {assignmentLabel}
-                      </span>
-                    ) : null}
-                  </Button>
-                );
-              })}
-            </div>
-          </Card>
+                        {assignmentType ? (
+                          <span className="absolute left-1.5 top-1.5 z-10 max-w-[55%] truncate rounded bg-surface-base/70 px-1.5 py-0.5 text-[9px] leading-none font-semibold uppercase tracking-wider text-fg-secondary">
+                            {assignmentType}
+                          </span>
+                        ) : null}
+                        {selectedReceiver ? (
+                          <span
+                            className={cn(
+                              "absolute bottom-1.5 left-1/2 z-10 -translate-x-1/2",
+                              "inline-flex items-center gap-1 rounded bg-surface-base/70 px-1.5 py-0.5 text-[9px] leading-none font-medium uppercase tracking-wider",
+                              continuity === true && "text-ok-fg",
+                              continuity === false && "text-danger-fg",
+                              continuity == null && "text-fg-muted"
+                            )}
+                          >
+                            <Dot
+                              tone={
+                                continuity === true
+                                  ? "ok"
+                                  : continuity === false
+                                  ? "danger"
+                                  : "neutral"
+                              }
+                            />
+                            {continuity === true
+                              ? "Cont."
+                              : continuity === false
+                              ? "Open"
+                              : "Unknown"}
+                          </span>
+                        ) : null}
+                        <span className="relative z-10 block text-2xl leading-none">{t}</span>
+                        {assignmentLabel ? (
+                          <span className="relative z-10 mx-auto mt-0.5 block max-w-full truncate rounded bg-surface-base/65 px-1 text-[10px] leading-tight text-fg-primary normal-case tracking-normal">
+                            {assignmentLabel}
+                          </span>
+                        ) : null}
+                      </Button>
+                    );
+                  })}
+                </div>
+              </Card>
+            </>
+          ) : (
+            <>
+              {/* Zone input (Bilusocn) */}
+              <Card padding="md" tone="raised">
+                <div className="flex flex-wrap items-end gap-3">
+                  <div className="flex-1 min-w-[160px] max-w-[200px]">
+                    <label className="eyebrow block mb-1">Zone</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={BILUSOCN_MANUAL_FIRE_ZONE_MAX}
+                      value={bilusocnZoneInput}
+                      onChange={(e) => setBilusocnZoneInput(e.target.value)}
+                      placeholder={`1-${BILUSOCN_MANUAL_FIRE_ZONE_MAX}`}
+                      className="h-10 w-full rounded-sm bg-surface-1 border border-border px-2.5 text-sm text-fg-primary focus:border-accent"
+                    />
+                  </div>
+                  <p className="text-xs text-fg-muted max-w-md">
+                    Bilusocn 433MHz is one-way TX -- there's no receiver to
+                    poll, so no online / continuity readouts. Type the zone
+                    number set on your TX modules' dipswitches, then tap a
+                    cue to broadcast it.
+                    {showCueAssignments ? " Staged show assignments are shown on matching cues." : ""}
+                  </p>
+                </div>
+                {!bilusocnZoneValid ? (
+                  <div className="mt-3 pt-3 border-t border-border-subtle text-xs text-warn-fg">
+                    Zone must be a number between 1 and {BILUSOCN_MANUAL_FIRE_ZONE_MAX}.
+                  </div>
+                ) : null}
+              </Card>
+
+              {/* Fire grid (Bilusocn) */}
+              <Card padding="md" tone="armed">
+                <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
+                  {bilusocnTargets.map((t) => {
+                    // Stage show assignments are keyed by item.zone (the
+                    // showReceivers entry id). Bilusocn show entries use
+                    // the zone number stringified, so a lookup against
+                    // String(zone):cue lines up with what the show
+                    // builder writes.
+                    const assignedItem =
+                      showCueAssignments && bilusocnZoneNum != null
+                        ? cueAssignmentMap[`${bilusocnZoneNum}:${t}`]
+                        : null;
+                    const assignmentLabel = formatCueAssignment(assignedItem);
+                    const assignmentType = formatCueType(assignedItem);
+                    const assignmentImage = cueAssignmentImage(assignedItem);
+                    return (
+                      <Button
+                        key={t}
+                        size="xl"
+                        variant="armed"
+                        disabled={!bilusocnZoneValid}
+                        onClick={() => fireBilusocn(t)}
+                        className={cn(
+                          "relative h-24 px-2 flex-col gap-1",
+                          assignmentLabel ? "ring-2 ring-accent/60" : ""
+                        )}
+                        title={
+                          bilusocnZoneValid
+                            ? `Fire zone ${bilusocnZoneNum} · cue ${t}${assignmentLabel ? ` · ${assignmentLabel}` : ""}`
+                            : "Enter a valid zone first"
+                        }
+                      >
+                        <CueAssignmentBackground
+                          image={assignmentImage}
+                          label={assignmentLabel}
+                        />
+                        {assignmentType ? (
+                          <span className="absolute left-1.5 top-1.5 z-10 max-w-[55%] truncate rounded bg-surface-base/70 px-1.5 py-0.5 text-[9px] leading-none font-semibold uppercase tracking-wider text-fg-secondary">
+                            {assignmentType}
+                          </span>
+                        ) : null}
+                        <span className="relative z-10 block text-2xl leading-none">{t}</span>
+                        {assignmentLabel ? (
+                          <span className="relative z-10 mx-auto mt-0.5 block max-w-full truncate rounded bg-surface-base/65 px-1 text-[10px] leading-tight text-fg-primary normal-case tracking-normal">
+                            {assignmentLabel}
+                          </span>
+                        ) : null}
+                      </Button>
+                    );
+                  })}
+                </div>
+              </Card>
+            </>
+          )}
         </div>
       )}
     </Section>
+  );
+}
+
+// Single tab button for the manual-fire kind switcher. Style mirrors the
+// in-show-builder tab strip so the modal/main-page surfaces feel like a
+// consistent family.
+function ManualFireKindTab({ active, onClick, label }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "px-4 py-2 font-medium text-sm",
+        active
+          ? "text-accent border-b-2 border-accent"
+          : "text-fg-muted hover:text-fg-secondary",
+      )}
+    >
+      {label}
+    </button>
   );
 }
