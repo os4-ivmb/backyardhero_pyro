@@ -5,11 +5,12 @@ import {
   MdExpandLess, MdExpandMore,
 } from "react-icons/md";
 
-import useStateAppStore from "@/store/useStateAppStore";
+import useStateAppStore, { serverElapsedMs } from "@/store/useStateAppStore";
 import useAppStore from "@/store/useAppStore";
 import useAppMode from "@/design/useAppMode";
 import { cn, Stat, Dot, Badge } from "@/design";
 import Toast from "../common/Toast";
+import GpioOverrideBar from "../shell/GpioOverrideBar";
 import { isPollableReceiver } from "@/util/receivers";
 
 // ---------------------------------------------------------------------------
@@ -236,10 +237,10 @@ export default function MobileStatusBar() {
       if (!isPollableReceiver(r)) continue;
       total += 1;
       const lmt = liveR[id]?.status?.lmt;
-      if (lmt && Date.now() - lmt < 10_000) online++;
+      if (serverElapsedMs(lmt, stateData) < 10_000) online++;
     }
     return { total, online };
-  }, [stateData.fw_state?.receivers, systemConfig?.receivers]);
+  }, [stateData, systemConfig?.receivers]);
 
   const receiverTone =
     receiverSummary.total === 0
@@ -259,6 +260,10 @@ export default function MobileStatusBar() {
           </div>
         ))}
       </div>
+
+      {/* Anchored software-override banner. Self-hides when nothing is
+          forced; full-bleed above the status sheet so it's unmissable. */}
+      <GpioOverrideBar compact />
 
       <div className="px-2">
         {/* Top row: hero summary + expander toggle. Tap anywhere on the

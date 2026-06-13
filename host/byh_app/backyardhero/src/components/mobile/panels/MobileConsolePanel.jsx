@@ -7,7 +7,7 @@ import {
 import { FiUpload, FiX, FiAlertCircle, FiChevronDown } from "react-icons/fi";
 
 import useAppStore from "@/store/useAppStore";
-import useStateAppStore from "@/store/useStateAppStore";
+import useStateAppStore, { serverElapsedMs } from "@/store/useStateAppStore";
 import useAppMode from "@/design/useAppMode";
 import useShowReceiverVerification from "@/util/useShowReceiverVerification";
 import { Card, Button, Badge, Section, cn } from "@/design";
@@ -542,11 +542,11 @@ export default function MobileConsolePanel() {
       const r = receivers[k];
       if (!r) { allOnline = false; return; }
       const lmt = r.status?.lmt;
-      if (lmt) { if (Date.now() - lmt > 10_000) allOnline = false; }
+      if (lmt) { if (serverElapsedMs(lmt, stateData) > 10_000) allOnline = false; }
       else if (r.connectionStatus !== "good") allOnline = false;
     });
     return allOnline;
-  }, [stagedShow, stateData.fw_state?.receivers, systemConfig]);
+  }, [stagedShow, stateData, systemConfig]);
 
   const errors = useMemo(() => [
     ...(stateData.fw_state?.fire_check_failures || []),

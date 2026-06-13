@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { FaKey, FaTriangleExclamation } from "react-icons/fa6";
 
-import useStateAppStore from "@/store/useStateAppStore";
+import useStateAppStore, { serverElapsedMs } from "@/store/useStateAppStore";
 import useAppStore from "@/store/useAppStore";
 import { Card, Button, Section, Badge, Dot, cn } from "@/design";
 import { mergeCues } from "../builder/ShowBuilder";
@@ -257,9 +257,9 @@ export default function ManualFirePanel() {
   const selectedReceiverOnline = useMemo(() => {
     if (!selectedReceiver) return null;
     const lmt = selectedReceiver.status?.lmt;
-    if (lmt) return Date.now() - lmt <= receiverTimeoutMs;
+    if (lmt) return serverElapsedMs(lmt, stateData) <= receiverTimeoutMs;
     return selectedReceiver.connectionStatus === "good";
-  }, [selectedReceiver, receiverTimeoutMs, stateData.fw_last_update]);
+  }, [selectedReceiver, receiverTimeoutMs, stateData]);
 
   const selectedReceiverLabel =
     selectedReceiver?.label ||

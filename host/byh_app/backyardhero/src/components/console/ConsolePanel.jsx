@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import useAppStore from "@/store/useAppStore";
-import useStateAppStore from "@/store/useStateAppStore";
+import useStateAppStore, { serverElapsedMs } from "@/store/useStateAppStore";
 import useAppMode from "@/design/useAppMode";
 
 import ShowPicker from "./ShowPicker";
@@ -95,11 +95,11 @@ export default function ConsolePanel() {
       const r = receivers[k];
       if (!r) { allOnline = false; return; }
       const lmt = r.status?.lmt;
-      if (lmt) { if (Date.now() - lmt > 10_000) allOnline = false; }
+      if (lmt) { if (serverElapsedMs(lmt, stateData) > 10_000) allOnline = false; }
       else if (r.connectionStatus !== "good") allOnline = false;
     });
     return allOnline;
-  }, [stagedShow, stateData.fw_state?.receivers, systemConfig]);
+  }, [stagedShow, stateData, systemConfig]);
 
   // -------------------------------------------------------------------------
   // Sync UI staged/loaded show with daemon's loaded_show_id on first connect.

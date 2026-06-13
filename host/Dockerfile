@@ -1,7 +1,26 @@
 FROM node:22-slim
 
-# Install system dependencies
-RUN apt-get update && \
+# Borrow a real CA bundle from the full node:22 image (same Debian release,
+# pulled from Docker Hub over 443). node:22-slim ships WITHOUT a system CA
+# store, so https apt fetches would otherwise fail with "No system
+# certificates available" even against a perfectly valid mirror cert.
+COPY --from=node:22 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+# Install system dependencies.
+#
+# We fetch over https:// rather than the default http:// Debian mirrors:
+# some networks (corporate firewalls / VPNs) refuse outbound port 80, so
+# the http mirrors fail with "connection refused" while 443 stays open.
+# https is first-class on Debian and, with the CA bundle copied in above,
+# fully certificate-verified. We also retry transient fetch failures so a
+# single dropped connection (common under QEMU emulation for the
+# non-native arch) doesn't kill the whole build.
+RUN set -eux; \
+    for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
+      [ -f "$f" ] && sed -i 's|http://deb.debian.org|https://deb.debian.org|g' "$f" || true; \
+    done; \
+    echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries; \
+    apt-get update && \
     apt-get install -y \
     sqlite3 \
     python3 \

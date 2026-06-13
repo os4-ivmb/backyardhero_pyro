@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
 import useAppStore from "@/store/useAppStore";
-import useStateAppStore from "@/store/useStateAppStore";
+import useStateAppStore, { serverElapsedMs } from "@/store/useStateAppStore";
 import { Card, Stat, cn } from "@/design";
 import { isPollableReceiver } from "@/util/receivers";
 
@@ -74,7 +74,7 @@ export default function ShowHealthStrip() {
       const r = receivers[k];
       if (!r) return;
       const lmt = r.status?.lmt;
-      const ok = lmt ? Date.now() - lmt <= 10_000 : r.connectionStatus === "good";
+      const ok = lmt ? serverElapsedMs(lmt, stateData) <= 10_000 : r.connectionStatus === "good";
       if (ok) connected++;
     });
 

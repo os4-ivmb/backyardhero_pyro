@@ -1518,7 +1518,17 @@ class BYHProtocolHandler:
             self.parent.write_error("Precheck failed. Aborting show.")
             return
 
+        # `show_start_time` is sent to receivers over the wire, so it
+        # has to be in the wall-clock (epoch ms) domain that msync set
+        # up. `show_start_monotonic` is the same instant expressed on
+        # the local monotonic clock; we use IT for every local wait
+        # below so a mid-show wall-clock step (NTP catches up, operator
+        # `date -s`, anything) can't make the daemon fire too early /
+        # too late / out of order. The two are captured side-by-side so
+        # they describe the same moment regardless of subsequent clock
+        # adjustments.
         self.show_start_time = round(time.time()*1000)+(SHOW_START_TIME_SECONDS*1000)
+        show_start_monotonic = time.monotonic() + SHOW_START_TIME_SECONDS
         print("Signaling connected async nodes to start")
         self.send_to_active_nodes("showstart",f" {self.show_start_time} 0 {self.show_id}", 6, self.async_load_targets)
 
@@ -1526,7 +1536,10 @@ class BYHProtocolHandler:
         not_ready_nodes = self.get_async_load_targets_not_with_status('startReady', True)
         nrnct=0
         while(not_ready_nodes):
-            if(time.time()*1000 > self.show_start_time-(ABORT_PRE_START_SECONDS*1000)):
+            # Abort window is expressed on the monotonic clock so a
+            # wall-clock step can't yank the abort threshold past "now"
+            # and trigger a spurious abort.
+            if(time.monotonic() > show_start_monotonic - ABORT_PRE_START_SECONDS):
                 print("Abort time reached and nodes still not ready. Aborting")
                 self.parent.led_handler.update("error_state", ERR_STATE.DAEMON.value)
                 self.parent.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
@@ -1551,7 +1564,15 @@ class BYHProtocolHandler:
             self.parent.led_handler.update("show_run_state", RUN_STATE.COUNTDOWN.value)
             print("Waiting for show start.")
 
-            while(time.time()*1000 < self.show_start_time):
+            # Pre-start countdown on the monotonic clock. Receivers are
+            # waiting against their msynced wall clocks (= the same
+            # instant in wall-clock terms), so as long as nothing steps
+            # the Pi's wall clock between msync and showstart they fire
+            # together. If something DOES step the wall clock the host
+            # NTP guard re-msyncs (see byh-timesync-guard.service); the
+            # monotonic wait here keeps THIS process honest in the
+            # meantime.
+            while(time.monotonic() < show_start_monotonic):
                 self.send_to_active_nodes("play", " 0", 5, self.async_load_targets)
                 time.sleep(3)
                 if self.schedule_stop_event.is_set():
@@ -1568,12 +1589,15 @@ class BYHProtocolHandler:
             print(self.firing_array)
             pause_start = 0
             pause_offset = 0
-            start_time_epoch_sms = time.time()
-            last_write_time = time.time()  # Track last file write time
+            # All in-show timing is on the monotonic clock. firing_array
+            # items carry RELATIVE offsets from t=0 so the wall clock
+            # never enters the calculation again until the show ends.
+            start_time_monotonic = time.monotonic()
+            last_write_time = start_time_monotonic  # Track last file write time
 
             for item in self.firing_array:
                 delay = item['startTime']  # Convert to MS
-                while (time.time() - start_time_epoch_sms) < (delay + pause_offset):
+                while (time.monotonic() - start_time_monotonic) < (delay + pause_offset):
                     if self.schedule_stop_event.is_set():
                         print("Schedule stopped signaling nodes.")
                         self.running_show = False
@@ -1583,7 +1607,7 @@ class BYHProtocolHandler:
                         return
                     if self.schedule_pause_event.is_set():
                         print("Schedule paused.")
-                        pause_start = time.time()
+                        pause_start = time.monotonic()
                         self.send_to_active_nodes("pause", " 0", 5)
                         while self.schedule_pause_event.is_set():  # Stay in paused state
                             time.sleep(0.1)
@@ -1596,7 +1620,7 @@ class BYHProtocolHandler:
                                 return
 
                         if pause_start:
-                            pause_offset += (time.time() - pause_start)
+                            pause_offset += (time.monotonic() - pause_start)
                             pause_start = 0
 
                         print("Schedule resumed.")
@@ -1604,12 +1628,12 @@ class BYHProtocolHandler:
                         self.send_to_active_nodes("play", " 0", 5)
 
                     time.sleep(0.01)  # Check stop event frequently
-                    self.time_cursor = round((time.time() - start_time_epoch_sms + pause_offset),2)
+                    self.time_cursor = round((time.monotonic() - start_time_monotonic + pause_offset),2)
 
                     # Overwrite file every second
-                    if time.time() - last_write_time >= 1:
+                    if time.monotonic() - last_write_time >= 1:
                         self.parent.write_time_cursor(self.time_cursor)
-                        last_write_time = time.time()
+                        last_write_time = time.monotonic()
 
                 self.fire_item(item)
                 print(f"Executing scheduled command: {item}")

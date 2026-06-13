@@ -92,6 +92,7 @@
 //   * Per-receiver entries in the per-second status JSON now include
 //     `fw` / `bv` / `nb` / `nbd` / `ca` / `fd` so the host can recover
 //     full receiver state (e.g. post-restart) without re-querying.
+// v19: V2 Board
 // v18: 2026-05-XX -Command priority. 
 // v17: 2026-05-XX - OTA begin handshake recovery:
 //   * `flash_begin` now clears half-open OTA sessions by sending best-effort
@@ -145,11 +146,13 @@
 //     drops from ~2.1s to ~600ms, so a transient burst of interference
 //     no longer chokes the serial pipe for seconds at a time -- the host
 //     gets the NACK and decides whether to retry or recover.
-#define FW_VERSION 18
+#define FW_VERSION 19
+
+#define BOARD_VERSION 2
 
 #define RF24_CE_PIN 37
 #define RF24_CSN_PIN 36
-#define RF_PIN 4
+#define RF_PIN 5
 
 #define CONTINUITY_INDEX_CT 2
 #define MAX_LATENCY_SAMPLES 10
@@ -159,7 +162,7 @@
 #define SWITCH_ARMING_PIN 8
 #define SWITCH_MAN_FIRE_PIN 7
 
-#define LED_PIN 5
+#define LED_PIN 4
 #define NUM_PIXELS 7
 
 enum MessageType {

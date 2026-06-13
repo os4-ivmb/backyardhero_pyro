@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
-import useStateAppStore from "@/store/useStateAppStore";
+import useStateAppStore, { serverElapsedMs } from "@/store/useStateAppStore";
 import useAppStore from "@/store/useAppStore";
 import useAppMode from "@/design/useAppMode";
 import { cn, Stat, Dot, IconButton, Badge } from "@/design";
 import { MdRefresh, MdCloseFullscreen, MdOpenInFull, MdSignalWifi4Bar, MdSignalWifiOff, MdRestartAlt } from "react-icons/md";
 import Toast from "../common/Toast";
+import GpioOverrideBar from "./GpioOverrideBar";
 import { isPollableReceiver } from "@/util/receivers";
 
 const DONGLE_DEFAULTS = {
@@ -338,10 +339,10 @@ export default function StatusBar() {
       if (!isPollableReceiver(r)) continue;
       total += 1;
       const lmt = liveR[id]?.status?.lmt;
-      if (lmt && Date.now() - lmt < 10_000) online++;
+      if (serverElapsedMs(lmt, stateData) < 10_000) online++;
     }
     return { total, online };
-  }, [stateData.fw_state?.receivers, systemConfig?.receivers]);
+  }, [stateData, systemConfig?.receivers]);
 
   return (
     <>
@@ -352,6 +353,11 @@ export default function StatusBar() {
           </div>
         ))}
       </div>
+
+      {/* Anchored software-override banner. Self-hides when no input is
+          forced; sits directly above the status row so a forced
+          arm/start/fire is impossible to miss. */}
+      <GpioOverrideBar />
 
       <div
         className="px-3 h-12 flex items-center gap-4 text-sm"

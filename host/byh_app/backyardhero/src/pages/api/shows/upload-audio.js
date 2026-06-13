@@ -85,8 +85,7 @@ export default async function handler(req, res) {
 
       // Generate a unique filename to avoid conflicts
       const timestamp = Date.now();
-      const originalName = file.originalFilename || 'audio';
-      const extension = path.extname(originalName);
+      const originalName = path.basename(file.originalFilename || 'audio');
       const newFilename = `${timestamp}_${originalName}`;
       const newPath = path.join(uploadDir, newFilename);
 
@@ -97,7 +96,7 @@ export default async function handler(req, res) {
       console.log('File moved successfully');
 
       // Return the URL for the uploaded file
-      const url = `/uploads/audio/${newFilename}`;
+      const url = `/api/shows/audio/${encodeURIComponent(newFilename)}`;
       
       res.status(200).json({ 
         url,

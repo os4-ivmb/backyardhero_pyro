@@ -88,9 +88,14 @@ export default function useAppMode() {
 
   const mode = useMemo(() => {
     const daemonActive = !!fw.daemon_active;
+    // Liveness must compare client-clock to client-clock: the Pi has no
+    // RTC and on an offline boot its wall clock can be hours behind the
+    // browser, making `Date.now() - fw_last_update` look stale forever.
+    // `_clientRxAt` is stamped by useStateAppStore when the WS message
+    // arrives, so it's always in this browser's clock domain.
     const wsAlive =
-      stateData?.fw_last_update &&
-      Date.now() - stateData.fw_last_update < 4500;
+      stateData?._clientRxAt &&
+      Date.now() - stateData._clientRxAt < 4500;
 
     const showLoaded = !!fw.show_loaded || !!fw.loaded_show_id;
     const showStaged = false; // Always derived from useAppStore at the call site.
@@ -123,7 +128,7 @@ export default function useAppMode() {
     // loaded" depends on useAppStore and is computed at the consumer site
     // when needed. The chrome-level mode here is driven only by daemon state.
   }, [
-    stateData?.fw_last_update,
+    stateData?._clientRxAt,
     stateData?.fw_state,
     stateData?.fw_d_error,
     stateData?.fw_error,
@@ -160,8 +165,8 @@ export default function useAppMode() {
     deviceRunning: !!fw.device_running,           // dongle heartbeat in last 10s
     deviceIsTransmitting: !!fw.device_is_transmitting, // dongle sent traffic in last 10s
     wsAlive:
-      !!stateData?.fw_last_update &&
-      Date.now() - stateData.fw_last_update < 4500,
+      !!stateData?._clientRxAt &&
+      Date.now() - stateData._clientRxAt < 4500,
     activeProtocol: fw.active_protocol || null,
     fwCursor: stateData?.fw_cursor ?? null,
   };

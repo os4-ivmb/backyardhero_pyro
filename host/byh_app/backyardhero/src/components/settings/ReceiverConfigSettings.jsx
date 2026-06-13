@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import useAppStore from "@/store/useAppStore";
-import useStateAppStore from "@/store/useStateAppStore";
+import useStateAppStore, { serverElapsedMs } from "@/store/useStateAppStore";
 import { Button, Field, inputClass } from "@/design";
 import { MdSettingsBackupRestore } from "react-icons/md";
 
@@ -84,7 +84,7 @@ export default function ReceiverConfigSettings() {
       if (!r?.enabled) continue;
       if (r?.type === "BILUSOCN_433_TX_ONLY") continue;
       const lmt = live[id]?.status?.lmt;
-      if (lmt && Date.now() - lmt < 10000) n++;
+      if (serverElapsedMs(lmt, stateData) < 10000) n++;
     }
     return n;
   }, [receivers, stateData]);

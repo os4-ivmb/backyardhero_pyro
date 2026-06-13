@@ -15,6 +15,7 @@ import TransmitRepetitionCount from "./TransmitRepetitionCount";
 import TxConfig from "./TxConfig";
 import DaemonSettings from "./DaemonSettings";
 import DebugModeToggle from "./DebugModeToggle";
+import GpioOverridePanel from "./GpioOverridePanel";
 import ProtocolConfig from "./ProtocolConfig";
 import RFScanPanel from "./RFScanPanel";
 import OtaFlashPanel from "./OtaFlashPanel";
@@ -212,6 +213,14 @@ function DongleTab() {
         className="lg:col-span-2"
       >
         <DebugModeToggle />
+      </SettingCard>
+
+      <SettingCard
+        title="Switch input overrides"
+        eyebrow="Bench / service"
+        className="lg:col-span-2"
+      >
+        <GpioOverridePanel />
       </SettingCard>
     </div>
   );

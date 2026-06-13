@@ -95,6 +95,14 @@ AP_NAT_SYSCTL_PATH="/etc/sysctl.d/99-byh-ap-nat.conf"
 UPDATE_APPLY_SERVICE_NAME="byh-update.service"
 UPDATE_APPLY_PATH_NAME="byh-update.path"
 UPDATE_APPLY_SCRIPT_PATH="/usr/local/sbin/byh-update.py"
+# Show-state-aware NTP guard. The daemon writes /data/byh_show_state
+# ("idle" | "loaded" | "running") on transitions. A .path unit fires
+# the .service which pauses or resumes systemd-timesyncd accordingly,
+# so a mid-show NTP step can't yank the wall clock under a running
+# show. See setup_timesync_guard() below.
+TIMESYNC_GUARD_SERVICE_NAME="byh-timesync-guard.service"
+TIMESYNC_GUARD_PATH_NAME="byh-timesync-guard.path"
+TIMESYNC_GUARD_SCRIPT_PATH="/usr/local/sbin/byh-timesync-guard.sh"
 UDEV_RULE_PATH="/etc/udev/rules.d/99-byh-dongle.rules"
 HOSTAPD_CONF_PATH="/etc/hostapd/hostapd.conf"
 HOSTAPD_DEFAULT_PATH="/etc/default/hostapd"
@@ -326,6 +334,13 @@ apt_install() {
     iptables
     net-tools
     avahi-daemon
+    # Time sync stack -- see setup_time_sync() for the rationale.
+    # systemd-timesyncd ships on Bookworm/Bullseye/Ubuntu but isn't
+    # always installed on minimal Debian; pull it explicitly. fake-hwclock
+    # keeps the wall clock approximately right across reboots when the
+    # Pi has no real RTC and no upstream NTP (the AP-only deployment).
+    systemd-timesyncd
+    fake-hwclock
   )
   apt-get install -y --no-install-recommends "${pkgs[@]}"
 
@@ -2004,6 +2019,229 @@ setup_nat() {
     || warn "NAT apply failed -- run 'journalctl -u ${AP_NAT_SERVICE_NAME}' to debug"
 }
 
+# ---------------------------------------------------------------------------
+# Time sync: keep the wall clock close enough for the UI.
+# ---------------------------------------------------------------------------
+#
+# A Raspberry Pi has no battery-backed RTC. By itself that's fine -- once
+# the Pi has internet, systemd-timesyncd reaches an NTP server and steps
+# the clock to "now" within seconds of boot. The problem is the offline
+# / AP-only deployment: on those boxes the wall clock can be hours (or
+# years) behind a freshly-charged phone the operator is using to view
+# the UI. The web app stamps liveness checks (receiver `lmt`, websocket
+# `fw_last_update`) with `time.time()` on the Pi, and the browser
+# compares that to its own `Date.now()`. Disagreement of more than a
+# few seconds makes everything in the UI look stale even though the
+# system is healthy.
+#
+# We do two things:
+#
+#   1. Install + enable fake-hwclock. It snapshots the wall clock on
+#      shutdown/timer and restores it at next boot, so an offline Pi
+#      at least resumes near the time it stopped (instead of 1970 /
+#      whatever the kernel default is on the build).
+#
+#   2. Make systemd-timesyncd step (not slew) and retry aggressively
+#      whenever a network DOES appear, so an operator who briefly
+#      hands the Pi internet (USB-tethered phone, plug in eth0 for a
+#      minute) gets the clock corrected fast.
+#
+# The UI is ALSO defended in code via `_clockOffsetMs` in
+# useStateAppStore -- this section is belt-and-suspenders so the
+# offset stays small even before that helper kicks in.
+
+setup_time_sync() {
+  section "Configuring time sync (fake-hwclock + timesyncd)"
+
+  # fake-hwclock saves the wall clock on shutdown/halt and on a
+  # systemd-timer cadence, then restores it at next boot. Crucial on
+  # an offline Pi -- without it the clock returns to whatever date the
+  # image was built on after every power cycle.
+  if command -v fake-hwclock >/dev/null 2>&1; then
+    # Save *now* so the very next boot picks up a sane time even if
+    # this install runs from a freshly-flashed image whose previous
+    # /etc/fake-hwclock.data is older than the install date.
+    fake-hwclock save 2>/dev/null || true
+    systemctl enable fake-hwclock.service 2>/dev/null || true
+  else
+    warn "fake-hwclock not installed; offline reboots may drop the clock to epoch"
+  fi
+
+  # systemd-timesyncd is the default time daemon on Bookworm/Bullseye
+  # and Ubuntu Server. We override two knobs:
+  #   - FallbackNTP=<public pool>  so it can sync even when the local
+  #     network has no NTP server of its own (every public Wi-Fi etc.).
+  #   - PollIntervalMinSec=16      poll once every 16s right after a
+  #     network appears so the first sync is fast. The daemon backs off
+  #     on its own once syncs succeed; this is a floor on the *first*
+  #     poll interval, not a permanent rate.
+  # systemd-timesyncd ALWAYS steps the clock on the first successful
+  # sync of a session regardless of offset, so we don't need to ask
+  # for a step explicitly -- we just need it to GET a sync.
+  if command -v timedatectl >/dev/null 2>&1; then
+    mkdir -p /etc/systemd/timesyncd.conf.d
+    cat >/etc/systemd/timesyncd.conf.d/00-byh.conf <<'EOF'
+# Backyard Hero: aggressive offline-recovery settings.
+# See host/run/pi/install.sh setup_time_sync for rationale.
+[Time]
+# Public NTP pools as fallback -- used when no DHCP-supplied NTP server
+# is available (the common case for the AP-only Pi while disconnected).
+FallbackNTP=time.cloudflare.com pool.ntp.org time.google.com time.nist.gov
+# Poll fast on first sync so the clock corrects within ~30s of any
+# transient internet appearance (operator briefly plugs eth0, USB
+# tethers a phone, etc.). The daemon backs off naturally to 32 min
+# after sustained syncs.
+PollIntervalMinSec=16
+PollIntervalMaxSec=2048
+EOF
+    chmod 0644 /etc/systemd/timesyncd.conf.d/00-byh.conf
+
+    # Enable NTP. Also flip on the service explicitly in case some
+    # other config disabled it.
+    timedatectl set-ntp true 2>/dev/null || true
+    systemctl enable --now systemd-timesyncd.service 2>/dev/null \
+      || warn "couldn't enable systemd-timesyncd; install chrony manually if needed"
+    systemctl restart systemd-timesyncd.service 2>/dev/null || true
+  else
+    warn "timedatectl not available; skipping systemd-timesyncd config"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# NTP guard during shows.
+# ---------------------------------------------------------------------------
+#
+# Why this exists: the daemon's run_show() drives the firing schedule on
+# `time.monotonic()` now, which is immune to wall-clock jumps. BUT it
+# also msyncs the receivers using `time.time()` once, then sends
+# `showstart=<epoch_ms>` to the receivers. If systemd-timesyncd steps
+# the wall clock between msync and showstart, the receivers (synced to
+# the old clock) and the absolute showstart timestamp (stamped on the
+# new clock) disagree -- the receivers either fire too early or never.
+#
+# So: while a show is loaded or running, pause systemd-timesyncd; the
+# moment the show ends (or the daemon stops), resume it. The daemon
+# stamps /data/byh_show_state on every transition; a systemd .path
+# unit watches that file and runs the small script below.
+#
+# This is defence-in-depth: even if the operator forgets to keep the
+# Pi offline during a show, the guard prevents the failure mode.
+
+write_timesync_guard_script() {
+  cat >"${TIMESYNC_GUARD_SCRIPT_PATH}" <<'BASH'
+#!/usr/bin/env bash
+# byh-timesync-guard.sh -- pause/resume systemd-timesyncd based on the
+# byh_show_state marker the daemon stamps under host/data.
+#
+# Fired by byh-timesync-guard.path on every write to that marker. Reads
+# it (exactly one of "idle" / "loaded" / "running") and pokes
+# systemctl accordingly. Idempotent: a no-op when the service is
+# already in the desired state.
+
+set -euo pipefail
+
+MARKER="${BYH_SHOW_STATE_MARKER:-/opt/backyardhero/host/data/byh_show_state}"
+SERVICE="systemd-timesyncd.service"
+
+if [[ ! -r "${MARKER}" ]]; then
+  # No marker yet -- daemon hasn't finished its first state flush. Leave
+  # timesyncd alone; the .path unit will fire again as soon as the
+  # daemon writes the file.
+  exit 0
+fi
+
+state="$(head -c 64 "${MARKER}" | tr -d '[:space:]')"
+
+case "${state}" in
+  running|loaded)
+    # Pause time sync while a show is loaded or in progress. We use
+    # `stop` (not `mask`) so a fresh `systemctl start` from the resume
+    # branch below picks it back up without further fanfare.
+    if systemctl is-active --quiet "${SERVICE}"; then
+      systemctl stop "${SERVICE}" \
+        || logger -t byh-timesync-guard "failed to stop ${SERVICE} (state=${state})"
+      logger -t byh-timesync-guard "paused ${SERVICE} (show state=${state})"
+    fi
+    ;;
+  idle|"")
+    if ! systemctl is-active --quiet "${SERVICE}"; then
+      systemctl start "${SERVICE}" \
+        || logger -t byh-timesync-guard "failed to start ${SERVICE} (state=${state})"
+      logger -t byh-timesync-guard "resumed ${SERVICE} (show state=${state:-idle})"
+    fi
+    ;;
+  *)
+    # Unknown content -- err on the side of "let NTP run". This is
+    # what we want if the marker gets corrupted; the worst that
+    # happens is the wall clock might step during a show. With the
+    # daemon's monotonic-clock firing loop, that's bounded damage.
+    logger -t byh-timesync-guard "unknown show state '${state}'; leaving ${SERVICE} alone"
+    ;;
+esac
+BASH
+  chmod 0755 "${TIMESYNC_GUARD_SCRIPT_PATH}"
+}
+
+write_timesync_guard_units() {
+  local marker_path="${REPO_DIR}/host/data/byh_show_state"
+
+  cat >"/etc/systemd/system/${TIMESYNC_GUARD_SERVICE_NAME}" <<EOF
+[Unit]
+Description=Pause systemd-timesyncd while a Backyard Hero show is loaded/running
+Documentation=https://github.com/Os4ivmb/backyardhero
+# Only meaningful once systemd-timesyncd has been started at least
+# once -- we don't want to race with its first activation.
+After=systemd-timesyncd.service
+
+[Service]
+Type=oneshot
+Environment=BYH_SHOW_STATE_MARKER=${marker_path}
+ExecStart=${TIMESYNC_GUARD_SCRIPT_PATH}
+SuccessExitStatus=0
+EOF
+
+  cat >"/etc/systemd/system/${TIMESYNC_GUARD_PATH_NAME}" <<EOF
+[Unit]
+Description=Watch the Backyard Hero show-state marker for NTP-pause transitions
+After=local-fs.target
+
+[Path]
+# PathChanged fires on every write; the daemon only rewrites the
+# marker on actual state transitions so this stays cheap. PathExists
+# covers first-boot when the daemon hasn't started yet.
+PathChanged=${marker_path}
+Unit=${TIMESYNC_GUARD_SERVICE_NAME}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  chmod 0644 "/etc/systemd/system/${TIMESYNC_GUARD_SERVICE_NAME}"
+  chmod 0644 "/etc/systemd/system/${TIMESYNC_GUARD_PATH_NAME}"
+}
+
+setup_timesync_guard() {
+  section "Installing NTP-during-show guard"
+  # Make sure the marker's parent dir exists before the .path unit
+  # tries to watch it; systemd otherwise logs noisy "doesn't exist"
+  # warnings until the daemon first writes the file.
+  local data_dir="${REPO_DIR}/host/data"
+  mkdir -p "${data_dir}"
+
+  write_timesync_guard_script
+  write_timesync_guard_units
+
+  systemctl daemon-reload
+  systemctl enable "${TIMESYNC_GUARD_PATH_NAME}"
+  systemctl restart "${TIMESYNC_GUARD_PATH_NAME}" \
+    || warn "couldn't start ${TIMESYNC_GUARD_PATH_NAME}"
+
+  # Run the guard once now so we converge to the right timesyncd
+  # state regardless of whether a marker file already exists from a
+  # previous boot.
+  systemctl start "${TIMESYNC_GUARD_SERVICE_NAME}" 2>/dev/null || true
+}
+
 setup_ap() {
   [[ "${DO_AP}" -eq 1 ]] || { log "skipping AP setup"; return; }
   section "Configuring WiFi access point on ${AP_IFACE}"
@@ -2064,6 +2302,8 @@ uninstall() {
   systemctl disable --now "${AP_NAT_SERVICE_NAME}"     2>/dev/null || true
   systemctl disable --now "${UPDATE_APPLY_PATH_NAME}"    2>/dev/null || true
   systemctl disable --now "${UPDATE_APPLY_SERVICE_NAME}" 2>/dev/null || true
+  systemctl disable --now "${TIMESYNC_GUARD_PATH_NAME}"    2>/dev/null || true
+  systemctl disable --now "${TIMESYNC_GUARD_SERVICE_NAME}" 2>/dev/null || true
   systemctl disable --now hostapd.service              2>/dev/null || true
   systemctl disable --now dnsmasq.service              2>/dev/null || true
 
@@ -2089,18 +2329,28 @@ uninstall() {
   rm -f "/etc/systemd/system/${AP_NAT_SERVICE_NAME}"
   rm -f "/etc/systemd/system/${UPDATE_APPLY_SERVICE_NAME}"
   rm -f "/etc/systemd/system/${UPDATE_APPLY_PATH_NAME}"
+  rm -f "/etc/systemd/system/${TIMESYNC_GUARD_SERVICE_NAME}"
+  rm -f "/etc/systemd/system/${TIMESYNC_GUARD_PATH_NAME}"
   rm -f "${AP_APPLY_SCRIPT_PATH}"
   rm -f "${UPDATE_APPLY_SCRIPT_PATH}"
+  rm -f "${TIMESYNC_GUARD_SCRIPT_PATH}"
   rm -f "${AP_NAT_SCRIPT_PATH}"
   rm -f "${AP_NAT_SYSCTL_PATH}"
   rm -f "${UDEV_RULE_PATH}"
   rm -f "${HOSTAPD_CONF_PATH}"
   rm -f "${DNSMASQ_CONF_PATH}"
   rm -f /etc/NetworkManager/conf.d/99-byh-unmanaged.conf
+  rm -f /etc/systemd/timesyncd.conf.d/00-byh.conf
   # Leave dhcpcd.conf alone -- removing the denyinterfaces line is
   # delicate and the operator can do it manually if they want wlan0 back.
   # Leave net.ipv4.ip_forward at whatever sysctl says now; reboot will
   # restore the system default once the sysctl drop-in is gone.
+
+  # The NTP guard may have left systemd-timesyncd stopped if the
+  # operator was mid-show when they uninstalled. Make sure it's back
+  # up so the system's wall clock doesn't drift after teardown.
+  systemctl start systemd-timesyncd.service 2>/dev/null || true
+
   systemctl daemon-reload
   udevadm control --reload-rules 2>/dev/null || true
   log "uninstall complete. The repo at ${REPO_DIR:-?} and the docker image"
@@ -2224,6 +2474,8 @@ main() {
   prepull_image
   install_host_service
   install_update_service
+  setup_time_sync
+  setup_timesync_guard
   setup_ap
 
   print_summary

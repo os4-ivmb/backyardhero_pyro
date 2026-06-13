@@ -23,6 +23,16 @@ SERIAL_PORT = "/dev/ttyACM0"
 BAUD_RATE = 115200
 DB_PATH = "/data/backyardhero.db"
 STATE_FILE_PATH = "/data/state"
+# One-line marker file the daemon stamps on every show-state transition.
+# Contents are exactly one of: "idle" | "loaded" | "running". A
+# systemd .path unit on the host (byh-timesync-guard.path, installed by
+# host/run/pi/install.sh) watches this file and pauses
+# systemd-timesyncd while a show is loaded or running so the wall
+# clock can't step underneath the daemon mid-show. We deliberately
+# write a SEPARATE file from /data/state so the host watcher has a
+# tight, parse-free trigger -- otherwise every per-tick state write
+# would fire the .path unit and we'd thrash the timesyncd service.
+SHOW_STATE_MARKER_PATH = "/data/byh_show_state"
 # Optional unix datagram socket the WS server can bind. When the daemon's
 # state changes we fire a packet at it so the WS server doesn't have to
 # wait for inotify on the state file. Falls back silently to file-based
@@ -138,10 +148,29 @@ class GPIOHandler:
     def __init__(self, chip_name="/dev/gpiochip0"):
         # self.chip = gpiod.Chip(chip_name)
         # self.lines = {}
+        # Last raw reading reported by the dongle for each physical switch.
         self.sgpio = {
             'arm': LOW,
             'switch': LOW,
             'manfire': LOW
+        }
+        # Software overrides for the three physical dongle switches. Each
+        # entry is either None (override inactive -> the real dongle value
+        # passes through) or a forced GPIO level (LOW/HIGH). The override is
+        # applied transparently in read_key(), so the ENTIRE daemon -- the
+        # monitor_switch state machine, the manual-fire gate, and the state
+        # file -- sees the forced value with no per-call-site awareness.
+        # Because monitor_switch detects edges by diffing read_key() against
+        # its last sample, flipping an override produces the same HIGH<->LOW
+        # transition a physical switch throw would, so start/arm/manfire
+        # logic fires identically.
+        #
+        # Deliberately in-memory only (never persisted): a forced ARM or
+        # MANUAL FIRE must NOT survive a daemon restart.
+        self.overrides = {
+            'arm': None,
+            'switch': None,
+            'manfire': None
         }
         pass
     def setup_line(self, pin, consumer="pull_up_input"):
@@ -150,13 +179,48 @@ class GPIOHandler:
         return False
 
     def read_key(self, key):
-        if(key in self.sgpio):
-            return self.sgpio.get(key)
-        else:
+        if key not in self.sgpio:
             print("Unknown Read Key")
+            return
+        ov = self.overrides.get(key)
+        if ov is not None:
+            return ov
+        return self.sgpio.get(key)
+
+    def read_raw(self, key):
+        """Unmodified value last reported by the dongle, ignoring any
+        active software override. Used by the state file so the UI can
+        contrast hardware-vs-effective."""
+        return self.sgpio.get(key)
 
     def set_gpio(self, gpio_dict):
         self.sgpio = gpio_dict
+
+    def set_override(self, key, active, on):
+        """Force (or release) a switch input. `on` is the human-facing
+        "switch engaged" boolean; the physical switches are active-low
+        (INPUT_PULLUP), so engaged maps to LOW. Returns False for an
+        unknown key."""
+        if key not in self.overrides:
+            print(f"Unknown override key '{key}'")
+            return False
+        if active:
+            self.overrides[key] = LOW if on else HIGH
+        else:
+            self.overrides[key] = None
+        return True
+
+    def override_snapshot(self):
+        """Serializable view of the overrides for the state file: per
+        switch, whether an override is active and (if so) the forced
+        human-facing on/off value."""
+        return {
+            key: {
+                "active": ov is not None,
+                "on": (ov == LOW) if ov is not None else None,
+            }
+            for key, ov in self.overrides.items()
+        }
 
     def release_all(self):
         pass
@@ -244,6 +308,10 @@ class FireworkDaemon:
         self._state_dirty = threading.Event()
         self._state_pub_sock = None
         self._state_pub_warned = False
+        # Last value we stamped into /data/byh_show_state. Cached so
+        # update_state_file() only writes the marker file when the
+        # high-level show state actually transitions, not on every tick.
+        self._last_show_state_written = None
 
         self.load_config()
 
@@ -287,6 +355,51 @@ class FireworkDaemon:
             if not self._state_pub_warned:
                 print(f"State socket publish failed (will keep trying): {e}")
                 self._state_pub_warned = True
+
+    def _publish_show_state_marker(self, show_loaded, show_running):
+        """Write /data/byh_show_state when the high-level show state changes.
+
+        Three values are observable:
+          - "running": run_show() is in the firing loop OR countdown.
+          - "loaded":  a show is loaded but not currently running. The
+                      operator is staged but hasn't hit start yet.
+          - "idle":    nothing is loaded; safe for NTP to step the
+                      wall clock.
+
+        The host's byh-timesync-guard.path unit watches this file and
+        stops/starts systemd-timesyncd accordingly. We only write when
+        the value transitions; the .path unit fires on every write so
+        a per-tick write would hammer systemctl.
+
+        Atomic via tmp + os.replace so a concurrent host read can't see
+        a zero-byte or half-written file.
+        """
+        if show_running:
+            new_state = "running"
+        elif show_loaded:
+            new_state = "loaded"
+        else:
+            new_state = "idle"
+
+        if new_state == self._last_show_state_written:
+            return
+
+        marker_dir = os.path.dirname(SHOW_STATE_MARKER_PATH) or "."
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            prefix=".byh_show_state.", suffix=".tmp", dir=marker_dir
+        )
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                f.write(new_state + "\n")
+            os.replace(tmp_path, SHOW_STATE_MARKER_PATH)
+            tmp_path = None
+            self._last_show_state_written = new_state
+        finally:
+            if tmp_path is not None and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
     def state_flusher(self):
         """Coalesce state-dirty signals into snapshot writes.
@@ -744,6 +857,26 @@ class FireworkDaemon:
                 if(repeat_ct==0):
                     repeat_ct=6
                 self.fire_repetition = repeat_ct
+            elif command['type'] == 'set_gpio_override':
+                # Software override for a physical dongle switch input
+                # (arm / switch / manfire). `active` toggles the override
+                # on/off; `on` is the forced human-facing value when
+                # active. Applied in GPIOHandler.read_key so the next
+                # monitor_switch tick (<=100ms) picks up the edge and runs
+                # the normal arm/start/manfire transition logic.
+                key = command.get('key')
+                active = bool(command.get('active', False))
+                on = bool(command.get('on', False))
+                if gpio_handler.set_override(key, active, on):
+                    if active:
+                        print(f"GPIO override SET: {key} -> {'ON' if on else 'OFF'}")
+                    else:
+                        print(f"GPIO override CLEARED: {key}")
+                    # Publish immediately so the override bar reacts without
+                    # waiting on the next monitor_switch tick.
+                    self.mark_state_dirty()
+                else:
+                    self.write_error(f"Invalid GPIO override key: {key!r}")
             elif command['type'] == 'reload_receivers':
                 # UI dropped this after editing the Receivers DB table.
                 # Re-read from DB and reconcile the dongle's poll list.
@@ -1218,6 +1351,24 @@ class FireworkDaemon:
             "device_is_armed": gpio_handler.read_key(ARMING_GPIO_KEY) == LOW,
             "manual_fire_active": gpio_handler.read_key(MAN_FIRE_GPIO_KEY) == LOW,
             "start_sw_active": self.start_sw_active,
+            # Switch-input visibility for the override UI. `effective` is
+            # what the daemon actually acts on (post-override); `hardware`
+            # is the raw dongle reading; `overrides` says which inputs are
+            # currently being forced by software and to what value. All
+            # three switches are active-low, so "on"/engaged == LOW.
+            "gpio": {
+                "effective": {
+                    "arm": gpio_handler.read_key(ARMING_GPIO_KEY) == LOW,
+                    "switch": gpio_handler.read_key(SWITCH_GPIO_KEY) == LOW,
+                    "manfire": gpio_handler.read_key(MAN_FIRE_GPIO_KEY) == LOW,
+                },
+                "hardware": {
+                    "arm": gpio_handler.read_raw(ARMING_GPIO_KEY) == LOW,
+                    "switch": gpio_handler.read_raw(SWITCH_GPIO_KEY) == LOW,
+                    "manfire": gpio_handler.read_raw(MAN_FIRE_GPIO_KEY) == LOW,
+                },
+                "overrides": gpio_handler.override_snapshot(),
+            },
             "fire_check_failures": self.fire_check_failures,
             "proto_handler_errors": self.protocol_handler is not None and self.protocol_handler.errors,
             "proto_handler_status": self.protocol_handler is not None and self.protocol_handler.status.name,
@@ -1301,6 +1452,21 @@ class FireworkDaemon:
         # robust fallback. Order matters because the file write does
         # disk I/O which can take milliseconds on a busy SD card.
         self._publish_state_to_socket(state_bytes)
+
+        # Stamp the show-state marker for the host NTP guard. We pull
+        # the booleans straight out of the snapshot we just built so
+        # we never disagree with what the rest of the system thinks
+        # the show is doing.
+        try:
+            self._publish_show_state_marker(
+                show_loaded=bool(state.get("show_loaded")),
+                show_running=bool(state.get("show_running")),
+            )
+        except Exception as e:
+            # Marker write failure is non-fatal: a stuck "loaded"
+            # marker just means timesyncd stays paused a bit longer
+            # than necessary. Don't let it block the state file write.
+            print(f"show-state marker write failed: {e}")
 
         # Atomic file publish for any out-of-process reader and for the
         # WS server's inotify fallback. We deliberately do NOT fsync()

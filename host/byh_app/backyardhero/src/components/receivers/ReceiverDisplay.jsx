@@ -1,5 +1,5 @@
 import useAppStore from "@/store/useAppStore"
-import useStateAppStore from "@/store/useStateAppStore";
+import useStateAppStore, { serverElapsedMs } from "@/store/useStateAppStore";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { 
   MdBatteryFull, 
@@ -21,7 +21,13 @@ import { FaSpinner } from 'react-icons/fa';
 import { FaCircleQuestion, FaTriangleExclamation } from 'react-icons/fa6';
 import ShowHealth from "../homepanel/ShowHealth";
 import { isPollableReceiver } from "@/util/receivers";
-import { SHOW_RECEIVER_STATUS } from "@/util/showReceivers";
+import {
+  SHOW_RECEIVER_STATUS,
+  isBilusocnEntry,
+  BILUSOCN_ZONE_CUES,
+  BILUSOCN_RANGE_STARTS,
+  BILUSOCN_RANGE_LEN,
+} from "@/util/showReceivers";
 import useShowReceiverVerification from "@/util/useShowReceiverVerification";
 
 // FW_VERSION: Frontend version tracking for ReceiverDisplay component
@@ -125,7 +131,6 @@ function buildCuesData(ident, count) {
 // still live in the DB so operators can recognise + delete them.
 // ---------------------------------------------------------------------------
 const BILUSOCN_TYPE = 'BILUSOCN_433_TX_ONLY';
-const BILUSOCN_RANGE_LEN = 4;
 const DEFAULT_BILUSOCN_ZONE = 1;
 const DEFAULT_BILUSOCN_RANGE_START = 1;
 
@@ -185,6 +190,16 @@ function SingleReceiver({
   const [popup, setPopup] = useState(null);
   const receiverRef = useRef(null);
 
+  // The freshness calculation below compares `Date.now()` against
+  // `receiver.status.lmt` which the daemon stamps with the Pi's wall
+  // clock. On an offline-boot Pi (no NTP, no RTC) that clock can be
+  // hours behind the browser, making every lmt look stale. Subscribe
+  // to just `_clockOffsetMs` so the calc lives in a single clock domain
+  // without triggering a re-render on every state tick.
+  const clockOffsetMs = useStateAppStore(
+    (s) => s.stateData?._clockOffsetMs ?? 0,
+  );
+
   const handleTargetClick = (target, item, event) => {
     if (item) {
       const rect = event.target.getBoundingClientRect();
@@ -201,6 +216,13 @@ function SingleReceiver({
       setPopup(null);
     }
   };
+
+  // Defensive: callers occasionally pass undefined when the row they index
+  // by `id` doesn't exist in the local `receivers` map (e.g. Bilusocn-zone
+  // show entries, which are intentionally not DB-backed and shouldn't reach
+  // this component -- see filter on the verification render loop below).
+  // Hooks above ran unconditionally so this early return is safe.
+  if (!receiver) return null;
 
   let isSynced = false;
   if(receiver.drift){
@@ -225,7 +247,7 @@ function SingleReceiver({
   let isConnectionGood;
   let freshness = null;
   if (receiver.status && receiver.status.lmt) {
-    freshness = Date.now() - receiver.status.lmt;
+    freshness = Date.now() - clockOffsetMs - receiver.status.lmt;
     isConnectionGood = (freshness <= 10000);
   } else {
     isConnectionGood = receiver.connectionStatus === "good";
@@ -688,6 +710,152 @@ function ErrorReceiverTile({ entry, kind }) {
   );
 }
 
+// Show-owned Bilusocn 433MHz zone tile. Unlike DB-backed receivers, these
+// entries live entirely on the show row (kind: 'bilusocn', id = zone number
+// as string) -- the daemon synthesizes ephemeral 4-cue receiver rows at
+// stage time, one per dipswitch range tiling the 12-cue zone. There is no
+// live status to surface here (no battery, no drift, no continuity --
+// one-way TX), so the tile visualises only the physical 4-cue module ranges
+// that this show actually uses.
+function BilusocnZoneTile({ entry, items = [] }) {
+  const zone = String(entry.id);
+  const label = entry.label || `Bilusocn zone ${zone}`;
+  const [popup, setPopup] = useState(null);
+  const tileRef = useRef(null);
+  const assignedItemsByTarget = useMemo(() => {
+    const out = {};
+    for (const item of items) {
+      if (!item || String(item.zone) !== zone) continue;
+      const target = parseInt(item.target, 10);
+      if (Number.isFinite(target) && target > 0) {
+        out[target] = item;
+      }
+    }
+    return out;
+  }, [items, zone]);
+  const usedRanges = BILUSOCN_RANGE_STARTS
+    .map((start) => {
+      const targets = Array.from(
+        { length: BILUSOCN_RANGE_LEN },
+        (_, i) => start + i,
+      );
+      return { start, targets };
+    })
+    .filter(({ targets }) => targets.some((target) => assignedItemsByTarget[target]));
+
+  const handleTargetClick = (target, item, event) => {
+    if (!item) {
+      setPopup(null);
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    const containerRect = tileRef.current.getBoundingClientRect();
+    setPopup({
+      target,
+      item,
+      position: {
+        top: rect.top - containerRect.top,
+        left: rect.left - containerRect.left + rect.width / 2,
+      },
+    });
+  };
+
+  return (
+    <div
+      ref={tileRef}
+      className="border rounded-xl p-4 bg-gray-800 text-white shadow-md border-amber-500/60 flex flex-col gap-3 w-72 relative"
+    >
+      <div className="flex items-start justify-between gap-2">
+        <h2 className="text-lg font-semibold leading-tight">
+          <span>{label}</span>
+        </h2>
+        <span className="shrink-0 rounded-md border border-amber-500/50 bg-amber-950/40 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
+          Bilusocn
+        </span>
+      </div>
+      <div className="text-xs text-amber-200/90">
+        Show-owned 433MHz zone · one-way TX
+      </div>
+      <div>
+        <div className="text-xs text-gray-400 mb-1">
+          Zone {zone} · {usedRanges.length || 0}/{BILUSOCN_RANGE_STARTS.length} modules used
+        </div>
+        {usedRanges.length > 0 ? (
+          <div className="flex flex-col gap-2">
+            {usedRanges.map(({ start, targets }) => (
+              <div
+                key={start}
+                className="rounded-md border border-amber-500/30 bg-gray-900/50 px-2 py-2"
+              >
+                <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-wide text-amber-200/70">
+                  <span>Module</span>
+                  <span className="font-mono text-xs normal-case tracking-normal text-white">
+                    {start}-{start + BILUSOCN_RANGE_LEN - 1}
+                  </span>
+                </div>
+                <div className="grid grid-cols-4 gap-2">
+                  {targets.map((target) => {
+                    const item = assignedItemsByTarget[target];
+                    return (
+                      <div
+                        key={target}
+                        className={`h-9 rounded-lg text-sm text-black flex items-center justify-center ${
+                          item
+                            ? "bg-amber-300 ring-2 ring-purple-700 cursor-pointer"
+                            : "bg-amber-100/70 cursor-default"
+                        }`}
+                        onClick={(e) => handleTargetClick(target, item, e)}
+                        title={item?.name || `Cue ${target}`}
+                      >
+                        {target}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-md border border-gray-700 bg-gray-900/50 px-3 py-2 text-xs text-gray-500">
+            No cues assigned in this show.
+          </div>
+        )}
+      </div>
+      <div className="text-[11px] text-gray-500 leading-snug">
+        Owned by the staged show. The daemon spins up ephemeral receiver
+        rows for used module ranges at stage time, so there's nothing to
+        verify against the DB.
+      </div>
+      {popup && (
+        <div
+          className="absolute bg-gray-700 text-white p-4 rounded-md shadow-lg border border-gray-500"
+          style={{
+            top: `${popup.position.top}px`,
+            left: `${popup.position.left}px`,
+            transform: "translate(-50%, -100%)",
+            zIndex: 10,
+          }}
+        >
+          <h4 className="text-sm font-semibold">{popup.item.name}</h4>
+          {popup.item.image && (
+            <img
+              src={popup.item.image}
+              alt={popup.item.name}
+              className="mt-2 w-24 h-24 object-cover rounded-md"
+            />
+          )}
+          <button
+            className="mt-2 px-2 py-1 text-sm bg-red-500 rounded-md hover:bg-red-600"
+            onClick={() => setPopup(null)}
+          >
+            Close
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ReceiverDisplay({ setCurrentTab }) {
     const {
       stagedShow,
@@ -776,10 +944,14 @@ export default function ReceiverDisplay({ setCurrentTab }) {
     // The DB is iterated as the canonical list — fw_state status is overlaid
     // when present.
     const receivers = useMemo(() => {
+      const defs =
+        dbReceivers && Object.keys(dbReceivers).length > 0
+          ? dbReceivers
+          : systemConfig?.receivers;
       const live = stateData.fw_state?.receivers || {};
       const out = {};
-      for (const id of Object.keys(dbReceivers || {})) {
-        const def = dbReceivers[id];
+      for (const id of Object.keys(defs || {})) {
+        const def = defs[id];
         const liveRow = live[id] || {};
         out[id] = {
           ...def,
@@ -796,7 +968,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
         };
       }
       return out;
-    }, [dbReceivers, stateData.fw_state?.receivers]);
+    }, [dbReceivers, systemConfig?.receivers, stateData.fw_state?.receivers]);
 
     useEffect(() => {
       // Build a lookup table for zones and targets to receivers
@@ -1154,7 +1326,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       const freshnessSegments = pollableEntries.map(([ident, receiver]) => {
         const lmt = receiver?.status?.lmt;
         const fresh = (typeof lmt === 'number')
-          ? Date.now() - lmt
+          ? serverElapsedMs(lmt, stateData)
           : null;
         return { ident, tone: freshnessTone(fresh) };
       });
@@ -1164,7 +1336,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       // currently-talking nodes.
       const onlineReceivers = pollableEntries.filter(([_, receiver]) => {
         if (!receiver.status || !receiver.status.lmt) return false;
-        return Date.now() - receiver.status.lmt <= 10000;
+        return serverElapsedMs(receiver.status.lmt, stateData) <= 10000;
       });
 
       if (onlineReceivers.length === 0) {
@@ -1511,6 +1683,22 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                 <div className="flex flex-wrap gap-5 p-4 justify-center">
                     {verification.results.map((r, i) => {
                         const id = r.entry.id;
+                        // Bilusocn-zone entries aren't DB-backed (the show
+                        // owns them; the daemon synthesizes ephemeral rows
+                        // at stage time). They have no live status to
+                        // verify, but we still render a tile so the
+                        // operator can see which zones the staged show
+                        // will fire and which physical module ranges
+                        // need to be wired up.
+                        if (isBilusocnEntry(r.entry)) {
+                            return (
+                                <BilusocnZoneTile
+                                    key={`bilu-${id}-${i}`}
+                                    entry={r.entry}
+                                    items={stagedShow?.items}
+                                />
+                            );
+                        }
                         if (r.status === SHOW_RECEIVER_STATUS.MISSING ||
                             r.status === SHOW_RECEIVER_STATUS.DISABLED) {
                             return (
