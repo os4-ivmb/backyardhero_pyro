@@ -23,7 +23,11 @@ jobs:
           - os: macos-14
             label: macOS (arm64)
             ebflags: --mac --arm64
-          - os: macos-13
+          # macos-13 (the old Intel image) was retired on 2025-12-04, so jobs
+          # pinned to it queue forever with no runner. macos-15-intel is
+          # GitHub's replacement x86_64 image (last Intel runner, supported
+          # until ~Aug 2027; migrate this leg to Apple Silicon before then).
+          - os: macos-15-intel
             label: macOS (x64)
             ebflags: --mac --x64
           # Pinned to windows-2022 (VS 2022 / v17). windows-latest moved to
