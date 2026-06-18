@@ -26,7 +26,12 @@ jobs:
           - os: macos-13
             label: macOS (x64)
             ebflags: --mac --x64
-          - os: windows-latest
+          # Pinned to windows-2022 (VS 2022 / v17). windows-latest moved to
+          # Windows 2025, which ships VS "v18"; the node-gyp 10.1.0 bundled
+          # with Node 20 can't parse it (ERR_CHILD_PROCESS_STDIO_MAXBUFFER
+          # while probing, then "could not find Visual Studio 2017 or newer"),
+          # breaking the better-sqlite3 native build. VS2022 is handled fine.
+          - os: windows-2022
             label: Windows (x64)
             ebflags: --win --x64
 
