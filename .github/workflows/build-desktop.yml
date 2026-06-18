@@ -23,13 +23,14 @@ jobs:
           - os: macos-14
             label: macOS (arm64)
             ebflags: --mac --arm64
-          # macos-13 (the old Intel image) was retired on 2025-12-04, so jobs
-          # pinned to it queue forever with no runner. macos-15-intel is
-          # GitHub's replacement x86_64 image (last Intel runner, supported
-          # until ~Aug 2027; migrate this leg to Apple Silicon before then).
-          - os: macos-15-intel
-            label: macOS (x64)
-            ebflags: --mac --x64
+          # No macOS x64 (Intel) leg. The only GitHub Intel image left
+          # (macos-15-intel, retiring ~Aug 2027) has no prebuilt
+          # llvmlite/numba wheel for the embedded x86_64 Python, so the
+          # librosa audio stack falls back to a from-source llvmlite build
+          # that needs an LLVM toolchain the runner doesn't provide -- it
+          # fails at the cmake step. Apple Silicon covers modern Macs;
+          # revisit only if Intel support is actually needed (would require
+          # provisioning LLVM, or dropping the audio stack for that arch).
           # Pinned to windows-2022 (VS 2022 / v17). windows-latest moved to
           # Windows 2025, which ships VS "v18"; the node-gyp 10.1.0 bundled
           # with Node 20 can't parse it (ERR_CHILD_PROCESS_STDIO_MAXBUFFER
