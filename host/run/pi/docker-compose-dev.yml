@@ -19,13 +19,13 @@ services:
     volumes:
       - ../../data:/data
       - ../../config:/config
-      # Mirror the prod compose's host-shared /tmp/* mounts. Strictly
-      # speaking only /tmp/ota_staging is required (it's the firmware
-      # handoff for dongle flash); /tmp/d_cmd is kept symmetric so an
-      # operator can also drop debug command files from the host shell
-      # to talk to the daemon, exactly like in prod.
+      # /tmp/d_cmd is kept symmetric with prod so an operator can drop
+      # debug command files from the host shell to talk to the daemon.
+      # NOTE: no /tmp/ota_staging bind mount needed -- the daemon ships the
+      # dongle firmware to the host-side bridge inline (content_b64) rather
+      # than via a shared path, so the bridge never reads the container's
+      # staging dir directly.
       - /tmp/d_cmd:/tmp/d_cmd
-      - /tmp/ota_staging:/tmp/ota_staging
       - ../../pythings:/app/pythings
       - ../../byh_app/backyardhero:/app/byh_app/
       # Anonymous volumes keep the container's own Linux-built

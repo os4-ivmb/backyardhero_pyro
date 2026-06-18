@@ -29,13 +29,11 @@ services:
       # polls. Mounting it from the host as well lets an operator drop
       # debug commands directly without going through the UI.
       - /tmp/d_cmd:/tmp/d_cmd
-      # /tmp/ota_staging is REQUIRED for the dongle-flash flow: the
-      # Next.js handler (in the container) writes uploaded firmware
-      # bins under /tmp/ota_staging/<job>/<kind>.bin, then tells the
-      # host-side flash_server their paths. The host has to be able
-      # to read those same paths for esptool. See the comment in
-      # host/byh_app/.../api/system/dongle_flash.js.
-      - /tmp/ota_staging:/tmp/ota_staging
+      # NOTE: no /tmp/ota_staging bind mount needed. The daemon reads the
+      # staged firmware back out of the container's own staging dir and
+      # ships it to the host-side bridge inline (content_b64) rather than
+      # via a shared path, so the bridge never reads the container's
+      # staging dir directly. See host/byh_app/.../api/system/dongle_flash.js.
     ports:
       - "80:1776"    # Friendly URL: http://backyardhero/
       - "1776:1776"  # Historical URL: http://<host>:1776

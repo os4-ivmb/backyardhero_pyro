@@ -62,11 +62,15 @@ plenty for a transfer that takes ~30s end to end.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -346,7 +350,7 @@ class FlashServerState:
             self._next_job_seq += 1
         return f"dflash-{int(time.time())}-{seq}"
 
-    def submit(self, mode: str, files: dict[str, str], file_names: dict[str, str]) -> tuple[bool, str, Optional[FlashJob]]:
+    def submit(self, mode: str, files: dict[str, str], file_names: dict[str, str], cleanup_dir: Optional[str] = None) -> tuple[bool, str, Optional[FlashJob]]:
         with self._lock:
             if self.current_job is not None and self.current_job.phase not in (
                 "done", "error", "aborted"
@@ -355,6 +359,10 @@ class FlashServerState:
             job_id = f"dflash-{int(time.time())}-{self._next_job_seq}"
             self._next_job_seq += 1
             job = FlashJob(job_id, mode=mode, files=files, file_names=file_names)
+            # Temp dir holding bridge-staged firmware bytes (set when the
+            # daemon sent inline content_b64). The worker removes it when the
+            # job finishes so we don't leak ~0.5MB per flash into the OS temp.
+            job._cleanup_dir = cleanup_dir
             self.current_job = job
         return True, "ok", job
 
@@ -619,6 +627,11 @@ def _run_job(job: FlashJob, state: FlashServerState) -> None:
             state.stash_finished(job.snapshot())
         except Exception:
             pass
+        # Drop the bridge-local staging dir (inline content_b64 path). esptool
+        # has already read the bytes by now, regardless of success/abort.
+        cleanup_dir = getattr(job, "_cleanup_dir", None)
+        if cleanup_dir:
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -713,30 +726,70 @@ class _FlashHandler(BaseHTTPRequestHandler):
 
         files_raw = body.get("files") or {}
         if not isinstance(files_raw, dict) or not files_raw:
-            self._respond(400, {"error": "files must be a non-empty {offset: path} object"})
+            self._respond(400, {"error": "files must be a non-empty {offset: ...} object"})
             return
 
-        # Normalise offset keys to lowercase 0x... and validate paths.
+        # Resolve each offset to a file readable by THIS (bridge) process.
+        # Two source shapes are accepted:
+        #   * {"content_b64": "...", "name": "..."} -- inline firmware bytes.
+        #     The bridge writes them into its OWN local staging dir. This is
+        #     what the daemon sends, because the container and the host-native
+        #     bridge do NOT share a filesystem on Docker Desktop / Windows
+        #     (the dongle's /dev port is owned by a native Windows process,
+        #     while the staged file lives in the Linux WSL2 container). The
+        #     old {"path": ...} shared-bind-mount assumption only ever held
+        #     on macOS / Linux where the bridge is native to the mount host.
+        #   * {"path": "..."} or a bare string -- a path already readable by
+        #     this process (CLI / manual curl callers on the same host).
         files: dict[str, str] = {}
         file_names: dict[str, str] = {}
+        staging_dir: Optional[str] = None
         for offset, value in files_raw.items():
-            if isinstance(value, dict):
-                path = value.get("path")
-                name = value.get("name") or (os.path.basename(path) if path else "")
-            else:
-                path = value
-                name = os.path.basename(path) if path else ""
-            if not isinstance(path, str) or not path:
-                self._respond(400, {"error": f"offset {offset!r} missing path"})
-                return
             try:
                 offset_norm = "0x{:x}".format(int(offset, 16))
             except (TypeError, ValueError):
                 self._respond(400, {"error": f"bad offset {offset!r} (want hex like 0x10000)"})
                 return
-            if not os.path.isfile(path):
-                self._respond(400, {"error": f"offset {offset_norm}: file not found at {path}"})
-                return
+
+            content_b64 = value.get("content_b64") if isinstance(value, dict) else None
+            if isinstance(value, dict):
+                path = value.get("path")
+                name = value.get("name") or (os.path.basename(path) if path else f"{offset_norm}.bin")
+            else:
+                path = value
+                name = os.path.basename(path) if path else f"{offset_norm}.bin"
+
+            if content_b64:
+                try:
+                    blob = base64.b64decode(content_b64, validate=True)
+                except (binascii.Error, ValueError) as e:
+                    self._respond(400, {"error": f"offset {offset_norm}: bad content_b64 ({e})"})
+                    return
+                if not blob:
+                    self._respond(400, {"error": f"offset {offset_norm}: content_b64 decoded empty"})
+                    return
+                if staging_dir is None:
+                    staging_dir = tempfile.mkdtemp(prefix="byh_dflash_")
+                # Name the on-disk file by offset so a full (multi-file)
+                # flash can't collide; the display name is tracked separately.
+                local_path = os.path.join(staging_dir, f"{offset_norm}.bin")
+                try:
+                    with open(local_path, "wb") as fh:
+                        fh.write(blob)
+                except OSError as e:
+                    if staging_dir:
+                        shutil.rmtree(staging_dir, ignore_errors=True)
+                    self._respond(500, {"error": f"offset {offset_norm}: could not stage bytes ({e})"})
+                    return
+                path = local_path
+            else:
+                if not isinstance(path, str) or not path:
+                    self._respond(400, {"error": f"offset {offset!r} missing path or content_b64"})
+                    return
+                if not os.path.isfile(path):
+                    self._respond(400, {"error": f"offset {offset_norm}: file not found at {path}"})
+                    return
+
             files[offset_norm] = path
             file_names[offset_norm] = name
 
@@ -758,9 +811,13 @@ class _FlashHandler(BaseHTTPRequestHandler):
                 return
 
         ok, msg, job = self._state().submit(
-            mode=mode, files=files, file_names=file_names
+            mode=mode, files=files, file_names=file_names, cleanup_dir=staging_dir
         )
         if not ok or job is None:
+            # Job rejected (another in flight): we own the staged bytes, so
+            # don't leak them.
+            if staging_dir:
+                shutil.rmtree(staging_dir, ignore_errors=True)
             self._respond(409, {"error": msg})
             return
 

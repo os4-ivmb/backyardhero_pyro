@@ -25,10 +25,18 @@
 **/venv
 **/.venv
 
-# Local data + secrets that shouldn't bake into the image
+# Local data + secrets that shouldn't bake into the image.
+# NOTE: .env.production MUST be excluded -- it belongs to the CLOUD build
+# (BYH_PROFILE=cloud, Supabase secrets) and is installed separately on the
+# cloud box by dynamicsite/deploy. If it leaks into this on-device image,
+# `next build` auto-loads it (next build always runs as NODE_ENV=production),
+# baking in basePath=/builder so the app 404s at "/" -- and it bakes the
+# Supabase secret key into a distributed image.
 data/
 **/.env
 **/.env.local
+**/.env.development
+**/.env.production
 **/.env.*.local
 
 # Editor / OS noise

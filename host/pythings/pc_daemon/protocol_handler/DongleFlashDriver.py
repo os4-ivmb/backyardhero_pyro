@@ -27,6 +27,7 @@ without a separate polling channel.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import threading
@@ -187,13 +188,25 @@ class DongleFlashDriver:
                 phase = (self._snapshot or {}).get("phase")
             return False, f"a dongle flash is already in flight (phase={phase})"
 
-        body = {
-            "mode": mode,
-            "files": {
-                offset: {"path": path, "name": file_names.get(offset, os.path.basename(path))}
-                for offset, path in files.items()
-            },
-        }
+        # Embed the firmware bytes inline rather than passing a filesystem
+        # path. The bridge runs as a host-native process and does NOT share a
+        # filesystem with this (containerised) daemon on Docker Desktop /
+        # Windows -- a path like /tmp/ota_staging/.../app.bin resolves to a
+        # different place (or nowhere) for the native bridge. Shipping the
+        # bytes makes the flow filesystem-agnostic across every platform.
+        files_payload = {}
+        for offset, path in files.items():
+            try:
+                with open(path, "rb") as fh:
+                    content = fh.read()
+            except OSError as e:
+                return False, f"could not read staged firmware {path}: {e}"
+            files_payload[offset] = {
+                "name": file_names.get(offset, os.path.basename(path)),
+                "content_b64": base64.b64encode(content).decode("ascii"),
+            }
+
+        body = {"mode": mode, "files": files_payload}
 
         try:
             resp = self._http_post("/flash_dongle", body)

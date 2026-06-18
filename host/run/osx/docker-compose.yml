@@ -20,13 +20,11 @@ services:
       - ../../data:/data
       - ../../config:/config
       - /tmp/d_cmd:/tmp/d_cmd
-      # Dongle-update staging dir, bind-mounted at the same path on
-      # both sides. The Next.js handler (in the container) drops the
-      # uploaded firmware bins under /tmp/ota_staging/<job>/<kind>.bin;
-      # the host-side bridge process reads those same paths and hands
-      # them to esptool. Without this bind mount the bridge sees an
-      # empty directory and rejects the dongle flash job.
-      - /tmp/ota_staging:/tmp/ota_staging
+      # NOTE: no /tmp/ota_staging bind mount needed. The daemon reads the
+      # staged firmware back out of the container's own staging dir and
+      # ships it to the host-side bridge inline (content_b64) rather than
+      # via a shared path, so the bridge never reads the container's
+      # staging dir directly.
     ports:
       - "1776:1776"  # Next.js app
       - "8090:8090"  # WebSocket server

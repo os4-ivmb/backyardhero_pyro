@@ -21,12 +21,11 @@ services:
       # it from the host so an operator can drop debug commands from
       # the mac shell -- matching the prod compose for symmetry.
       - /tmp/d_cmd:/tmp/d_cmd
-      # /tmp/ota_staging: required for the dongle-flash flow. Next.js
-      # writes uploaded firmware bins here, then hands the path to the
-      # host-side bridge so esptool can read them. (Receiver OTA also
-      # uses this dir, but doesn't strictly need the bind mount since
-      # both daemon + Next.js are in the container.)
-      - /tmp/ota_staging:/tmp/ota_staging
+      # NOTE: no /tmp/ota_staging bind mount needed. The daemon reads the
+      # staged firmware back out of the container's own staging dir and
+      # ships it to the host-side bridge inline (content_b64) rather than
+      # via a shared path, so the bridge never reads the container's
+      # staging dir directly.
       - ../../pythings:/app/pythings
       - ../../byh_app/backyardhero:/app/byh_app/
       # Anonymous volumes shadow the host bind mount so the container

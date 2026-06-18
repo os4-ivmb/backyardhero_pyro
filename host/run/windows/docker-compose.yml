@@ -13,13 +13,13 @@ services:
       - ../../data:/data
       - ../../config:/config
       - /tmp/d_cmd:/tmp/d_cmd
-      # Dongle-update staging dir, bind-mounted at the same path on
-      # both sides. Next.js (in the container) writes uploaded
-      # firmware bins here; the host-side bridge process reads the
-      # same paths when invoking esptool. Docker Desktop on Windows
-      # maps /tmp/* through its WSL2 backend, same way it does for
-      # /tmp/d_cmd above.
-      - /tmp/ota_staging:/tmp/ota_staging
+      # NOTE: there is deliberately NO /tmp/ota_staging bind mount here.
+      # On Windows the bridge runs host-native (it owns COM<N>) while
+      # this container runs inside the WSL2 VM, so the two share no
+      # filesystem -- a staged container path like /tmp/ota_staging/...
+      # is unreachable for the native bridge. The daemon instead ships
+      # the dongle firmware bytes to the bridge inline (content_b64), so
+      # no shared staging dir is needed.
     ports:
       - "1776:1776"  # Next.js app
       - "8090:8090"  # WebSocket server

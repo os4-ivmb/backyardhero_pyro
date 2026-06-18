@@ -184,6 +184,7 @@
 //     lastChunk+1 instead of restarting the whole transfer.
 //   * H8: receiverReadAddress() XORs RF_ADDR_ENTROPY_MASK to scatter the
 //     near-all-zero nRF24 address bytes. MUST match dongle FW v20+.
+// 25 why not.
 #define BOARD_VERISON 9
 #define FW_VERSION 25
 

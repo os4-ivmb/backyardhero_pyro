@@ -2,10 +2,11 @@ import fs from 'fs';
 import path from 'path';
 import { ensureHardware } from '@/util/apiGuards';
 // Staging + command dirs come from the central resolver. Under Docker these
-// resolve to /tmp/ota_staging and /tmp/d_cmd (bind-mounted so the host-side
-// bridge reads the same paths back out for esptool); under the desktop bundle
-// the Electron supervisor points BYH_RUN_DIR at a shared writable dir and
-// passes it to the native bridge too.
+// resolve to /tmp/ota_staging and /tmp/d_cmd. The staged .bin is read back
+// by the daemon (same container, same filesystem) and shipped to the
+// host-side bridge inline (content_b64), so the bridge does NOT need to see
+// the staging path itself -- important on Docker Desktop / Windows where the
+// native bridge and the WSL2 container share no filesystem.
 import { COMMAND_DIR, STAGING_DIR } from '@/util/paths';
 
 // Hard cap on the uploaded app image. The dongle's app .bin sits
@@ -105,10 +106,10 @@ function handleStart(req, res) {
       });
     }
 
-    // Stage to /tmp/ota_staging/<ts>_dongle/app.bin. The bridge running
-    // on the host reads from these same paths via the bind-mount, so
-    // this directory MUST exist on both sides. The compose files set
-    // that up; here we just create sub-directories defensively.
+    // Stage to /tmp/ota_staging/<ts>_dongle/app.bin. The daemon (same
+    // container, same filesystem) reads this back and forwards the bytes
+    // to the bridge inline, so it only needs to exist inside the
+    // container -- no host bind-mount required. Create it defensively.
     if (!fs.existsSync(STAGING_DIR)) {
       fs.mkdirSync(STAGING_DIR, { recursive: true });
     }

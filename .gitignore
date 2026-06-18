@@ -12,6 +12,7 @@ host/data/ledstate
 host/data/state
 host/data/leddata
 host/data/webactstate
+host/data/byh_show_state
 host/data/update-backups/
 *.state.*
 
