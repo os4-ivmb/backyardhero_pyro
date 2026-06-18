@@ -1,8 +1,8 @@
 
-
+import os
 from enum import Enum
 
-LED_FILE_PATH = "/data/ledstate"
+LED_FILE_PATH = os.path.join(os.environ.get("BYH_DATA_DIR", "/data"), "ledstate")
 
 class DAEMON_ACT_STATE(Enum):
     OFF = 0

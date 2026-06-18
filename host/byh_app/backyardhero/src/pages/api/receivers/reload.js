@@ -1,5 +1,7 @@
 import fs from 'fs';
 import path from 'path';
+import { ensureHardware } from '@/util/apiGuards';
+import { COMMAND_DIR } from '@/util/paths';
 
 /**
  * POST /api/receivers/reload
@@ -14,13 +16,14 @@ import path from 'path';
  * change all the way out to the radio.
  */
 export default function handler(req, res) {
+  if (!ensureHardware(res)) return;
   if (req.method !== 'POST') {
     res.setHeader('Allow', ['POST']);
     return res.status(405).end(`Method ${req.method} Not Allowed`);
   }
 
   try {
-    const folderPath = '/tmp/d_cmd';
+    const folderPath = COMMAND_DIR;
     if (!fs.existsSync(folderPath)) {
       fs.mkdirSync(folderPath, { recursive: true });
     }

@@ -6,6 +6,7 @@ import {
   MdOutlineRouter,
   MdOutlineWifi,
   MdStorage,
+  MdOutlineCloudSync,
 } from "react-icons/md";
 import { Section, Card, CardHeader, cn } from "@/design";
 import useAppStore from "@/store/useAppStore";
@@ -13,6 +14,7 @@ import useAppStore from "@/store/useAppStore";
 import BrightnessSlider from "./BrightnessSlider";
 import TransmitRepetitionCount from "./TransmitRepetitionCount";
 import TxConfig from "./TxConfig";
+import RebootDonglePanel from "./RebootDonglePanel";
 import DaemonSettings from "./DaemonSettings";
 import DebugModeToggle from "./DebugModeToggle";
 import GpioOverridePanel from "./GpioOverridePanel";
@@ -25,6 +27,7 @@ import DefaultLocationSettings from "./DefaultLocationSettings";
 import AccessPointSettings from "./AccessPointSettings";
 import UpdateSettings from "./UpdateSettings";
 import DataSettings from "./DataSettings";
+import CloudSyncPanel from "./CloudSyncPanel";
 
 // Settings page. Top-level tabs:
 //   Dongle    — physical box knobs: LEDs, retransmit count, serial
@@ -53,6 +56,7 @@ const TABS = [
   { key: "receivers", label: "Receivers", icon: <MdOutlineRouter />, visible: () => true },
   { key: "network", label: "Network", icon: <MdOutlineWifi />, visible: (host) => !!host?.is_raspberry_pi },
   { key: "data", label: "Data", icon: <MdStorage />, visible: () => true },
+  { key: "cloud", label: "Cloud", icon: <MdOutlineCloudSync />, visible: () => true },
   { key: "debug", label: "Debug", icon: <MdOutlineBugReport />, visible: () => true },
   { key: "show", label: "Show config", icon: <MdOutlineRocketLaunch />, visible: () => true },
 ];
@@ -62,6 +66,7 @@ const SUBTITLES = {
   receivers: "Fleet-wide receiver runtime knobs (fire pulse width, etc.).",
   network: "WiFi access point + system update.",
   data: "Export or import your Backyard Hero database.",
+  cloud: "Push inventory, receivers, and shows to your cloud editor.",
   debug: "Spectrum diagnostics and daemon timing.",
   show: "Pre-fire safety checks that apply to every show.",
 };
@@ -138,6 +143,7 @@ export default function SettingsPanel() {
         {tab === "receivers" ? <ReceiversTab /> : null}
         {tab === "network" ? <NetworkTab /> : null}
         {tab === "data" ? <DataTab /> : null}
+        {tab === "cloud" ? <CloudTab /> : null}
         {tab === "debug" ? <DebugTab /> : null}
         {tab === "show" ? <ShowTab /> : null}
       </Section>
@@ -188,6 +194,16 @@ function DataTab() {
   );
 }
 
+function CloudTab() {
+  return (
+    <div className="grid grid-cols-1 gap-4">
+      <SettingCard title="Cloud sync" eyebrow="Push to cloud editor">
+        <CloudSyncPanel />
+      </SettingCard>
+    </div>
+  );
+}
+
 function DongleTab() {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -205,6 +221,14 @@ function DongleTab() {
         className="lg:col-span-2"
       >
         <TxConfig />
+      </SettingCard>
+
+      <SettingCard
+        title="Power"
+        eyebrow="Reboot"
+        className="lg:col-span-2"
+      >
+        <RebootDonglePanel />
       </SettingCard>
 
       <SettingCard

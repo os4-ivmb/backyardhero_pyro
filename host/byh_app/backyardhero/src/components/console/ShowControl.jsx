@@ -4,7 +4,6 @@ import {
   FaPlay, FaPause, FaCheck, FaClock, FaRocket, FaTriangleExclamation, FaCircleCheck,
 } from "react-icons/fa6";
 import { FiUpload, FiX, FiAlertCircle } from "react-icons/fi";
-import WaveSurfer from "wavesurfer.js";
 
 import useAppStore from "@/store/useAppStore";
 import useStateAppStore from "@/store/useStateAppStore";
@@ -96,36 +95,48 @@ function MiniWave({
 
   useEffect(() => {
     if (!ref.current || ws.current || !activeUrl) return;
-    try {
-      ws.current = WaveSurfer.create({
-        container: ref.current,
-        waveColor: "#5b6470",
-        progressColor: "#608ec4",
-        cursorColor: "transparent",
-        barWidth: 1, barRadius: 1, cursorWidth: 0,
-        height: 28, barGap: 1, normalize: true, interact: false,
-      });
-      ws.current.on("ready", () => setReady(true));
-      ws.current.on("error", () => setReady(false));
-      ws.current.on("finish", () => {
-        // Advance to the next track if any. The render's useEffect
-        // below will reload the wavesurfer and resume playback.
-        setActiveIdx((i) => Math.min(i + 1, playableTracks.length));
-      });
-      // ws.load() returns a Promise that rejects with AbortError when
-      // the instance is destroyed mid-load (StrictMode double-mount,
-      // staged-show swap, etc). Catch it explicitly so it doesn't
-      // surface as an unhandled rejection.
-      Promise.resolve()
-        .then(() => ws.current?.load(activeUrl))
-        .catch((err) => {
-          if (err?.name === 'AbortError') return;
-          // eslint-disable-next-line no-console
-          console.error('MiniWave load failed:', err);
+    let cancelled = false;
+    // W6: load wavesurfer.js lazily. It used to be a top-level static
+    // import, which dragged its bundle into the console's first-load JS
+    // even though the mini-waveform only appears once a show WITH audio is
+    // staged. Dynamic import() pushes it into a separate chunk fetched on
+    // demand, keeping the default firing screen lean.
+    import("wavesurfer.js")
+      .then(({ default: WaveSurfer }) => {
+        if (cancelled || !ref.current || ws.current) return;
+        ws.current = WaveSurfer.create({
+          container: ref.current,
+          waveColor: "#5b6470",
+          progressColor: "#608ec4",
+          cursorColor: "transparent",
+          barWidth: 1, barRadius: 1, cursorWidth: 0,
+          height: 28, barGap: 1, normalize: true, interact: false,
         });
-    } catch { /* ignore */ }
+        ws.current.on("ready", () => setReady(true));
+        ws.current.on("error", () => setReady(false));
+        ws.current.on("finish", () => {
+          // Advance to the next track if any. The render's useEffect
+          // below will reload the wavesurfer and resume playback.
+          setActiveIdx((i) => Math.min(i + 1, playableTracks.length));
+        });
+        // ws.load() returns a Promise that rejects with AbortError when
+        // the instance is destroyed mid-load (StrictMode double-mount,
+        // staged-show swap, etc). Catch it explicitly so it doesn't
+        // surface as an unhandled rejection.
+        Promise.resolve()
+          .then(() => ws.current?.load(activeUrl))
+          .catch((err) => {
+            if (err?.name === 'AbortError') return;
+            // eslint-disable-next-line no-console
+            console.error('MiniWave load failed:', err);
+          });
+      })
+      .catch((err) => {
+        if (!cancelled) console.error('wavesurfer import failed:', err);
+      });
     return () => {
-      if (ws.current && ready) {
+      cancelled = true;
+      if (ws.current) {
         try { ws.current.pause(); ws.current.destroy(); } catch { /* */ }
       }
       ws.current = null;
@@ -353,7 +364,13 @@ export default function ShowControl({
       receiver_locations: stagedShow.receiver_locations || null,
       receiver_labels: stagedShow.receiver_labels || null,
     };
-    await updateShow(stagedShow.id, apiShowData);
+    const res = await updateShow(stagedShow.id, apiShowData);
+    if (res && res.ok === false) {
+      // Surface the failure instead of silently pretending the offset
+      // saved (W6: updateShow now reports save errors).
+      setCmdError?.(res.error || 'Failed to save audio sync offset.');
+      return;
+    }
     // Mirror the change into the in-memory staged show so the next
     // playback picks up the new saved offset without a refetch.
     setStagedShow({
@@ -372,10 +389,20 @@ export default function ShowControl({
   const waitingClientStart = !!stateData.fw_state?.waiting_for_client_start;
   const dstc = !!stateData.fw_state?.dstc;
 
+  // W5: a 200 from this endpoint only means "command file written", not
+  // "daemon accepted" — but a failed POST (network / validation reject)
+  // must not be silent. Surface it inline.
+  const [cmdError, setCmdError] = useState(null);
   const callDaemon = async (type, body = {}) => {
-    await axios.post("/api/system/cmd_daemon", { type, ...body }, {
-      headers: { "Content-Type": "application/json" },
-    });
+    setCmdError(null);
+    try {
+      await axios.post("/api/system/cmd_daemon", { type, ...body }, {
+        headers: { "Content-Type": "application/json" },
+      });
+    } catch (e) {
+      const detail = e?.response?.data?.error || e?.message || String(e);
+      setCmdError(`Command "${type}" failed: ${detail}`);
+    }
   };
 
   const handleLoad = async () => {
@@ -389,10 +416,29 @@ export default function ShowControl({
   const handleUnload = () => callDaemon("unload_show", { id: stagedShow.id });
   const handleStart = () => callDaemon("start_show");
   const handleStop = () => callDaemon("stop_show");
+  const handleAbortLoad = () => callDaemon("abort_show_load");
   const handleUnstage = () => setStagedShow({});
+
+  // A load is in flight when the proto handler reports LOADING — covers
+  // both the cue-send phase and the async wait for receivers to confirm
+  // loadComplete. `isShowLoaded` stays false this whole time, so without
+  // this the primary button would just keep saying "Load show".
+  const isLoadingShow = protoStatus === "LOADING";
 
   // Primary action descriptor: { label, variant, onClick, icon, hint, disabled }
   const primary = useMemo(() => {
+    // A load in progress turns the hero button into "Cancel load" so a
+    // hanging load (receiver never confirms) can be aborted without
+    // digging through menus. Checked first: during LOADING the show is
+    // neither live nor loaded, so it would otherwise fall through to the
+    // "Load show" branch and offer to start the load again.
+    if (isLoadingShow) return {
+      label: "Cancel load",
+      variant: "danger",
+      onClick: handleAbortLoad,
+      icon: <FiX className="text-xl" aria-hidden />,
+      hint: "Sending cues to receivers… cancel if it's stuck (auto-fails after 60s).",
+    };
     // ABORT always wins -- if the proto handler is running we want a
     // single red button, regardless of any other flags.
     if (isLive) return {
@@ -533,9 +579,13 @@ export default function ShowControl({
       icon: <FaClock aria-hidden />,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLive, waitingClientStart, dstc, isShowLoaded, hasErrors, isReadyToFire,
+  }, [isLive, isLoadingShow, waitingClientStart, dstc, isShowLoaded, hasErrors, isReadyToFire,
       allReceiversOnline, errors?.length, protoStatus, isArmed, startSwActive,
-      showRcvVerification.hasError, showRcvVerification.summary]);
+      showRcvVerification.hasError, showRcvVerification.summary,
+      // W5/stale-closure: the primary action's onClick (handleLoad) closes
+      // over the staged show's id + auth code; recompute when those change
+      // so a click never acts on a previous staging.
+      stagedShow?.id, stagedShow?.authorization_code]);
 
   // Status chip describing show pre-checks (calm wording, single source).
   // Note: the T-N countdown is *not* rendered here -- during
@@ -546,11 +596,12 @@ export default function ShowControl({
       if (protoStatus === "STARTED") return { tone: "live", label: protoStatusBadge("STARTED") };
       if (protoStatus === "START_PENDING") return { tone: "armed", label: protoStatusBadge("START_PENDING") };
     }
+    if (isLoadingShow) return { tone: "armed", label: "Loading" };
     if (!isShowLoaded) return { tone: "neutral", label: "Not loaded" };
     if (hasErrors) return { tone: "danger", label: "Checks failed" };
     if (isReadyToFire) return { tone: "ok", label: "Ready" };
     return { tone: "neutral", label: "Loaded" };
-  }, [isLive, protoStatus, isShowLoaded, hasErrors, isReadyToFire]);
+  }, [isLive, protoStatus, isShowLoaded, hasErrors, isReadyToFire, isLoadingShow]);
 
   // Are we in the seconds-to-start countdown? Only true once the proto
   // handler is confirmed; pre-start hasn't picked a start time yet.
@@ -612,6 +663,16 @@ export default function ShowControl({
               its receiver list.
             </div>
           </div>
+        </div>
+      ) : null}
+
+      {/* Command-failure banner: surfaces a failed POST to cmd_daemon
+          (network error / server-side validation reject) so a control
+          action that did nothing isn't silent (W5). */}
+      {cmdError ? (
+        <div className="flex items-start gap-2 rounded-sm border border-danger/40 bg-danger-bg/60 px-3 py-2 text-xs text-danger-fg">
+          <FaTriangleExclamation className="mt-0.5 shrink-0" aria-hidden />
+          <div>{cmdError}</div>
         </div>
       ) : null}
 

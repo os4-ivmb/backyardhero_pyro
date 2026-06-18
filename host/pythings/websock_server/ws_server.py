@@ -11,18 +11,23 @@ from datetime import datetime
 
 from enum import Enum
 
-LED_FILE_PATH = "/data/webactstate"
-STATE_FILE_PATH = "/data/state"
-CURSOR_FILE_PATH = "/tmp/fw_cursor"
-FIRING_FILE_PATH = "/tmp/fw_firing"
-ERR_LOG_PATH = "/data/log/daemon.err"
+# Base dirs are env-overridable (see pc_daemon.py for the rationale); the
+# defaults reproduce the original container paths so Docker/Pi are unchanged.
+_DATA_DIR = os.environ.get("BYH_DATA_DIR", "/data")
+_RUN_DIR = os.environ.get("BYH_RUN_DIR", "/tmp")
+
+LED_FILE_PATH = os.path.join(_DATA_DIR, "webactstate")
+STATE_FILE_PATH = os.path.join(_DATA_DIR, "state")
+CURSOR_FILE_PATH = os.path.join(_RUN_DIR, "fw_cursor")
+FIRING_FILE_PATH = os.path.join(_RUN_DIR, "fw_firing")
+ERR_LOG_PATH = os.path.join(_DATA_DIR, "log", "daemon.err")
 
 # Unix datagram socket path the daemon publishes state snapshots to. We
 # bind it; the daemon does fire-and-forget sendto(). Lets us push state
 # to clients with sub-millisecond latency from "daemon mutated state" to
 # "browser sees the new value" -- much faster than the previous
 # polling-on-a-500ms-sleep loop.
-STATE_SOCKET_PATH = "/tmp/byh_state.sock"
+STATE_SOCKET_PATH = os.path.join(_RUN_DIR, "byh_state.sock")
 
 # Prime psutil.cpu_percent so subsequent non-blocking calls return a real
 # delta-since-last-call instead of 0.0. Without this we'd either have to
@@ -388,11 +393,24 @@ async def aux_watcher():
     except ImportError:
         return
 
-    async for changes in awatch("/tmp", debounce=10):
-        if any(p in (CURSOR_FILE_PATH, FIRING_FILE_PATH) for _ev, p in changes):
-            STATE_VERSION += 1
-            async with STATE_COND:
-                STATE_COND.notify_all()
+    aux_paths = {CURSOR_FILE_PATH, FIRING_FILE_PATH}
+
+    def _aux_filter(_change, path):
+        return path in aux_paths
+
+    # M5: watch /tmp NON-recursively + filtered to just the two aux files.
+    # The old recursive watch woke on every /tmp/d_cmd/*.json command-file
+    # churn (a subdirectory), i.e. on every UI command -- pure wasted CPU.
+    # recursive=False drops the subdirectory churn; the filter narrows the
+    # remaining direct-child events to the cursor/firing files. We still
+    # watch the directory (not the files directly) so the daemon's atomic
+    # write/rename survives and a not-yet-created file isn't a startup error.
+    async for _changes in awatch(
+        "/tmp", debounce=10, recursive=False, watch_filter=_aux_filter
+    ):
+        STATE_VERSION += 1
+        async with STATE_COND:
+            STATE_COND.notify_all()
 
 
 def _stable_signature(payload):
@@ -403,10 +421,46 @@ def _stable_signature(payload):
     return hashlib.sha1(encoded).hexdigest()
 
 
+# M5: cross-client cache for the auxiliary inputs (CPU temp, error-log
+# tail, cursor/firing, system usage). _gather_aux_blocking does several
+# file reads + psutil sampling; with N WS clients each ticking at up to
+# 30Hz the old per-client-per-tick call multiplied that IO by N. We cache
+# the result for a short TTL and serve all clients from it, so the cost is
+# bounded to ~1 gather per AUX_CACHE_TTL_S regardless of client count.
+# (Bonus: psutil.cpu_percent now samples on a single cadence instead of
+# resetting its delta baseline on every concurrent caller.)
+AUX_CACHE = None
+AUX_CACHE_TS = 0.0
+AUX_CACHE_LOCK = None  # asyncio.Lock, created in main()
+AUX_CACHE_TTL_S = 0.2
+
+
+async def _get_aux_shared():
+    global AUX_CACHE, AUX_CACHE_TS
+    now = time.time()
+    if AUX_CACHE is not None and (now - AUX_CACHE_TS) < AUX_CACHE_TTL_S:
+        return AUX_CACHE
+    # Serialize concurrent refreshes so a burst of clients triggers one
+    # gather, not N. No lock yet (pre-main) -> just gather directly.
+    if AUX_CACHE_LOCK is None:
+        aux = await asyncio.to_thread(_gather_aux_blocking)
+        AUX_CACHE = aux
+        AUX_CACHE_TS = time.time()
+        return aux
+    async with AUX_CACHE_LOCK:
+        now = time.time()
+        if AUX_CACHE is not None and (now - AUX_CACHE_TS) < AUX_CACHE_TTL_S:
+            return AUX_CACHE
+        aux = await asyncio.to_thread(_gather_aux_blocking)
+        AUX_CACHE = aux
+        AUX_CACHE_TS = time.time()
+        return aux
+
+
 async def _build_payload():
-    """Combine the cached fw_state with freshly-read auxiliary inputs."""
-    aux = await asyncio.to_thread(_gather_aux_blocking)
-    payload = dict(aux)
+    """Combine the cached fw_state with the shared auxiliary inputs."""
+    aux = await _get_aux_shared()
+    payload = dict(aux)  # shallow copy so per-client keys don't mutate cache
     payload["fw_state"] = LATEST_FW_STATE or _read_fw_state_from_file()
     payload["fw_last_update"] = int(time.time() * 1000)
     return payload
@@ -482,8 +536,9 @@ async def file_update_server(websocket):
 
 async def main():
     """Start the WebSocket server + the state pumps."""
-    global STATE_COND
+    global STATE_COND, AUX_CACHE_LOCK
     STATE_COND = asyncio.Condition()
+    AUX_CACHE_LOCK = asyncio.Lock()
 
     # Spin up the state pumps before accepting clients so an
     # immediately-connected client doesn't see stale state.

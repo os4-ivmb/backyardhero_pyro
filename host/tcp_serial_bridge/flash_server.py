@@ -97,28 +97,21 @@ from dongle_flasher import (  # noqa: E402
 
 # Listen address for the flasher HTTP API.
 #
-# We bind to 0.0.0.0 deliberately, mirroring the :9000 TCP forwarder
-# in tcp_serial_bridge.py. The reason 127.0.0.1 doesn't work:
+# This endpoint lets any caller start/abort dongle flash jobs (DoS at
+# minimum, arbitrary-firmware flashing at worst), so it must NOT be
+# exposed on the LAN / Wi-Fi AP interface (C4.1). We bind the same
+# address as the :9000 forwarder via BYH_BRIDGE_BIND:
 #
-#   * Docker Desktop (mac/Windows): host.docker.internal is provided
-#     by Docker Desktop's networking proxy, which makes the host's
-#     127.0.0.1 reachable from inside the container. 127.0.0.1
-#     binding works here.
-#   * Docker Engine on Linux (Raspberry Pi, generic Linux server):
-#     host.docker.internal -> host-gateway resolves to the docker
-#     bridge gateway IP (e.g. 172.17.0.1). A server bound to
-#     127.0.0.1 is NOT reachable from that interface, so the daemon
-#     gets ECONNREFUSED. Binding to 0.0.0.0 makes us reachable on
-#     both the loopback AND the docker bridge.
+#   * Docker Desktop (mac/Windows): host.docker.internal forwards to the
+#     host's loopback, so the default 127.0.0.1 bind works.
+#   * Docker Engine on Linux (Raspberry Pi): host.docker.internal ->
+#     host-gateway resolves to the docker bridge gateway IP (e.g.
+#     172.17.0.1). The launcher (start.sh) sets BYH_BRIDGE_BIND to that
+#     gateway so the container can reach us while wlan0 AP clients
+#     cannot. A bare 127.0.0.1 bind would ECONNREFUSE the daemon there.
 #
-# Exposing port 9001 on 0.0.0.0 means anyone on the host's network
-# (e.g. clients on the Pi's WiFi AP) can hit /flash_dongle directly.
-# That's an acceptable surface for this deployment -- the dongle is
-# only reachable when the operator has physical USB access anyway,
-# and the AP is meant to be a trusted private network. If you ever
-# wire the Pi up to a hostile network, add an iptables DROP for 9001
-# on the upstream interface.
-FLASH_HTTP_HOST = "0.0.0.0"
+# Previously this bound 0.0.0.0, exposing 9001 to every AP client.
+FLASH_HTTP_HOST = os.environ.get("BYH_BRIDGE_BIND", "127.0.0.1")
 FLASH_HTTP_PORT = 9001
 
 # Cap on log buffer kept in memory per job. esptool produces ~1KB of

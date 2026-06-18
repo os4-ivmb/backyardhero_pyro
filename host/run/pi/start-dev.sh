@@ -98,6 +98,19 @@ ensure_bridge_venv() {
 
 ensure_bridge_venv
 
+# Bind bridge :9000 / flash :9001 to the docker bridge gateway only, not
+# 0.0.0.0 (C4.1) -- see the matching block in start.sh for rationale.
+if [ -z "${BYH_BRIDGE_BIND:-}" ]; then
+  BYH_BRIDGE_BIND="$(docker network inspect bridge \
+    -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)"
+  if [ -z "${BYH_BRIDGE_BIND}" ]; then
+    BYH_BRIDGE_BIND="172.17.0.1"
+    echo "WARN: could not query docker bridge gateway; defaulting bind to ${BYH_BRIDGE_BIND}"
+  fi
+fi
+export BYH_BRIDGE_BIND
+echo "Bridge/flash-server bind address: ${BYH_BRIDGE_BIND}"
+
 echo "Starting TCP-to-serial bridge..."
 "${BRIDGE_VENV}/bin/python" "${BRIDGE_SCRIPT}" &
 BRIDGE_PID=$!

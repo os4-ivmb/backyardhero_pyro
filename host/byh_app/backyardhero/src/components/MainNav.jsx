@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
+import dynamic from "next/dynamic";
 import { FaExplosion, FaGear, FaList } from "react-icons/fa6";
-import { FiTarget, FiEdit, FiRadio } from "react-icons/fi";
+import { FiTarget, FiEdit, FiRadio, FiFilm } from "react-icons/fi";
 import { MdAssignment, MdHome } from "react-icons/md";
 
 import useAppStore from "@/store/useAppStore";
@@ -11,13 +12,29 @@ import AppShell from "./shell/AppShell";
 import TopBar from "./shell/TopBar";
 import StatusBar from "./shell/StatusBar";
 
-import InventoryManager from "./inventory/InventoryManager";
+// Firing-path panels stay statically imported so the Console / Manual tabs
+// are instantly interactive on first load.
 import ManualFiring from "./manualFire/ManualFiring";
 import ConsolePanel from "./console/ConsolePanel";
-import SettingsPanel from "./settings/SettingsPanel";
-import ShowBuilder from "./builder/ShowBuilder";
-import ReceiverDisplay from "./receivers/ReceiverDisplay";
-import ShowLoadout from "./receivers/ShowLoadout";
+
+// W6: the heavy, non-firing tabs are code-split out of the first-load
+// bundle. The Editor pulls in three / @react-three/fiber / leaflet, the
+// receiver/loadout views pull in maps, and Inventory/Settings are large but
+// rarely the operator's entry point. next/dynamic with ssr:false fetches
+// each chunk only when its tab is first opened, keeping the ~1.7MB of 3D /
+// map / waveform code off the critical firing screen.
+const loading = () => (
+  <div className="p-8 text-center text-fg-muted text-sm">Loading…</div>
+);
+const InventoryManager = dynamic(() => import("./inventory/InventoryManager"), { ssr: false, loading });
+const SettingsPanel = dynamic(() => import("./settings/SettingsPanel"), { ssr: false, loading });
+const ShowBuilder = dynamic(() => import("./builder/ShowBuilder"), { ssr: false, loading });
+const ReceiverDisplay = dynamic(() => import("./receivers/ReceiverDisplay"), { ssr: false, loading });
+const ShowLoadout = dynamic(() => import("./receivers/ShowLoadout"), { ssr: false, loading });
+// Cloud-only show browser. On hardware boxes the Console tab already lists
+// shows (ShowPicker); the cloud profile hides Console, so we surface the same
+// picker as a dedicated "Shows" tab there.
+const ShowPicker = dynamic(() => import("./console/ShowPicker"), { ssr: false, loading });
 
 import MobileMainNav from "./mobile/MobileMainNav";
 
@@ -29,24 +46,34 @@ import MobileMainNav from "./mobile/MobileMainNav";
 // loadout) don't run effects when their tab isn't active.
 // ---------------------------------------------------------------------------
 
+// `requiresHardware` tabs depend on the dongle/daemon/ws stack (live state,
+// firing, flashing, GPIO). In the cloud profile (caps.hardware === false)
+// they're hidden, collapsing the nav to the design-only surfaces
+// (Editor / Inventory / Loadout). See Cloud Builder plan §3.1.
 const TABS = [
-  { key: "main",      label: "Console",   icon: <MdHome />,        alwaysVisible: true },
-  { key: "receivers", label: "Receivers", icon: <FiRadio /> },
+  { key: "main",      label: "Console",   icon: <MdHome />,        alwaysVisible: true, requiresHardware: true },
+  { key: "shows",     label: "Shows",     icon: <FiFilm />,        cloudOnly: true },
+  { key: "receivers", label: "Receivers", icon: <FiRadio />,       requiresHardware: true },
   { key: "editor",    label: "Editor",    icon: <FiEdit /> },
   { key: "loadout",   label: "Loadout",   icon: <MdAssignment />,  alwaysVisible: true },
   { key: "inventory", label: "Inventory", icon: <FaList /> },
-  { key: "manual",    label: "Manual",    icon: <FiTarget />,      alwaysVisible: true },
-  { key: "setting",   label: "Settings",  icon: <FaGear /> },
+  { key: "manual",    label: "Manual",    icon: <FiTarget />,      alwaysVisible: true, requiresHardware: true },
+  { key: "setting",   label: "Settings",  icon: <FaGear />,        requiresHardware: true },
 ];
 
 function DesktopMainNav() {
   const {
     fetchInventory, fetchShows, fetchSystemConfig,
-    stagedShow, shows, inventoryById, hydrateStagedShowFromId,
+    stagedShow, shows, inventoryById, hydrateStagedShowFromId, systemConfig,
   } = useAppStore();
   const [currTab, setCurrTab] = useState("main");
   const hasStagedShow = Boolean(stagedShow?.id);
   const { mode } = useAppMode();
+  // Deployment capabilities (from /api/system/config). Default to a hardware
+  // profile until the config loads so the local box never flickers tabs;
+  // the cloud build corrects this within the first config fetch.
+  const caps = systemConfig?.caps || { hardware: true };
+  const hardware = caps.hardware !== false;
   // Watch for receiver verification failures on the staged show. The
   // result drives a red X badge on the Receivers menu item and is also
   // consumed downstream by the Load Show gate in ShowControl.
@@ -57,6 +84,15 @@ function DesktopMainNav() {
   useEffect(() => {
     if (currTab === "loadout" && !hasStagedShow) setCurrTab("main");
   }, [currTab, hasStagedShow]);
+
+  // Cloud profile: if the active tab requires hardware (Console / Receivers /
+  // Manual / Settings) but this deployment has none, fall back to the Shows
+  // browser so the operator lands on something useful (pick a show → Editor).
+  useEffect(() => {
+    if (hardware) return;
+    const active = TABS.find((t) => t.key === currTab);
+    if (active?.requiresHardware) setCurrTab("shows");
+  }, [hardware, currTab]);
 
   useEffect(() => { fetchInventory(); }, [fetchInventory]);
   useEffect(() => { fetchShows(); }, [fetchShows]);
@@ -70,6 +106,8 @@ function DesktopMainNav() {
   }, [shows, inventoryById, hydrateStagedShowFromId]);
 
   const tabs = TABS.map((t) => {
+    if (t.requiresHardware && !hardware) return { ...t, hidden: true };
+    if (t.cloudOnly && hardware) return { ...t, hidden: true };
     if (t.key === "loadout") return { ...t, hidden: !hasStagedShow };
     if (t.key === "receivers" && verification.hasError) {
       return {
@@ -99,6 +137,15 @@ function DesktopMainNav() {
       statusBar={<StatusBar />}
     >
       {currTab === "main"      && <ConsolePanel setCurrentTab={setCurrTab} />}
+      {currTab === "shows"     && (
+        <ShowPicker
+          onStaged={() => setCurrTab("editor")}
+          title="Your shows"
+          description="Pick a show to open it in the Editor."
+          stageLabel="Open"
+          emptyHint="No shows here yet. Build one in the Editor, or push shows up from a device via Settings → Cloud."
+        />
+      )}
       {currTab === "inventory" && <InventoryManager />}
       {currTab === "editor"    && <ShowBuilder />}
       {currTab === "receivers" && <ReceiverDisplay setCurrentTab={setCurrTab} />}

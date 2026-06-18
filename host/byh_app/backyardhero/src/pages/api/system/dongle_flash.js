@@ -1,15 +1,12 @@
 import fs from 'fs';
 import path from 'path';
-
-// Where staged firmware blobs live. /tmp/ota_staging is bind-mounted
-// from the host into the container in all three docker-compose files
-// so the host-side bridge can read these same paths back out (it's
-// the bridge that hands them to esptool). If you change this path,
-// update docker-compose.yml / docker-compose-dev.yml /
-// docker-compose-prod.yml in lockstep.
-const STAGING_DIR = '/tmp/ota_staging';
-// Where the daemon polls for command files.
-const COMMAND_DIR = '/tmp/d_cmd';
+import { ensureHardware } from '@/util/apiGuards';
+// Staging + command dirs come from the central resolver. Under Docker these
+// resolve to /tmp/ota_staging and /tmp/d_cmd (bind-mounted so the host-side
+// bridge reads the same paths back out for esptool); under the desktop bundle
+// the Electron supervisor points BYH_RUN_DIR at a shared writable dir and
+// passes it to the native bridge too.
+import { COMMAND_DIR, STAGING_DIR } from '@/util/paths';
 
 // Hard cap on the uploaded app image. The dongle's app .bin sits
 // around ~340KB; 4MB is generous headroom for any future partition-
@@ -63,6 +60,7 @@ export const config = {
  *   dongle). Forwards to the bridge's /flash_dongle/continue.
  */
 export default function handler(req, res) {
+  if (!ensureHardware(res)) return;
   if (req.method === 'POST') {
     return handleStart(req, res);
   }

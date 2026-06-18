@@ -1,12 +1,19 @@
-import { firingProfileQueries } from "@/util/sqldb";
+import { getRepo } from "@/data";
 
-export default function handler(req, res) {
+export default async function handler(req, res) {
   const { id } = req.query;
+
+  let repo;
+  try {
+    repo = await getRepo(req);
+  } catch (err) {
+    return res.status(err?.status || 500).json({ error: err?.message || 'Failed to resolve data context.' });
+  }
 
   if (req.method === 'GET') {
     try {
-      const profile = firingProfileQueries.getByInventoryId.get(id);
-      
+      const profile = await repo.firingProfiles.getByInventoryId(id);
+
       if (!profile) {
         return res.status(404).json({ error: 'Firing profile not found.' });
       }
@@ -41,20 +48,20 @@ export default function handler(req, res) {
   } else if (req.method === 'PATCH') {
     try {
       const { shot_timestamps } = req.body;
-      
+
       if (!shot_timestamps || !Array.isArray(shot_timestamps)) {
         return res.status(400).json({ error: 'shot_timestamps must be an array.' });
       }
 
       // Get existing profile to preserve other fields
-      const existingProfile = firingProfileQueries.getByInventoryId.get(id);
+      const existingProfile = await repo.firingProfiles.getByInventoryId(id);
       if (!existingProfile) {
         return res.status(404).json({ error: 'Firing profile not found.' });
       }
 
       // Update only shot_timestamps
       const shot_timestamps_json = JSON.stringify(shot_timestamps);
-      firingProfileQueries.update.run(shot_timestamps_json, id);
+      await repo.firingProfiles.update(id, shot_timestamps_json);
 
       return res.status(200).json({ message: 'Firing profile updated successfully.' });
     } catch (error) {

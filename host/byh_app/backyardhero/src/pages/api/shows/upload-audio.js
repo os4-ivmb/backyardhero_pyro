@@ -1,6 +1,7 @@
 import formidable from 'formidable';
-import fs from 'fs';
-import path from 'path';
+import os from 'os';
+import { getBlobStore } from '@/data/blobStore';
+import { resolveCtx } from '@/data/context';
 
 // Disable the default body parser to handle file uploads
 export const config = {
@@ -18,13 +19,22 @@ export default async function handler(req, res) {
   console.log('Upload request received');
   console.log('Content-Type:', req.headers['content-type']);
 
+  // Resolve the persistence context (cloud: the signed-in user; local:
+  // 'local'). The userId becomes the Storage path prefix in the cloud store.
+  let ctx;
   try {
-    // Ensure upload directory exists first
-    const uploadDir = path.join(process.cwd(), 'public', 'uploads', 'audio');
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-      console.log('Created upload directory:', uploadDir);
-    }
+    ctx = await resolveCtx(req);
+  } catch (err) {
+    return res.status(err?.status || 500).json({ error: err?.message || 'Failed to resolve data context.' });
+  }
+
+  try {
+    // Parse into the OS temp dir first, then hand the temp file to the blob
+    // store. The fs store moves it into public/uploads/audio (local); the
+    // supabase store uploads it to Storage (cloud). Either way the route is
+    // backend-agnostic (Cloud Builder §3.3).
+    const uploadDir = os.tmpdir();
+    const store = getBlobStore();
 
     const form = formidable({
       uploadDir: uploadDir,
@@ -83,27 +93,23 @@ export default async function handler(req, res) {
         return res.status(500).json({ error: 'File upload failed - no filepath.' });
       }
 
-      // Generate a unique filename to avoid conflicts
-      const timestamp = Date.now();
-      const originalName = path.basename(file.originalFilename || 'audio');
-      const newFilename = `${timestamp}_${originalName}`;
-      const newPath = path.join(uploadDir, newFilename);
+      const originalName = file.originalFilename || 'audio';
 
-      console.log('Moving file from', file.filepath, 'to', newPath);
+      // Hand off to the blob store (fs move locally / Storage upload in cloud).
+      const stored = await store.put({
+        tmpPath: file.filepath,
+        originalName,
+        mimetype: file.mimetype,
+        userId: ctx.userId,
+      });
 
-      // Move the file to the final location
-      fs.renameSync(file.filepath, newPath);
-      console.log('File moved successfully');
-
-      // Return the URL for the uploaded file
-      const url = `/api/shows/audio/${encodeURIComponent(newFilename)}`;
-      
-      res.status(200).json({ 
-        url,
-        filename: newFilename,
-        originalName: originalName,
-        size: file.size,
-        mimetype: file.mimetype
+      res.status(200).json({
+        url: stored.url,
+        key: stored.key,
+        filename: stored.filename || stored.key,
+        originalName,
+        size: stored.size ?? file.size,
+        mimetype: file.mimetype,
       });
     } catch (parseError) {
       console.error('Error parsing form:', parseError);

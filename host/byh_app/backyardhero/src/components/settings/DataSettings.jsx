@@ -7,6 +7,7 @@ import {
 } from "react-icons/md";
 
 import { Button, Card, Modal } from "@/design";
+import { apiUrl } from "@/util/clientEnv";
 
 export default function DataSettings() {
   const fileInputRef = useRef(null);
@@ -37,7 +38,7 @@ export default function DataSettings() {
     try {
       const body = new FormData();
       body.append("database", selectedFile);
-      const response = await fetch("/api/system/data", {
+      const response = await fetch(apiUrl("/api/system/data"), {
         method: "POST",
         body,
       });
@@ -88,7 +89,7 @@ export default function DataSettings() {
           </div>
           <Button
             as="a"
-            href="/api/system/data"
+            href={apiUrl("/api/system/data")}
             variant="primary"
             leading={<MdDownload />}
             className="self-start"

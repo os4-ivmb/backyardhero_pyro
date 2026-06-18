@@ -21,6 +21,7 @@ import {
   trackOffsets,
 } from "@/utils/audioTracks";
 import { rankShotProfilesForBpm } from "@/utils/rhythmMatch";
+import { apiUrl } from "@/util/clientEnv";
 import {
   Modal,
   Button,
@@ -2947,7 +2948,7 @@ const ShowBuilder = (props) => {
     try {
       const formData = new FormData();
       formData.append("audio", file);
-      const response = await fetch("/api/shows/upload-audio", {
+      const response = await fetch(apiUrl("/api/shows/upload-audio"), {
         method: "POST",
         body: formData,
       });

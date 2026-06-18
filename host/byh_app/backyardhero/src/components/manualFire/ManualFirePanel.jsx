@@ -4,6 +4,7 @@ import { FaKey, FaTriangleExclamation } from "react-icons/fa6";
 
 import useStateAppStore, { serverElapsedMs } from "@/store/useStateAppStore";
 import useAppStore from "@/store/useAppStore";
+import useAppMode from "@/design/useAppMode";
 import { Card, Button, Section, Badge, Dot, cn } from "@/design";
 import { mergeCues } from "../builder/ShowBuilder";
 import { isPollableReceiver } from "@/util/receivers";
@@ -157,8 +158,13 @@ export default function ManualFirePanel() {
   // as a string for the input field so we can render an empty box. The
   // fire handlers parse + clamp on send.
   const [bilusocnZoneInput, setBilusocnZoneInput] = useState("1");
+  // Surfaces client-side command failures (HTTP 200 only means "file
+  // written", not "daemon accepted" — but a failed POST should still be
+  // visible rather than silent, W5).
+  const [fireError, setFireError] = useState(null);
   const { stateData } = useStateAppStore();
   const { systemConfig, stagedShow } = useAppStore();
+  const { wsAlive, daemonActive } = useAppMode();
 
   const fw = stateData.fw_state || {};
   const receiverMap = fw.receivers || systemConfig.receivers || EMPTY_RECEIVER_MAP;
@@ -168,9 +174,18 @@ export default function ManualFirePanel() {
   const armSwitchActive = !!fw.device_is_armed;
   const receiverTimeoutMs = fw.settings?.receiver_timeout_ms || 10_000;
 
-  // Compute the primary blocker (if any). Priority: show-loaded → no
-  // protocol → manual key → arm switch.
+  // Compute the primary blocker (if any). Priority: link-down → show-loaded
+  // → no protocol → manual key → arm switch.
   const blocker = useMemo(() => {
+    // W5: never present a clickable fire grid against frozen telemetry.
+    // If the WS link is stale or the daemon is down we can't trust ANY
+    // of the flags below, so gate the whole surface first.
+    if (!wsAlive || !daemonActive) return {
+      icon: <FaTriangleExclamation />,
+      title: "Daemon link is down",
+      body: "The live connection to the firing controller is stale. Manual fire is disabled until telemetry resumes.",
+      tone: "danger",
+    };
     if (showLoaded) return {
       icon: <FaTriangleExclamation />,
       title: "Manual fire disabled while a show is loaded",
@@ -196,7 +211,7 @@ export default function ManualFirePanel() {
       tone: "danger",
     };
     return null;
-  }, [showLoaded, hasProtocol, keyTurned, armSwitchActive]);
+  }, [wsAlive, daemonActive, showLoaded, hasProtocol, keyTurned, armSwitchActive]);
 
   useEffect(() => {
     if (!blocker && receiverMap) {
@@ -212,28 +227,47 @@ export default function ManualFirePanel() {
   // payload with `kind` so the daemon picks the right path.
   const fireNative = async (target) => {
     if (blocker) return;
-    await axios.post(
-      "/api/system/cmd_daemon",
-      {
-        type: "manual_fire",
-        data: { zone, target, kind: RECEIVER_KIND_NATIVE },
-      },
-      { headers: { "Content-Type": "application/json" } },
-    );
+    // W5: don't fire against a receiver we believe is offline.
+    if (selectedReceiverOnline === false) {
+      setFireError(`Receiver for zone ${zone} appears offline — fire blocked.`);
+      return;
+    }
+    setFireError(null);
+    try {
+      await axios.post(
+        "/api/system/cmd_daemon",
+        {
+          type: "manual_fire",
+          data: { zone, target, kind: RECEIVER_KIND_NATIVE },
+        },
+        { headers: { "Content-Type": "application/json" } },
+      );
+    } catch (e) {
+      setFireError(
+        `Failed to send fire command for zone ${zone} cue ${target}: ${e?.message || e}`,
+      );
+    }
   };
 
   const fireBilusocn = async (target) => {
     if (blocker) return;
     const z = parseInt(bilusocnZoneInput, 10);
     if (!Number.isFinite(z) || z < 1 || z > BILUSOCN_MANUAL_FIRE_ZONE_MAX) return;
-    await axios.post(
-      "/api/system/cmd_daemon",
-      {
-        type: "manual_fire",
-        data: { zone: String(z), target, kind: RECEIVER_KIND_BILUSOCN },
-      },
-      { headers: { "Content-Type": "application/json" } },
-    );
+    setFireError(null);
+    try {
+      await axios.post(
+        "/api/system/cmd_daemon",
+        {
+          type: "manual_fire",
+          data: { zone: String(z), target, kind: RECEIVER_KIND_BILUSOCN },
+        },
+        { headers: { "Content-Type": "application/json" } },
+      );
+    } catch (e) {
+      setFireError(
+        `Failed to send Bilusocn fire for zone ${z} cue ${target}: ${e?.message || e}`,
+      );
+    }
   };
 
   const handleZoneChange = (e) => {
@@ -316,6 +350,12 @@ export default function ManualFirePanel() {
         <GateCard icon={blocker.icon} title={blocker.title} body={blocker.body} tone={blocker.tone} />
       ) : (
         <div className="space-y-4">
+          {fireError ? (
+            <Card tone="danger" padding="md" className="flex items-start gap-2">
+              <FaTriangleExclamation className="mt-0.5 shrink-0 text-danger" />
+              <div className="text-sm text-danger-fg">{fireError}</div>
+            </Card>
+          ) : null}
           {/* Tab strip: Native vs Bilusocn / 433 MHz. Mirrors the same
               two-kind split used by the show builder's Add Receiver
               modal so the operator's mental model stays consistent
@@ -402,6 +442,7 @@ export default function ManualFirePanel() {
                         key={t}
                         size="xl"
                         variant="armed"
+                        disabled={selectedReceiverOnline === false}
                         onClick={() => fireNative(t)}
                         className={cn(
                           "relative h-24 px-2 flex-col gap-1",

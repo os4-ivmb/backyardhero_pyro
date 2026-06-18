@@ -19,6 +19,18 @@ import {
   isBilusocnEntry,
   validateBilusocnZoneSelection,
 } from "@/util/showReceivers";
+import useAppStore from "@/store/useAppStore";
+
+// The native (BYH) receiver type. Bilusocn zones are configured inline (the
+// other tab) and never become palette rows, so the only kind we create here is
+// the standard timeslot receiver whose ident the dongle parses as "RX<digits>".
+const NATIVE_RECEIVER_TYPE = "BKYD_TS_24_1";
+
+// cues_data shape mirrors ReceiverDisplay.buildCuesData: { ident: [1..count] }.
+const buildCuesData = (ident, count) => {
+  const safe = Math.max(0, Math.min(256, parseInt(count, 10) || 0));
+  return { [ident]: Array.from({ length: safe }, (_, i) => i + 1) };
+};
 
 // Modal for adding or editing a single show-receiver entry.
 //
@@ -95,6 +107,20 @@ export default function ShowReceiverModal({
 
   const [error, setError] = useState(null);
 
+  // Inline "create a new native receiver" sub-form (ADD mode only). Lets the
+  // user mint a receiver into the palette without leaving the editor — the only
+  // way to add native receivers in the cloud profile, and a convenience on
+  // device. Backed by the store's createReceiver (POST /api/receivers), which
+  // refreshes the `receivers` slice so the new id appears in the dropdown.
+  const createReceiver = useAppStore((s) => s.createReceiver);
+  const fetchReceivers = useAppStore((s) => s.fetchReceivers);
+  const [creatingNew, setCreatingNew] = useState(false);
+  const [newIdent, setNewIdent] = useState("");
+  const [newLabel, setNewLabel] = useState("");
+  const [newCues, setNewCues] = useState(SHOW_RECEIVER_CUE_OPTIONS[0]);
+  const [createBusy, setCreateBusy] = useState(false);
+  const [createError, setCreateError] = useState(null);
+
   // Reset internal state whenever the modal is (re)opened with a fresh
   // payload. Crucially this clears `error` between opens so a previous
   // failed save doesn't haunt a different entry.
@@ -113,7 +139,54 @@ export default function ShowReceiverModal({
     }
     setLabel(entry?.label || "");
     setError(null);
+    // Reset the inline create sub-form on every (re)open.
+    setCreatingNew(false);
+    setNewIdent("");
+    setNewLabel("");
+    setNewCues(SHOW_RECEIVER_CUE_OPTIONS[0]);
+    setCreateBusy(false);
+    setCreateError(null);
   }, [isOpen, entry, isEdit]);
+
+  const handleCreateReceiver = async () => {
+    setCreateError(null);
+    const id = (newIdent || "").trim();
+    // Mirror the Receivers-page rule: the dongle parses the node id out of
+    // "RX<digits>", so enforce it even in the cloud so a pulled-to-device show
+    // addresses correctly later.
+    if (!/^RX\d+$/i.test(id)) {
+      setCreateError('Receiver id must look like "RX<digits>" (e.g. RX163).');
+      return;
+    }
+    if (dbReceivers && dbReceivers[id]) {
+      setCreateError(`Receiver "${id}" already exists.`);
+      return;
+    }
+    setCreateBusy(true);
+    try {
+      await createReceiver({
+        id,
+        label: (newLabel || "").trim() || id,
+        type: NATIVE_RECEIVER_TYPE,
+        cues_data: buildCuesData(id, newCues),
+        enabled: true,
+      });
+      // Re-pull the whole palette from the server so the `receivers` slice is
+      // fully hydrated (createReceiver only merges the one new row, which in
+      // the cloud — where the slice starts empty — would otherwise hide the
+      // receivers that live only in systemConfig.receivers).
+      try { await fetchReceivers(); } catch { /* optimistic row is already in */ }
+      // Select the freshly-created receiver and collapse the sub-form.
+      setReceiverId(id);
+      setCreatingNew(false);
+    } catch (err) {
+      setCreateError(
+        err?.response?.data?.error || err?.message || "Failed to create receiver.",
+      );
+    } finally {
+      setCreateBusy(false);
+    }
+  };
 
   // Receivers selectable in ADD mode (native tab): enabled, and not
   // already in the show. The current entry is always allowed (no-op in
@@ -270,18 +343,50 @@ export default function ShowReceiverModal({
         )}
 
         {activeKind === RECEIVER_KIND_NATIVE ? (
-          <NativeReceiverFields
-            isEdit={isEdit}
-            noReceiversAvailable={noReceiversAvailable}
-            receiverId={receiverId}
-            onReceiverIdChange={setReceiverId}
-            selectableReceivers={selectableReceivers}
-            label={label}
-            onLabelChange={setLabel}
-            cues={cues}
-            onCuesChange={setCues}
-            highestUsedCue={highestUsedCue}
-          />
+          <>
+            <NativeReceiverFields
+              isEdit={isEdit}
+              noReceiversAvailable={noReceiversAvailable}
+              receiverId={receiverId}
+              onReceiverIdChange={setReceiverId}
+              selectableReceivers={selectableReceivers}
+              label={label}
+              onLabelChange={setLabel}
+              cues={cues}
+              onCuesChange={setCues}
+              highestUsedCue={highestUsedCue}
+            />
+            {!isEdit && (
+              creatingNew ? (
+                <NewReceiverCard
+                  ident={newIdent}
+                  onIdentChange={setNewIdent}
+                  label={newLabel}
+                  onLabelChange={setNewLabel}
+                  cues={newCues}
+                  onCuesChange={setNewCues}
+                  busy={createBusy}
+                  error={createError}
+                  onCreate={handleCreateReceiver}
+                  onCancel={() => {
+                    setCreatingNew(false);
+                    setCreateError(null);
+                  }}
+                />
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCreatingNew(true);
+                    setError(null);
+                  }}
+                  className="self-start text-xs font-medium text-blue-400 hover:text-blue-300"
+                >
+                  + New receiver
+                </button>
+              )
+            )}
+          </>
         ) : (
           <BilusocnZoneFields
             isEdit={isEdit}
@@ -320,6 +425,78 @@ function ReceiverKindTab({ active, onClick, label }) {
     >
       {label}
     </button>
+  );
+}
+
+// Inline create-a-receiver card shown under the native picker in ADD mode.
+// Mints a logical receiver into the user's palette (cloud: builder_receivers;
+// device: the Receivers table) so it can immediately be picked above.
+function NewReceiverCard({
+  ident,
+  onIdentChange,
+  label,
+  onLabelChange,
+  cues,
+  onCuesChange,
+  busy,
+  error,
+  onCreate,
+  onCancel,
+}) {
+  return (
+    <div className="flex flex-col gap-3 rounded-sm border border-border-subtle bg-surface-base/40 px-3 py-3">
+      <div className="text-xs font-semibold text-fg-secondary">New receiver</div>
+
+      <Field label="Receiver id">
+        <input
+          type="text"
+          value={ident}
+          onChange={(e) => onIdentChange(e.target.value)}
+          className={inputClass}
+          placeholder="RX163"
+          autoFocus
+        />
+      </Field>
+
+      <Field label="Label (optional)">
+        <input
+          type="text"
+          value={label}
+          onChange={(e) => onLabelChange(e.target.value)}
+          className={inputClass}
+          placeholder={ident ? `defaults to ${ident}` : ""}
+        />
+      </Field>
+
+      <Field label="Number of cues">
+        <select
+          value={cues}
+          onChange={(e) => onCuesChange(parseInt(e.target.value, 10))}
+          className={selectClass}
+        >
+          {SHOW_RECEIVER_CUE_OPTIONS.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      {error ? (
+        <div className="rounded-sm border border-danger/40 bg-danger-bg/60 px-3 py-2 text-xs text-danger-fg">
+          {error}
+        </div>
+      ) : null}
+
+      <div className="flex justify-end gap-2">
+        <Button variant="outline" onClick={onCancel} disabled={busy}>
+          Cancel
+        </Button>
+        <Button variant="primary" onClick={onCreate} disabled={busy || !ident.trim()}>
+          {busy ? "Creating…" : "Create"}
+        </Button>
+      </div>
+    </div>
   );
 }
 

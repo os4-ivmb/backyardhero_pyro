@@ -136,9 +136,14 @@ const useAppStore = create(persist((set, get) => ({
       console.error("Failed to delete show:", error);
     }
   },
+  // Returns { ok: true } on success or { ok: false, error } on failure so
+  // callers can surface save problems to the operator. Previously this
+  // swallowed every error into a console.error, so a rejected save (e.g.
+  // payload over the API body limit) looked successful in the UI while the
+  // change never persisted. Existing `await updateShow(...)` callers that
+  // ignore the return value keep working unchanged.
   updateShow: async (id, updatedData) => {
     try {
-      console.log(updatedData)
       await axios.patch(`/api/shows/${id}`, updatedData);
       set((state) => ({
         shows: state.shows.map((show) => (show.id === id ? { ...show, ...updatedData } : show)),
@@ -147,8 +152,14 @@ const useAppStore = create(persist((set, get) => ({
           [id]: { ...state.showById[id], ...updatedData },
         },
       }));
+      return { ok: true };
     } catch (error) {
       console.error('Failed to update show:', error);
+      const status = error?.response?.status;
+      const msg = status === 413
+        ? 'Show is too large to save. Try splitting it or removing unused media.'
+        : (error?.response?.data?.error || error?.message || 'Failed to save show.');
+      return { ok: false, error: msg, status };
     }
   },
 

@@ -8,6 +8,7 @@ import { MdRefresh, MdCloseFullscreen, MdOpenInFull, MdSignalWifi4Bar, MdSignalW
 import Toast from "../common/Toast";
 import GpioOverrideBar from "./GpioOverrideBar";
 import { isPollableReceiver } from "@/util/receivers";
+import { HARDWARE } from "@/util/clientEnv";
 
 const DONGLE_DEFAULTS = {
   addr: "/dev/tty.usbmodem01",
@@ -131,6 +132,10 @@ export default function StatusBar() {
   const connectWebSocketRef = useRef(null);
 
   const connectWebSocket = useCallback(() => {
+    // The :8090 daemon WebSocket is on-device only. In the cloud builder there
+    // is no daemon, and an insecure ws:// from an https page throws a
+    // SecurityError synchronously (which would crash the app). Skip entirely.
+    if (!HARDWARE) return;
     if (socketRef.current && socketRef.current.readyState <= 1) return;
     intentionalDisconnectRef.current = false;
     const socket = new WebSocket(`ws://${window.location.host.split(":")[0]}:8090`);

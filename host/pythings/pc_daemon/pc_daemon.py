@@ -4,6 +4,7 @@ import serial
 import sqlite3
 import threading
 import tempfile
+import traceback
 from datetime import datetime
 import json
 from enum import Enum
@@ -14,15 +15,31 @@ import select
 from protocol_handler.BYHProtocolHandler import BYHProtocolHandler
 
 # Configuration
-LED_FILE_PATH = "/data/ledstate"
-LED_FILE_PATH_WEB = "/data/webactstate"
-COMMAND_DIR = "/tmp/d_cmd"
+#
+# Runtime locations derive from three base dirs, each overridable via env so
+# the same code runs unchanged under Docker/Pi (defaults below reproduce the
+# original container paths) and under the desktop bundle, where the Electron
+# supervisor points these at writable per-user dirs.
+_DATA_DIR = os.environ.get("BYH_DATA_DIR", "/data")
+_CONFIG_DIR = os.environ.get("BYH_CONFIG_DIR", "/config")
+_RUN_DIR = os.environ.get("BYH_RUN_DIR", "/tmp")
+
+LED_FILE_PATH = os.path.join(_DATA_DIR, "ledstate")
+LED_FILE_PATH_WEB = os.path.join(_DATA_DIR, "webactstate")
+COMMAND_DIR = os.path.join(_RUN_DIR, "d_cmd")
 COMMAND_POLL_INTERVAL_S = 0.05
-CURSOR_FILE = "/tmp/fw_cursor"
-SERIAL_PORT = "/dev/ttyACM0"
-BAUD_RATE = 115200
-DB_PATH = "/data/backyardhero.db"
-STATE_FILE_PATH = "/data/state"
+CURSOR_FILE = os.path.join(_RUN_DIR, "fw_cursor")
+SERIAL_PORT = os.environ.get("SERIAL_PORT", "/dev/ttyACM0")
+BAUD_RATE = int(os.environ.get("SERIAL_BAUD", "115200"))
+DB_PATH = os.path.join(_DATA_DIR, "backyardhero.db")
+STATE_FILE_PATH = os.path.join(_DATA_DIR, "state")
+# M1: minimum wall-clock interval between /data/state FILE writes. The
+# in-RAM unix-socket push to the WS server is unthrottled (sub-ms, no SD
+# wear); the file is only a crash-recovery snapshot + the WS server's
+# inotify fallback, so writing it at ~0.7Hz instead of up to ~100Hz cuts
+# SD-card write amplification by 1-2 orders of magnitude. A show-state
+# transition (idle/loaded/running) forces an immediate write regardless.
+STATE_FILE_MIN_INTERVAL_S = 1.5
 # One-line marker file the daemon stamps on every show-state transition.
 # Contents are exactly one of: "idle" | "loaded" | "running". A
 # systemd .path unit on the host (byh-timesync-guard.path, installed by
@@ -32,16 +49,16 @@ STATE_FILE_PATH = "/data/state"
 # write a SEPARATE file from /data/state so the host watcher has a
 # tight, parse-free trigger -- otherwise every per-tick state write
 # would fire the .path unit and we'd thrash the timesyncd service.
-SHOW_STATE_MARKER_PATH = "/data/byh_show_state"
+SHOW_STATE_MARKER_PATH = os.path.join(_DATA_DIR, "byh_show_state")
 # Optional unix datagram socket the WS server can bind. When the daemon's
 # state changes we fire a packet at it so the WS server doesn't have to
 # wait for inotify on the state file. Falls back silently to file-based
 # delivery if no listener is bound.
-STATE_SOCKET_PATH = "/tmp/byh_state.sock"
-LAST_SCAN_FILE_PATH = "/data/last_scan.json"
-CONFIG_PATH = "/config/systemcfg.json"
-ERR_LOG_PATH = "/data/log/daemon.err"
-LED_DATA_PATH = "/data/leddata"  # Path for persisting LED states
+STATE_SOCKET_PATH = os.path.join(_RUN_DIR, "byh_state.sock")
+LAST_SCAN_FILE_PATH = os.path.join(_DATA_DIR, "last_scan.json")
+CONFIG_PATH = os.path.join(_CONFIG_DIR, "systemcfg.json")
+ERR_LOG_PATH = os.path.join(_DATA_DIR, "log", "daemon.err")
+LED_DATA_PATH = os.path.join(_DATA_DIR, "leddata")  # Path for persisting LED states
 SWITCH_GPIO_PIN = 20  # GPIO pin for the start/stop switch
 ARMING_GPIO_PIN = 21  # GPIO pin for the arming switch
 MAN_FIRE_GPIO_PIN = 12  # GPIO pin for the arming switch
@@ -256,6 +273,14 @@ class FireworkDaemon:
         self.protocol_handler = None
         self.delegate_start_to_client = True
         self.waiting_for_client_start = False
+        # W5(perf): last command the daemon actually consumed off the
+        # /tmp/d_cmd queue, echoed into state so the web UI can correlate a
+        # POST'd command (which carries a client-generated `cmd_id`) with
+        # "the daemon picked it up". An HTTP 200 from cmd_daemon only means
+        # "file written"; this is the closest thing to a real ack without
+        # building a second back-channel. Reject *reasons* still flow via
+        # the error log -> WS aux channel.
+        self.last_command_ack = None
         self.fire_check_failures = []
         self.tcp_buffer = ""
         # Bytes carried over from the previous recv() that didn't end on a
@@ -312,6 +337,13 @@ class FireworkDaemon:
         # update_state_file() only writes the marker file when the
         # high-level show state actually transitions, not on every tick.
         self._last_show_state_written = None
+        # M1: SD-card write-amplification guard. The unix-socket push (which
+        # feeds the WS server) happens on every flush, but the /data/state
+        # FILE is only a crash-recovery artifact + inotify fallback, so we
+        # rate-limit it. Tracks the last file-write wall time + the last
+        # show transition we forced a write on.
+        self._last_state_file_write_ts = 0.0
+        self._last_state_file_show_state = None
 
         self.load_config()
 
@@ -486,15 +518,24 @@ class FireworkDaemon:
             print("Oh noooo")
 
     def setup_serial(self):
-        """Set up the TCP connection to the serial bridge."""
+        """Set up the TCP connection to the serial bridge.
+
+        Returns True if the socket connected and the config line was sent,
+        False otherwise. On failure the socket is nulled out so the read
+        loop / reconnect path can detect the dead connection and retry
+        (C3) rather than operating on a half-open socket.
+        """
         try:
-            if hasattr(self, 'tcp_socket') and self.tcp_socket:
-                self.tcp_socket.close()
-                
-            self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.tcp_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            self.tcp_socket.connect(('host.docker.internal', 9000))  # Use the service name in Docker Compose
-            
+            if getattr(self, 'tcp_socket', None):
+                try:
+                    self.tcp_socket.close()
+                except Exception:
+                    pass
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.connect(('host.docker.internal', 9000))  # Use the service name in Docker Compose
+
             # Configure the serial port on the bridge
             config_cmd = {
                 'type': 'config_serial',
@@ -502,12 +543,54 @@ class FireworkDaemon:
                 'baud': self.serial_baud
             }
 
-            self.tcp_socket.sendall((json.dumps(config_cmd) + '\n').encode('utf-8'))
-                
+            sock.sendall((json.dumps(config_cmd) + '\n').encode('utf-8'))
+            self.tcp_socket = sock
+            return True
+
         except Exception as e:
             print(f"Error setting up TCP connection to serial bridge: {e}")
             self.write_error(f"Error setting up TCP connection to serial bridge: {e}")
             self.led_handler.update("tx_active", TX_ACTIVE_STATE.DEVICE_ERROR.value)
+            self.tcp_socket = None
+            return False
+
+    def _close_tcp_socket(self):
+        """Tear down the current bridge socket and reset line buffers so a
+        fresh connection starts clean (C3)."""
+        sock = getattr(self, 'tcp_socket', None)
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+        self.tcp_socket = None
+        # A partial line from the dead connection must not be prepended to
+        # data from the new one.
+        self.tcp_recv_buffer = bytearray()
+        self.tcp_buffer = ""
+
+    def _reconnect_bridge(self):
+        """Re-establish the TCP session to the serial bridge with bounded
+        backoff. Returns True once connected (or False if the daemon is
+        shutting down).
+
+        Without this the daemon used to spin at 100% CPU on a dead socket
+        and permanently lose the dongle after a bridge restart (C3).
+        """
+        backoff = 1.0
+        announced = False
+        while self.running:
+            if not announced:
+                print("Bridge connection down; attempting to reconnect...")
+                self.led_handler.update("tx_active", TX_ACTIVE_STATE.DEVICE_ERROR.value)
+                announced = True
+            if self.setup_serial():
+                print("Reconnected to serial bridge.")
+                self.led_handler.update("tx_active", TX_ACTIVE_STATE.CONNECTED.value)
+                return True
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 5.0)
+        return False
 
     def read_from_tcp(self):
         """Read data from the TCP socket and process it like serial data."""
@@ -520,6 +603,17 @@ class FireworkDaemon:
                     data = None
                     if readable:
                         data = self.tcp_socket.recv(4096)
+                    if readable and not data:
+                        # recv() == b'' means the bridge closed the
+                        # connection (EOF). Without this the select() above
+                        # would report the dead socket readable forever and
+                        # we'd burn a CPU core receiving b'' while
+                        # permanently losing the dongle (C3). Reconnect with
+                        # backoff instead.
+                        print("Bridge closed the connection (EOF). Reconnecting...")
+                        self._close_tcp_socket()
+                        self._reconnect_bridge()
+                        continue
                     if data:
                         # Append to the carry-over buffer and only process
                         # complete newline-terminated lines. Anything after
@@ -591,6 +685,18 @@ class FireworkDaemon:
                                         if not self.protocol_handler.process_serial_in(line):
                                             self.bad_serial_ct = self.bad_serial_ct + 1
                                 self.last_serial_received = datetime.now()
+                else:
+                    # No live socket: the initial connect failed or the
+                    # bridge dropped us. Reconnect with backoff instead of
+                    # spinning this while loop at full speed (C3).
+                    self._reconnect_bridge()
+            except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                # A dead / half-open socket. Tear it down and reconnect
+                # rather than ticking bad_serial_ct toward DEVICE_ERROR
+                # forever on a fixable transport drop (C3).
+                print(f"Bridge socket error: {e}. Reconnecting...")
+                self._close_tcp_socket()
+                self._reconnect_bridge()
             except Exception as e:
                 self.bad_serial_ct = self.bad_serial_ct + 1
                 if self.bad_serial_ct > BAD_TX_THRESHOLD:
@@ -618,7 +724,11 @@ class FireworkDaemon:
                 self.last_serial_sent = datetime.now()
                 self.led_handler.update("tx_active", TX_ACTIVE_STATE.TRANSMITTING.value)
             except Exception as e:
+                # A half-dead socket can wedge writes too. Drop it so the
+                # read loop's reconnect path re-establishes the session
+                # rather than every subsequent send silently failing (C3).
                 print(f"Error sending to TCP socket: {e}")
+                self._close_tcp_socket()
 
     def setup_gpio(self):
         """Set up the GPIO pins for the switches."""
@@ -723,7 +833,11 @@ class FireworkDaemon:
                 self.mark_state_dirty()
                 time.sleep(0.1)  # Check every 100ms
             except Exception as e:
-                print(f"Error monitoring switches: {e}")
+                # Never swallow silently: a broad except here is exactly
+                # what let the pause AttributeError (C2) ship unnoticed.
+                tb = traceback.format_exc()
+                print(f"Error monitoring switches: {e}\n{tb}")
+                self.write_error(f"Error monitoring switches: {e}\n{tb}")
 
     def poll_command_dir(self):
         """Poll the /tmp/d_cmd directory for command files."""
@@ -741,12 +855,21 @@ class FireworkDaemon:
                             print(f"Loaded command from file: {command}")
                             self.handle_command(command)
                             handled_command = True
+                            # W5(perf): record the correlation id so the UI
+                            # can confirm this specific command was consumed.
+                            self.last_command_ack = {
+                                "cmd_id": command.get("cmd_id"),
+                                "type": command.get("type"),
+                                "ts": int(datetime.now().timestamp() * 1000),
+                            }
 
                         os.remove(file_path)
                         print(f"Deleted command file: {file_path}")
 
             except Exception as e:
-                print(f"Error polling command directory: {e}")
+                tb = traceback.format_exc()
+                print(f"Error polling command directory: {e}\n{tb}")
+                self.write_error(f"Error polling command directory: {e}\n{tb}")
 
             if handled_command:
                 self.mark_state_dirty()
@@ -806,9 +929,6 @@ class FireworkDaemon:
                     cmddata['target'],
                     kind=cmddata.get('kind'),
                 )
-            elif command['type'] == 'db_query':
-                query = command.get('query', '')
-                self.query_database(query)
             elif command['type'] == 'delegate_launch':
                 self.delegate_start_to_client = command.get('do_it', False)
             elif command['type'] == 'start_show':
@@ -835,8 +955,33 @@ class FireworkDaemon:
                     print("Invalid load_show command: Missing 'id'.")
             elif command['type'] == 'unload_show':
                 self.unload_show()
+            elif command['type'] == 'abort_show_load':
+                # Operator-initiated cancel of an in-progress load. The
+                # synchronous cue-send phase briefly blocks this command
+                # thread, but the hang we actually care about is the async
+                # wait (receivers never confirming loadComplete) -- during
+                # which this thread is free, so the cancel lands promptly.
+                if self.protocol_handler:
+                    aborted, msg = self.protocol_handler.abort_show_load()
+                    if aborted:
+                        self.led_handler.update("show_load_state", LOAD_STATE.OFF.value)
+                        self.loaded_show_id = None
+                        self.loaded_show_name = None
+                        self.current_schedule = None
+                        self.write_time_cursor(-1)
+                        self.mark_state_dirty()
+                    else:
+                        print(f"abort_show_load ignored: {msg}")
             elif command['type'] == 'select_serial':
                 self.switch_serial(command.get('device'), int(command.get('baud')))
+            elif command['type'] == 'reboot_dongle':
+                # Host-requested soft reboot of the ESP32-S2 itself. We just
+                # send the `reboot` serial command; the firmware acks (C+
+                # reboot), flushes, and calls esp_restart(). The USB-CDC port
+                # then drops and re-enumerates within ~2s, and the bridge's
+                # auto-reconnect + our normal post-reconnect re-sync brings
+                # the link back -- no host-side teardown needed here.
+                self.send_serial_command("reboot")
             elif command['type'] == 'set_brightness':
                 brightness = int(command.get('brightness', 100))
                 if(int(brightness)==0):
@@ -1081,18 +1226,6 @@ class FireworkDaemon:
             print("Cannot identify protocol handler class")
 
 
-    def query_database(self, query):
-        """Execute a query on the SQLite database."""
-        try:
-            with sqlite3.connect(DB_PATH) as conn:
-                cursor = conn.cursor()
-                cursor.execute(query)
-                results = cursor.fetchall()
-                print(f"Query results: {results}")
-                return results
-        except Exception as e:
-            print(f"Error querying database: {e}")
-
     def write_time_cursor(self, tc):
         self.time_cursor = tc
         with open(CURSOR_FILE, "w") as f:
@@ -1124,6 +1257,23 @@ class FireworkDaemon:
         self.loaded_show_id = show_id
         self.led_handler.update("show_load_state", LOAD_STATE.LOADED.value)
         self.write_time_cursor(0)
+
+    def signal_show_load_failed(self, reason=""):
+        """Roll the daemon back to a clean, unloaded state after a show load
+        fails (async timeout) or is cancelled. Safe to call from the
+        read_from_tcp / protocol-handler thread -- everything it touches is
+        either a plain attribute write or a thread-safe helper. Surfaces
+        `reason` to the error stream and lights LOAD_ERROR so the operator
+        gets an unambiguous signal instead of a load that silently never
+        finishes."""
+        if reason:
+            self.write_error(reason)
+        self.led_handler.update("show_load_state", LOAD_STATE.LOAD_ERROR.value)
+        self.loaded_show_id = None
+        self.loaded_show_name = None
+        self.current_schedule = None
+        self.write_time_cursor(-1)
+        self.mark_state_dirty()
 
     def load_show(self, show_id):
         """Load a show from the database, process it, and save the runtime payload."""
@@ -1255,6 +1405,7 @@ class FireworkDaemon:
 
         if not self.protocol_handler.show_loaded:
             self.write_error("No show is loaded. Cannot start.")
+            return
 
         if self.protocol_handler.running_show:
             print("A show is already running. Cannot start another.")
@@ -1286,7 +1437,7 @@ class FireworkDaemon:
     def pause_schedule(self, from_delegate=False):
         """Pause all running schedules."""
         print("Pausing schedule...")
-        if(self.dstc):
+        if(self.delegate_start_to_client):
             self.led_handler.update("show_run_state", RUN_STATE.DELEGATE_WAIT.value)
             self.waiting_for_client_start = True
         else:
@@ -1318,11 +1469,17 @@ class FireworkDaemon:
         self.command_timer_threads = [
             t for t in self.command_timer_threads if t.is_alive()
         ]
-        self.is_running = False
         print("All schedules stopped.")
 
-    def update_state_file(self):
-        """Update the state file with the current daemon state."""
+    def update_state_file(self, force_file=False):
+        """Publish current daemon state.
+
+        Always pushes the snapshot to the WS server's unix socket (cheap,
+        RAM-only). The /data/state FILE write is rate-limited to
+        STATE_FILE_MIN_INTERVAL_S to spare the SD card (M1); pass
+        force_file=True (clean shutdown) or trigger a show-state transition
+        to write it immediately.
+        """
         state = {
             "device_running": self.last_serial_received is not None and (datetime.now() - self.last_serial_received).total_seconds() <= 10,
             "device_found": self.serial_connection is not None,
@@ -1374,6 +1531,11 @@ class FireworkDaemon:
             "proto_handler_status": self.protocol_handler is not None and self.protocol_handler.status.name,
             "active_protocol": self.protocol_handler is not None and self.protocol_handler.protocol,
             "dstc": self.delegate_start_to_client,
+            # W5(perf): correlation ack for the most recently consumed
+            # command file ({cmd_id, type, ts} or None). The UI matches
+            # cmd_id against the id it generated on POST to clear the
+            # "pending" spinner / fall back to a timeout warning.
+            "last_command_ack": self.last_command_ack,
             "sst": self.protocol_handler is not None and self.protocol_handler.show_start_time,
             "receivers": self.protocol_handler is not None and self.protocol_handler.receivers,
             "waiting_for_client_start": self.waiting_for_client_start,
@@ -1467,6 +1629,25 @@ class FireworkDaemon:
             # marker just means timesyncd stays paused a bit longer
             # than necessary. Don't let it block the state file write.
             print(f"show-state marker write failed: {e}")
+
+        # M1: rate-limit the FILE write. The socket push above already
+        # delivered this snapshot to the WS server; the file is only a
+        # crash-recovery artifact + inotify fallback. Skip the disk write
+        # unless enough time has elapsed, the show-state transitioned
+        # (operators must never miss a loaded/running edge in the recovery
+        # file), or the caller forced it (clean shutdown).
+        now_ts = time.time()
+        cur_show_state = (
+            "running" if bool(state.get("show_running"))
+            else "loaded" if bool(state.get("show_loaded"))
+            else "idle"
+        )
+        show_state_changed = cur_show_state != self._last_state_file_show_state
+        due = (now_ts - self._last_state_file_write_ts) >= STATE_FILE_MIN_INTERVAL_S
+        if not (force_file or show_state_changed or due):
+            return
+        self._last_state_file_write_ts = now_ts
+        self._last_state_file_show_state = cur_show_state
 
         # Atomic file publish for any out-of-process reader and for the
         # WS server's inotify fallback. We deliberately do NOT fsync()

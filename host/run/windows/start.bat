@@ -42,6 +42,27 @@ if errorlevel 1 (
     goto :end
 )
 
+REM The docker CLI lands in PATH even when the Docker Desktop engine is
+REM stopped or still booting (the WSL2 backend takes a while). Talking to a
+REM dead daemon makes "docker compose pull" hang indefinitely instead of
+REM erroring out -- so wait for the engine to actually answer first.
+echo Waiting for Docker engine to be ready...
+set DOCKER_WAIT=0
+:waitdocker
+docker info >nul 2>nul
+if not errorlevel 1 goto dockerready
+set /a DOCKER_WAIT+=1
+if %DOCKER_WAIT% geq 60 (
+    echo ERROR: Docker engine did not respond after ~120 seconds.
+    echo Start Docker Desktop ^(whale icon in the system tray^), wait for it
+    echo to report "running", then run start.bat again.
+    goto :end
+)
+timeout /t 2 /nobreak > nul
+goto waitdocker
+:dockerready
+echo Docker engine is ready.
+
 if not exist "%BRIDGE_VENV%\Scripts\activate.bat" (
     echo Creating bridge venv at %BRIDGE_VENV%...
     python -m venv "%BRIDGE_VENV%"
@@ -61,6 +82,12 @@ timeout /t 3 /nobreak > nul
 
 echo Pulling latest Backyard Hero image...
 docker compose -f "%COMPOSE_FILE%" pull
+if errorlevel 1 (
+    echo ERROR: Failed to pull the Backyard Hero image.
+    echo Check your internet connection and that you can reach Docker Hub.
+    echo If the image is private, run "docker login" first.
+    goto :end
+)
 
 echo Starting Backyard Hero docker stack...
 echo.

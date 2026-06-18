@@ -55,7 +55,13 @@ def check_ffmpeg_available():
 
 def get_db_path():
     """Get the path to the SQLite database."""
-    # Try different possible paths
+    # The desktop bundle and the daemon both export BYH_DATA_DIR; honor it
+    # first so this on-demand tool writes to the same DB the rest of the app
+    # uses. Falls back to the legacy container/dev path discovery otherwise.
+    env_dir = os.environ.get('BYH_DATA_DIR')
+    if env_dir:
+        return os.path.join(env_dir, 'backyardhero.db')
+
     possible_paths = [
         '/data/backyardhero.db',
         os.path.join(os.path.dirname(__file__), '../../../data/backyardhero.db'),
@@ -74,6 +80,12 @@ def get_db_path():
 
 def get_log_path():
     """Get the path to the log file."""
+    env_dir = os.environ.get('BYH_DATA_DIR')
+    if env_dir:
+        log_dir = os.path.join(env_dir, 'log')
+        os.makedirs(log_dir, exist_ok=True)
+        return os.path.join(log_dir, 'firing_profiles.log')
+
     # Try different possible paths for log directory
     possible_log_dirs = [
         '/data/log',

@@ -1,4 +1,4 @@
-import { firingProfileQueries, inventoryQueries } from "@/util/sqldb";
+import { getRepo } from "@/data";
 
 function parseShotTimestamps(raw) {
   try {
@@ -17,19 +17,26 @@ function parseShotTimestamps(raw) {
   }
 }
 
-export default function handler(req, res) {
+export default async function handler(req, res) {
   if (req.method !== "GET") {
     res.setHeader("Allow", ["GET"]);
     return res.status(405).end(`Method ${req.method} Not Allowed`);
   }
 
+  let repo;
   try {
-    const inventoryById = inventoryQueries.getAll.all().reduce((acc, item) => {
+    repo = await getRepo(req);
+  } catch (err) {
+    return res.status(err?.status || 500).json({ error: err?.message || 'Failed to resolve data context.' });
+  }
+
+  try {
+    const inventoryById = (await repo.inventory.list()).reduce((acc, item) => {
       acc[item.id] = item;
       return acc;
     }, {});
 
-    const profiles = firingProfileQueries.getAll.all().map((profile) => {
+    const profiles = (await repo.firingProfiles.list()).map((profile) => {
       const item = inventoryById[profile.inventory_id] || {};
       return {
         inventory_id: profile.inventory_id,

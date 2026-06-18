@@ -1,18 +1,32 @@
-import { inventoryQueries, firingProfileQueries } from "@/util/sqldb";
+import { getRepo } from "@/data";
 import { parseOptionalUnitCost } from "@/util/inventoryUnitCost";
+import { caps } from "@/util/profile";
 
 
-export default function handler(req, res) {
+export default async function handler(req, res) {
   const { id } = req.query;
-  const numericId = parseInt(id, 10);
-  if (Number.isNaN(numericId)) {
-    return res.status(400).json({ error: 'Invalid inventory id.' });
+  // Local SQLite uses autoincrement integer ids; the cloud (Supabase) uses
+  // UUID strings. Only enforce the numeric shape on the SQLite backend.
+  let entityId = id;
+  if (caps.db === 'sqlite') {
+    const numericId = parseInt(id, 10);
+    if (Number.isNaN(numericId)) {
+      return res.status(400).json({ error: 'Invalid inventory id.' });
+    }
+    entityId = numericId;
+  }
+
+  let repo;
+  try {
+    repo = await getRepo(req);
+  } catch (err) {
+    return res.status(err?.status || 500).json({ error: err?.message || 'Failed to resolve data context.' });
   }
 
   if (req.method === 'DELETE') {
     try {
-      firingProfileQueries.deleteByInventoryId.run(numericId);
-      const result = inventoryQueries.delete.run(numericId);
+      await repo.firingProfiles.removeByInventoryId(entityId);
+      const result = await repo.inventory.remove(entityId);
       if (result.changes === 0) return res.status(404).json({ error: 'Inventory item not found.' });
       return res.status(200).json({ message: 'Inventory item deleted successfully.' });
     } catch (error) {
@@ -23,7 +37,6 @@ export default function handler(req, res) {
 
   if (req.method === 'PATCH') {
     const { name, type, duration, fuse_delay, lift_delay, burn_rate, color, available_ct, youtube_link, youtube_link_start_sec, image, metadata, source, unit_cost } = req.body;
-    console.log(req.body)
     if (!name || !type) {
       return res.status(400).json({ error: 'All fields are required.' });
     }
@@ -40,7 +53,11 @@ export default function handler(req, res) {
       const metadataStr = metadata ? (typeof metadata === 'string' ? metadata : JSON.stringify(metadata)) : null;
       const sourceValue = source || 'user_created';
       const unitCost = parseOptionalUnitCost(unit_cost);
-      const result = inventoryQueries.update.run(name, type, duration, fuse_delay, lift_delay, burn_rate, color, available_ct, youtube_link, youtube_link_start_sec, image, metadataStr, unitCost, sourceValue, numericId);
+      const result = await repo.inventory.update(entityId, {
+        name, type, duration, fuse_delay, lift_delay, burn_rate, color,
+        available_ct, youtube_link, youtube_link_start_sec, image,
+        metadata: metadataStr, unit_cost: unitCost, source: sourceValue,
+      });
       if (result.changes === 0) return res.status(404).json({ error: 'Inventory item not found.' });
       return res.status(200).json({ message: 'Inventory item updated successfully.' });
     } catch (error) {

@@ -3,6 +3,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <Preferences.h>
 #include <Update.h>
+#include "esp_ota_ops.h"   // H2.2: boot self-test / rollback confirmation
 
 // FW_VERSION: Firmware version tracking for os4_receiver
 // v1-v4: Historical versions (not documented, dates unknown)
@@ -164,8 +165,27 @@
 //       only writes regions outside that gap. Identity therefore
 //       survives every firmware update unless someone explicitly
 //       erases the chip (e.g. `esptool.py erase_flash`).
+// v24: 2026-06-XX - OTA durability + RF address entropy (paired with dongle
+//   FW v20+). BREAKING RF change -- ship with the matching dongle release:
+//   * H1: end-to-end CRC32 is now actually verified. handleOtaData folds
+//     each written chunk into a running zlib/IEEE CRC32; handleOtaEnd
+//     compares it against the host-supplied otaCrc32Expected BEFORE
+//     Update.end(true) and tears down with the new OTA_ERR_CRC(8) on
+//     mismatch instead of committing a corrupt image.
+//   * H2.2: boot self-test / rollback confirmation. setup() calls
+//     esp_ota_mark_app_valid_cancel_rollback() only after radio + NVS
+//     identity are confirmed healthy. With a rollback-enabled bootloader
+//     (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE) a bricked OTA image that
+//     panics before this point auto-reverts to the previous app. No-op on
+//     cores built without rollback.
+//   * H3: tolerant chunk ordering. Any chunkIdx <= otaLastChunk is re-acked
+//     without re-writing; a future gap (chunkIdx > otaLastChunk+1) is
+//     declined (not torn down) so the host can resume from the ACK-reported
+//     lastChunk+1 instead of restarting the whole transfer.
+//   * H8: receiverReadAddress() XORs RF_ADDR_ENTROPY_MASK to scatter the
+//     near-all-zero nRF24 address bytes. MUST match dongle FW v20+.
 #define BOARD_VERISON 9
-#define FW_VERSION 23
+#define FW_VERSION 25
 
 // Runtime identity, populated from NVS in setup(). 0 / "RX???" are the
 // unprovisioned sentinels -- see loadIdentityFromNVS() and the v14 notes
@@ -206,7 +226,7 @@ uint16_t fireDurationMs = DEFAULT_FIRE_DURATION_MS;
 const bool RECEIVER_USES_V1_CUES = false;
 
 // Set to 1 for verbose serial logging (helpful for bringup, costs ms per cmd).
-#define DEBUG_PRINT 0
+#define DEBUG_PRINT 1
 #define DBG_PRINT(x)   do { if (DEBUG_PRINT) Serial.print(x);   } while (0)
 #define DBG_PRINTLN(x) do { if (DEBUG_PRINT) Serial.println(x); } while (0)
 
@@ -404,7 +424,8 @@ enum OtaError : uint8_t {
   OTA_ERR_END_FAILED       = 4,  // Update.end(true) failed (CRC / signature)
   OTA_ERR_OOB_CHUNK        = 5,  // chunkIdx not the expected next slot
   OTA_ERR_HOST_ABORT       = 6,  // host sent OTA_ABORT
-  OTA_ERR_BAD_BEGIN        = 7   // OTA_BEGIN was malformed (bad size / rate)
+  OTA_ERR_BAD_BEGIN        = 7,  // OTA_BEGIN was malformed (bad size / rate)
+  OTA_ERR_CRC              = 8   // end-to-end CRC32 mismatch (H1)
 };
 
 struct ManualFireMessage {
@@ -511,6 +532,12 @@ uint16_t otaTotalChunks  = 0;
 uint16_t otaLastChunk    = 0xFFFF;     // 0xFFFF = no chunk yet
 uint32_t otaBytesReceived = 0;
 uint32_t otaCrc32Expected = 0;
+// Running end-to-end CRC32 over the bytes we've actually written, held in
+// its INTERNAL (pre-final-inversion) form. Finalized + compared against
+// otaCrc32Expected in handleOtaEnd (H1). The host computes the expected
+// value with Python binascii.crc32 (standard zlib/IEEE CRC-32), so the
+// polynomial / init / final-XOR below must match it exactly.
+uint32_t otaCrc32Running = 0xFFFFFFFF;
 uint8_t  otaPendingDataRate = 0;       // applied after we ACK OTA_BEGIN
 uint64_t otaLastActivityMs = 0;
 
@@ -541,6 +568,13 @@ const uint8_t rfChannel = 85;
 const uint8_t rfSystemId = 0;
 #define MASTER_WRITE_BASE 0x0000000000ULL
 #define RECEIVER_BASE     0x0000000001ULL
+
+// H8: high-entropy address mask. MUST be identical to the dongle's
+// RF_ADDR_ENTROPY_MASK (os4_dongle.ino) -- it scatters the otherwise
+// near-all-zero address bytes to cut nRF24 false-match packet loss. This
+// is a BREAKING RF change: a v24+ receiver only talks to a v20+ dongle.
+#define RF_ADDR_ENTROPY_MASK 0xA3C5E1B400ULL
+
 static inline uint64_t systemSalt() {
   return ((uint64_t)rfSystemId) << 32;
 }
@@ -550,8 +584,9 @@ static inline uint64_t masterWriteAddress() {
   return MASTER_WRITE_BASE | systemSalt();
 }
 static inline uint64_t receiverReadAddress() {
-  // Arithmetic add (not OR) so each NODE_ID maps to a unique address.
-  return systemSalt() + RECEIVER_BASE + (uint64_t)NODE_ID;
+  // Arithmetic add (not OR) so each NODE_ID maps to a unique address; XOR
+  // RF_ADDR_ENTROPY_MASK for H8 (applied identically on the dongle).
+  return RF_ADDR_ENTROPY_MASK ^ (systemSalt() + RECEIVER_BASE + (uint64_t)NODE_ID);
 }
 
 // ADDITIONAL_CLOCK_TX_OFFSET (ms): empirical compensation for the time between
@@ -707,7 +742,11 @@ void handleStartLoad(StartLoadMessage* msg) {
 // Bounds-checked single-cue add (used by both SHOW_LOAD and SHOW_LOADN).
 void loadOneCue(uint32_t time, uint8_t position) {
   if (position >= 128) return;
-  if (position > (NUM_BOARDS * 8)) {
+  // L2: positions are 0-indexed, so the valid range is [0, NUM_BOARDS*8).
+  // The old `>` admitted position == NUM_BOARDS*8 (e.g. 64 with 8 boards),
+  // a ghost slot with no physical output that still counted toward load
+  // completion.
+  if (position >= (NUM_BOARDS * 8)) {
     DBG_PRINTLN("LOAD ERR: TARGET EXCEEDS AVAILABLE.");
     return;
   }
@@ -801,11 +840,21 @@ void handleGeneric(GenericMessage* msg) {
 }
 
 // Calculate battery level (returns 5-253).
+//
+// H7: this math assumes a 13-bit ADC (raw 0..8191). setup() now pins that
+// with analogReadResolution(13) so it no longer silently depends on the
+// arduino-esp32 core default (12-bit on most cores -> raw maxes at 4095,
+// which would clamp every reading below the 2350 floor and report a flat
+// minimum battery). `bval` is the raw reading halved in software; the
+// 2320/3700 thresholds correspond to the empty/full pack voltages through
+// the on-board resistor divider (tune against a multimeter if the divider
+// changes). The old float math (`((bval-2320)/15.38)*2.5`) is replaced
+// with the exact integer equivalent: 2.5/15.38 == 125/769.
 uint8_t calculateBatteryLevel() {
   int bval = analogRead(BATT_VOLTAGE_PIN) / 2;
   if (bval > 3700)      return 253;
   else if (bval < 2350) return 5;
-  else                  return ((bval - 2320) / 15.38) * 2.5;
+  else                  return (uint8_t)(((uint32_t)(bval - 2320) * 125) / 769);
 }
 
 void getBatteryColorRGB(uint8_t batteryLevel, uint8_t *r, uint8_t *g, uint8_t *b) {
@@ -838,6 +887,23 @@ rf24_datarate_e otaWireRate(uint8_t b) {
   if (b == 1) return RF24_1MBPS;
   if (b == 2) return RF24_2MBPS;
   return RF24_250KBPS;
+}
+
+// Incremental zlib/IEEE CRC-32 (reflected, poly 0xEDB88320). `crc` is the
+// running INTERNAL state (NOT yet final-inverted); seed with 0xFFFFFFFF and
+// XOR the result with 0xFFFFFFFF once at the end to get the value that
+// matches Python's binascii.crc32 (H1). Bitwise (no table) keeps flash
+// small; at OTA's stop-and-wait cadence the RF round-trip dominates, so the
+// per-byte cost here is negligible.
+uint32_t otaCrc32Update(uint32_t crc, const uint8_t* data, size_t len) {
+  for (size_t i = 0; i < len; i++) {
+    crc ^= data[i];
+    for (uint8_t b = 0; b < 8; b++) {
+      uint32_t mask = (crc & 1u) ? 0xEDB88320u : 0u;
+      crc = (crc >> 1) ^ mask;
+    }
+  }
+  return crc;
 }
 
 bool otaIsActive() {
@@ -946,6 +1012,7 @@ void handleOtaBegin(OtaBeginMessage* msg) {
   otaPendingDataRate = msg->dataRate;
   otaLastChunk     = 0xFFFF;
   otaBytesReceived = 0;
+  otaCrc32Running  = 0xFFFFFFFF;   // reset running end-to-end CRC (H1)
   otaError         = OTA_ERR_NONE;
 
   if (!Update.begin(otaTotalSize)) {
@@ -956,10 +1023,10 @@ void handleOtaBegin(OtaBeginMessage* msg) {
     otaTeardown(OTA_ERR_BEGIN_FAILED);
     return;
   }
-  // Optional: feed the expected CRC to Update so end() can verify. The
-  // ESP32 Update class accepts it via setMD5; we don't have an MD5
-  // handy, but the trailing CRC32 we compute in software still serves
-  // as an end-to-end check.
+  // We don't have an MD5 to hand to Update.setMD5, so end-to-end
+  // integrity is enforced by the software CRC32 we accumulate over every
+  // written chunk (otaCrc32Running) and compare against otaCrc32Expected
+  // in handleOtaEnd before committing the image (H1).
   otaState = OTA_STATE_PREP_OK;
   otaLastActivityMs = (uint64_t)millis();
   OTA_LOG(F("[OTA] BEGIN ok size="));
@@ -987,20 +1054,29 @@ void handleOtaData(OtaDataMessage* hdr, uint8_t* data, uint8_t dataLen) {
 
   uint16_t expectedIdx = (otaLastChunk == 0xFFFF) ? 0 : (uint16_t)(otaLastChunk + 1);
   if (hdr->chunkIdx != expectedIdx) {
-    // Out-of-order: most likely a duplicate from a retry that we already
-    // applied. Silently re-ack the previous slot rather than tearing
-    // down the whole transfer.
-    if (hdr->chunkIdx == otaLastChunk) {
+    // H3: be tolerant of reordering instead of brittle. The ACK payload
+    // (refreshed by the caller after this returns) always carries
+    // otaLastChunk + otaBytesReceived, so the host can rewind to
+    // otaLastChunk+1 and resume -- we never need to scrap the whole
+    // transfer over a single misordered frame.
+    if (otaLastChunk != 0xFFFF && hdr->chunkIdx <= otaLastChunk) {
+      // Already-applied chunk (a duplicate from a retry whose ACK we
+      // lost, OR a stale frame from the radio FIFO). Re-ack with current
+      // state and ignore -- writing it again would corrupt the
+      // append-only Update stream.
       otaLastActivityMs = (uint64_t)millis();
       return;
     }
-    OTA_LOG(F("[OTA] OOB_CHUNK got="));
+    // Future gap (chunkIdx > expectedIdx): we missed one or more chunks.
+    // Do NOT teardown -- just decline to apply this out-of-sequence frame.
+    // The host reads lastChunk from our ACK and resends from lastChunk+1.
+    OTA_LOG(F("[OTA] GAP got="));
     OTA_LOG(hdr->chunkIdx);
     OTA_LOG(F(" expected="));
     OTA_LOG(expectedIdx);
     OTA_LOG(F(" lastApplied="));
     OTA_LOGLN(otaLastChunk);
-    otaTeardown(OTA_ERR_OOB_CHUNK);
+    otaLastActivityMs = (uint64_t)millis();
     return;
   }
 
@@ -1028,6 +1104,11 @@ void handleOtaData(OtaDataMessage* hdr, uint8_t* data, uint8_t dataLen) {
     otaTeardown(OTA_ERR_WRITE_FAILED);
     return;
   }
+
+  // Fold the just-written bytes into the running end-to-end CRC32 (H1).
+  // Done AFTER a successful Update.write so the CRC reflects exactly what
+  // landed in flash.
+  otaCrc32Running = otaCrc32Update(otaCrc32Running, data, dataLen);
 
   otaBytesReceived += dataLen;
   otaLastChunk = hdr->chunkIdx;
@@ -1064,6 +1145,20 @@ void handleOtaEnd() {
     otaTeardown(OTA_ERR_END_FAILED);
     return;
   }
+  // End-to-end CRC32 check BEFORE committing the image (H1). Finalize the
+  // running internal CRC (XOR with 0xFFFFFFFF) and compare to the value
+  // the host computed over the source .bin. A mismatch means the image is
+  // corrupt despite arriving in order with the right byte count -- refuse
+  // to flip the boot partition to it.
+  uint32_t otaCrc32Final = otaCrc32Running ^ 0xFFFFFFFFu;
+  if (otaCrc32Final != otaCrc32Expected) {
+    OTA_LOG(F("[OTA] CRC MISMATCH got=0x"));
+    OTA_LOG(otaCrc32Final);
+    OTA_LOG(F(" want=0x"));
+    OTA_LOGLN(otaCrc32Expected);
+    otaTeardown(OTA_ERR_CRC);
+    return;
+  }
   if (!Update.end(true)) {
     OTA_LOG(F("[OTA] Update.end FAILED UpdateErr="));
     OTA_LOGLN(Update.getError());
@@ -1085,6 +1180,35 @@ void handleOtaEnd() {
 // without rebooting.
 void handleOtaAbort() {
   otaTeardown(OTA_ERR_HOST_ABORT);
+}
+
+// H2.2: boot self-test / rollback confirmation. When the bootloader is built
+// with CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE, a freshly-flashed OTA image
+// boots in ESP_OTA_IMG_PENDING_VERIFY. If the app never marks itself valid,
+// the bootloader rolls back to the previous (known-good) app on the next
+// reset -- so a bricked OTA image (panic/WDT during boot) self-heals.
+//
+// We only call this AFTER setup() has proven the unit is healthy: radio
+// hardware responded and a valid NVS identity is present. That is precisely
+// the "boot self-test passed" signal the review (H2.2) asks for. If the new
+// image crashes before reaching this point, it is never marked valid and the
+// bootloader reverts.
+//
+// On cores built WITHOUT rollback the running partition is simply never in
+// PENDING_VERIFY, so this is a harmless no-op.
+void otaMarkAppValidIfPending() {
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  if (running == nullptr) return;
+  esp_ota_img_states_t state;
+  if (esp_ota_get_state_partition(running, &state) != ESP_OK) return;
+  if (state != ESP_OTA_IMG_PENDING_VERIFY) return;
+  esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+  if (err == ESP_OK) {
+    Serial.println(F("[OTA] boot self-test passed -- image marked valid"));
+  } else {
+    Serial.print(F("[OTA] mark_app_valid FAILED err="));
+    Serial.println((int)err);
+  }
 }
 
 // Hot-path tick called from loop() while otaState != IDLE. We service
@@ -1493,8 +1617,6 @@ void updateUnprovisionedStatusLEDs() {
   statusStrip.show();
 }
 
-void sendToShiftRegister(uint64_t pos1, uint64_t pos2) {}
-
 void runPlayLoop() {
   if (isPlaying && !isPaused) {
     uint64_t now = getSynchronizedTime();
@@ -1785,15 +1907,22 @@ void setBoardCount() {
   
 }
 
+// M2: 74HC595 setup/clock-pulse timing. The chip is rated for tens of MHz;
+// the original 30us per phase (~0.72ms/byte, up to ~6ms per refreshFiring()
+// with 8 boards) was ~30x more margin than needed and serialized with radio
+// servicing during dense sequences. 5us keeps a generous ~5x margin for
+// longer cue-board ribbon cables / level shifting while cutting shift-out
+// time 6x. Drop further toward 1us only after benching on real hardware.
+#define SHIFT_OUT_DELAY_US 5
 void myShiftOut(uint8_t dataPin, uint8_t clockPin, uint8_t bitOrder, uint8_t val) {
   for (uint8_t i = 0; i < 8; i++) {
     if (bitOrder == LSBFIRST) digitalWrite(dataPin, !!(val & (1 << i)));
     else                      digitalWrite(dataPin, !!(val & (1 << (7 - i))));
-    delayMicroseconds(30);
+    delayMicroseconds(SHIFT_OUT_DELAY_US);
     digitalWrite(clockPin, HIGH);
-    delayMicroseconds(30);
+    delayMicroseconds(SHIFT_OUT_DELAY_US);
     digitalWrite(clockPin, LOW);
-    delayMicroseconds(30);
+    delayMicroseconds(SHIFT_OUT_DELAY_US);
   }
 }
 
@@ -1920,7 +2049,13 @@ void setup() {
   // serial cable mid-OTA.
   Serial.begin(115200);
   Serial.setTxTimeoutMs(50);
-  delay(1000);
+  delay(100);
+
+
+  // H7: pin the ADC to 13-bit so calculateBatteryLevel / setBoardCount
+  // thresholds (raw up to ~7400 / ~5000) aren't silently broken by a core
+  // default of 12-bit (which caps raw at 4095 -> battery always reads min).
+  analogReadResolution(13);
 
   loadIdentityFromNVS();
   loadFireDurationFromNVS();
@@ -1936,6 +2071,7 @@ void setup() {
   Serial.print(F("Ident: "));         Serial.println(RECEIVER_IDENT);
   Serial.print(F("NODE_ID: "));       Serial.println(NODE_ID);
   Serial.print(F("Fire duration: ")); Serial.print(fireDurationMs); Serial.println(F(" ms"));
+
 
   statusStrip.begin();
   statusStrip.clear();
@@ -1996,9 +2132,19 @@ void setup() {
   Serial.print(F("FW Version: "));
   Serial.println(FW_VERSION);
 
+  if(DEBUG_PRINT) {
+    Serial.println("DEBUG_PRINT is enabled");
+  }
+
   // Pre-load an initial ACK payload so the very first command we receive can
   // ACK back with current status.
   refreshAckPayload();
+
+  // H2.2: we've proven radio hardware + NVS identity are healthy, so confirm
+  // this OTA image as valid (cancels a pending bootloader rollback). If the
+  // image had crashed before reaching here, the bootloader would have rolled
+  // back to the previous app instead.
+  otaMarkAppValidIfPending();
 }
 
 void loop() {

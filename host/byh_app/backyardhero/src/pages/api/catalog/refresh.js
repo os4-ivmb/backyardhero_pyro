@@ -2,14 +2,16 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
+import { DATA_DIR } from '@/util/paths';
 
 const execAsync = promisify(exec);
+const PROGRESS_PATH = path.join(DATA_DIR, 'catalog_crawl_progress.json');
 
 export default async function handler(req, res) {
   if (req.method === 'GET') {
     // Get progress status
     try {
-      const progressPath = '/data/catalog_crawl_progress.json';
+      const progressPath = PROGRESS_PATH;
       if (fs.existsSync(/*turbopackIgnore: true*/ progressPath)) {
         const progressData = fs.readFileSync(/*turbopackIgnore: true*/ progressPath, 'utf-8');
         const progress = JSON.parse(progressData);
@@ -31,7 +33,7 @@ export default async function handler(req, res) {
     // Start catalog crawl
     try {
       // Check if a crawl is already running
-      const progressPath = '/data/catalog_crawl_progress.json';
+      const progressPath = PROGRESS_PATH;
       if (fs.existsSync(/*turbopackIgnore: true*/ progressPath)) {
         const progressData = fs.readFileSync(/*turbopackIgnore: true*/ progressPath, 'utf-8');
         const progress = JSON.parse(progressData);
@@ -49,6 +51,9 @@ export default async function handler(req, res) {
       let scriptPath = path.join(/*turbopackIgnore: true*/ process.cwd(), '../../pythings/inv_crawl/crawl_catalog.py');
 
       const possiblePaths = [
+        ...(process.env.BYH_PYTHINGS_DIR
+          ? [path.join(/*turbopackIgnore: true*/ process.env.BYH_PYTHINGS_DIR, 'inv_crawl/crawl_catalog.py')]
+          : []),
         scriptPath,
         path.join(/*turbopackIgnore: true*/ process.cwd(), '../../../pythings/inv_crawl/crawl_catalog.py'),
         path.join(/*turbopackIgnore: true*/ process.cwd(), '../../../../pythings/inv_crawl/crawl_catalog.py'),

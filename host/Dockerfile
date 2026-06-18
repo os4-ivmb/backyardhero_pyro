@@ -56,6 +56,17 @@ RUN pip3 install --no-cache-dir --break-system-packages -r pythings/requirements
 
 # Copy Supervisor configuration
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# M8: run the application processes as the unprivileged `node` user (uid
+# 1000, shipped by the node base image) instead of root. supervisord itself
+# still starts as root (PID 1) so the entrypoint can fix bind-mount
+# ownership, but every program it launches drops to `node`. Give `node`
+# ownership of the build output + runtime dirs baked into the image so
+# `next start` (which writes .next/cache) and the Python services can write.
+RUN mkdir -p /data /data/log /tmp/d_cmd /tmp/ota_staging \
+    && chown -R node:node /app /data /tmp/d_cmd /tmp/ota_staging
 
 # Expose port for Next.js app
 EXPOSE 1776
@@ -67,5 +78,12 @@ ENV LED_STATE_FILE=/data/ledstate
 ENV NODE_ENV=production
 ENV PORT=1776
 
-# Truncate persisted app logs on each container process start, then hand off to Supervisor.
-CMD ["sh", "-c", "mkdir -p /data/log && : > /data/log/command.log && : > /data/log/firing_profiles.log && : > /data/log/daemon.err && exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf"]
+# M8: container healthcheck. Node 22 ships a global fetch(), so we don't
+# need curl/wget installed. Generous start-period covers the Next build
+# server + Python services coming up.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:1776/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+# Entrypoint prepares dirs + rotates logs (as root) then execs supervisord,
+# which launches each program as the non-root `node` user.
+CMD ["/usr/local/bin/docker-entrypoint.sh"]

@@ -133,6 +133,25 @@ ensure_bridge_venv() {
 
 ensure_bridge_venv
 
+# Bind the host-native bridge (TCP :9000) and flash server (HTTP :9001)
+# to the docker bridge gateway only, NOT 0.0.0.0 (C4.1). The container
+# reaches the host via host.docker.internal -> host-gateway, which is the
+# docker bridge gateway IP (typically 172.17.0.1). Binding there keeps
+# the serial-injection + flash ports reachable from the container while
+# unreachable from wlan0 AP clients. Falls back to 172.17.0.1 if docker
+# can't be queried (offline boot races), and can be overridden by
+# pre-setting BYH_BRIDGE_BIND in the environment.
+if [ -z "${BYH_BRIDGE_BIND:-}" ]; then
+  BYH_BRIDGE_BIND="$(docker network inspect bridge \
+    -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)"
+  if [ -z "${BYH_BRIDGE_BIND}" ]; then
+    BYH_BRIDGE_BIND="172.17.0.1"
+    echo "WARN: could not query docker bridge gateway; defaulting bind to ${BYH_BRIDGE_BIND}"
+  fi
+fi
+export BYH_BRIDGE_BIND
+echo "Bridge/flash-server bind address: ${BYH_BRIDGE_BIND}"
+
 echo "Starting TCP-to-serial bridge..."
 "${BRIDGE_VENV}/bin/python" "${BRIDGE_SCRIPT}" &
 BRIDGE_PID=$!

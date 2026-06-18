@@ -1,5 +1,7 @@
 import fs from 'fs';
 import path from 'path';
+import { ensureHardware } from '@/util/apiGuards';
+import { COMMAND_DIR } from '@/util/paths';
 
 /**
  * POST /api/receivers/rxcfg
@@ -17,6 +19,7 @@ import path from 'path';
  * width before responding.
  */
 export default function handler(req, res) {
+  if (!ensureHardware(res)) return;
   if (req.method !== 'POST') {
     res.setHeader('Allow', ['POST']);
     return res.status(405).end(`Method ${req.method} Not Allowed`);
@@ -35,7 +38,7 @@ export default function handler(req, res) {
   }
 
   try {
-    const folderPath = '/tmp/d_cmd';
+    const folderPath = COMMAND_DIR;
     if (!fs.existsSync(folderPath)) {
       fs.mkdirSync(folderPath, { recursive: true });
     }

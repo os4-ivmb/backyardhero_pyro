@@ -3,6 +3,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <ArduinoJson.h>
 #include <esp_task_wdt.h>
+#include <esp_system.h>   // esp_restart() for the host-requested soft reboot
 
 // FW_VERSION: Firmware version tracking for os4_dongle
 // v1: Initial version - Basic mesh networking and command queuing (date unknown)
@@ -146,7 +147,26 @@
 //     drops from ~2.1s to ~600ms, so a transient burst of interference
 //     no longer chokes the serial pipe for seconds at a time -- the host
 //     gets the NACK and decides whether to retry or recover.
-#define FW_VERSION 19
+// v20: 2026-06-XX - RF address entropy (paired with receiver FW v24+).
+//   BREAKING RF change -- ship together with the matching receiver release:
+//   * H8: receiverAddress() now XORs RF_ADDR_ENTROPY_MASK (0xA3C5E1B400)
+//     into the computed address so the otherwise near-all-zero nRF24
+//     address bytes are scattered, cutting false hardware address matches
+//     and the silent packet loss they cause (worst at 250kbps). The low
+//     mask byte is 0x00 so each nodeID still maps to a unique address.
+//     The receiver applies the identical mask; a v20 dongle only talks to
+//     a v24+ receiver. Pairs with the receiver's OTA durability work
+//     (H1 CRC32 / H2.2 rollback / H3 resume) in the same release.
+// v21: 2026-06-XX - Fix startload showId 1..10 parse bug:
+//   * The `startload IDENT <numTargets> <showId>` parser borrowed the
+//     trailing-token repeat-count heuristic used by showload/sync/fire, but
+//     startload never carries a repeat suffix. A showId of 1..10 was mistaken
+//     for a repeat count, which dropped the showId param and rejected the
+//     command (`CV startload`). START_LOAD was never sent, so the receiver
+//     kept currentShowId==0 while cues still loaded (cyan LED, showId 0).
+//     Now parses exactly two params. Not an RF/protocol change -- no
+//     receiver version dependency.
+#define FW_VERSION 21
 
 #define BOARD_VERSION 2
 
@@ -360,7 +380,24 @@ struct ReceiverInfo {
   uint8_t  noBoardsDetected;
   uint8_t  cuesAvailable;
   uint16_t fireDurationMs;
+
+  // M2: rxupd emit rate-limiting. The high-frequency latency/success-only
+  // churn (one rxupd per successful poll) is throttled to
+  // RXUPD_MIN_INTERVAL_MS, but an operator-visible change (load / start /
+  // showId / battery / continuity) emits immediately. These cache the last
+  // *emitted* values for the change comparison.
+  uint32_t lastRxUpdMs;
+  bool     rxUpdEverEmitted;
+  uint8_t  lastEmitBattery;
+  uint16_t lastEmitShowId;
+  bool     lastEmitLoad;
+  bool     lastEmitReady;
+  uint64_t lastEmitContinuity[CONTINUITY_INDEX_CT];
 };
+
+// M2: minimum spacing between rxupd lines for a given receiver when only
+// the latency/success fields changed. Operator-visible changes bypass this.
+#define RXUPD_MIN_INTERVAL_MS 100UL
 
 // Bumped from 10 to 32 to support 20+ receivers per the throughput target.
 #define MAX_RECEIVERS 32
@@ -601,6 +638,19 @@ RF24 radio(RF24_CE_PIN, RF24_CSN_PIN);
 #define MASTER_READ_BASE   0x0000000000ULL
 #define RECEIVER_BASE      0x0000000001ULL
 
+// H8: high-entropy address mask. The plain `salt + base + nodeID` scheme
+// produces 5-byte addresses that are almost all 0x00 -- and nRF24 uses the
+// address bytes for hardware match detection, where long runs of 0x00/0xFF
+// look like preamble/noise and measurably raise false matches + silent
+// packet loss (worst at 250kbps). XOR'ing the computed address with this
+// constant scatters the upper bytes while the low byte (mask = 0x00 there)
+// still carries the per-node delta, so every nodeID keeps a unique address.
+//
+// BREAKING RF CHANGE: the receiver firmware applies the IDENTICAL mask, so
+// dongle and receiver MUST ship together (dongle FW v20+ / receiver FW v24+,
+// see the version-gate note at RECEIVER_BASE above for the precedent).
+#define RF_ADDR_ENTROPY_MASK 0xA3C5E1B400ULL
+
 static inline uint64_t systemSalt() {
   // 4-byte left-shift so the system ID lives in the high 32 bits and never
   // collides with the 0..255 nodeID range in the low byte.
@@ -612,8 +662,9 @@ static inline uint64_t masterReadAddress() {
   return MASTER_READ_BASE | systemSalt();
 }
 static inline uint64_t receiverAddress(uint8_t nodeID) {
-  // See the IMPORTANT note above re: arithmetic add vs. bitwise OR.
-  return systemSalt() + RECEIVER_BASE + (uint64_t)nodeID;
+  // See the IMPORTANT note above re: arithmetic add vs. bitwise OR, and
+  // RF_ADDR_ENTROPY_MASK for the H8 entropy XOR (applied on both ends).
+  return RF_ADDR_ENTROPY_MASK ^ (systemSalt() + RECEIVER_BASE + (uint64_t)nodeID);
 }
 
 bool isQueueFull() { return cmdQueueCount >= MAX_COMMANDS_IN_QUEUE; }
@@ -883,6 +934,15 @@ ReceiverInfo* getReceiverByIdent(const String &ident, bool createIfNotExist) {
     r.noBoardsDetected = 0;
     r.cuesAvailable = 0;
     r.fireDurationMs = 0;
+    // M2: rxupd throttle state. rxUpdEverEmitted=false forces the first
+    // emit (and seeds the caches) regardless of timing.
+    r.lastRxUpdMs = 0;
+    r.rxUpdEverEmitted = false;
+    r.lastEmitBattery = 0;
+    r.lastEmitShowId = 0;
+    r.lastEmitLoad = false;
+    r.lastEmitReady = false;
+    for (uint8_t j = 0; j < CONTINUITY_INDEX_CT; j++) r.lastEmitContinuity[j] = 0;
     numReceivers++;
     return &receivers[numReceivers - 1];
   }
@@ -991,6 +1051,36 @@ uint8_t calculateSuccessPercent(ReceiverInfo* rinfo) {
 //   * `q`/`ch`/`fw` (dongle housekeeping) — stay on the slow tick.
 void emitRxUpd(const ReceiverInfo* r, bool includeFreshLatency) {
   if (!r) return;
+
+  // M2: rate-limit latency/success-only churn. Decide whether an
+  // operator-visible field changed; if not, and we emitted recently, skip
+  // this line. The per-second aggregate status tick still carries the
+  // averaged latency/success, so the host loses nothing but write volume.
+  ReceiverInfo* rw = (ReceiverInfo*)r;  // same const-cast pattern used below
+  uint32_t nowMs = millis();
+  bool material = !rw->rxUpdEverEmitted
+               || rw->loadComplete != rw->lastEmitLoad
+               || rw->startReady   != rw->lastEmitReady
+               || rw->showId       != rw->lastEmitShowId
+               || rw->batteryLevel != rw->lastEmitBattery;
+  if (!material) {
+    for (uint8_t j = 0; j < CONTINUITY_INDEX_CT; j++) {
+      if (rw->continuity[j] != rw->lastEmitContinuity[j]) { material = true; break; }
+    }
+  }
+  if (!material && (nowMs - rw->lastRxUpdMs) < RXUPD_MIN_INTERVAL_MS) {
+    return;
+  }
+  rw->lastRxUpdMs = nowMs;
+  rw->rxUpdEverEmitted = true;
+  rw->lastEmitLoad = rw->loadComplete;
+  rw->lastEmitReady = rw->startReady;
+  rw->lastEmitShowId = rw->showId;
+  rw->lastEmitBattery = rw->batteryLevel;
+  for (uint8_t j = 0; j < CONTINUITY_INDEX_CT; j++) {
+    rw->lastEmitContinuity[j] = rw->continuity[j];
+  }
+
   StaticJsonDocument<256> d;
   d["type"] = "rxupd";
   d["i"]    = r->ident;
@@ -2426,6 +2516,24 @@ void handleFlashAbort() {
   otaFinishMode("aborted", nullptr, nullptr);
 }
 
+// Host-requested soft reboot. The operator triggers this from the UI
+// (Settings → Dongle → "Reboot dongle") when the dongle needs a clean
+// restart without unplugging the USB cable or reflashing -- e.g. to clear
+// transient radio state or recover a wedged-but-not-watchdog-tripped link.
+// We ack first so the host log shows the command landed, flush the USB-CDC
+// TX FIFO so that ack actually leaves before the USB device tears down,
+// then give the host a beat to read it before esp_restart() drops the
+// link. This mirrors the watchdog's soft-reset path (trigger_panic=false):
+// the device comes back on the same /dev/tty.usbmodem* within ~2s, the
+// bridge's auto-reconnect re-attaches, and the daemon re-runs msync /
+// receiver sync exactly as it does after a WDT reboot or a replug.
+void handleReboot() {
+  Serial.println(F("C+ reboot"));
+  Serial.flush();
+  delay(50);
+  esp_restart();
+}
+
 void processSerialCommand(String inStr) {
   inStr.trim();
   if (inStr.length() == 0) return;
@@ -2438,6 +2546,7 @@ void processSerialCommand(String inStr) {
   if (inStr == "flash_end")   { handleFlashEnd();         return; }
   if (inStr == "flash_abort") { handleFlashAbort();       return; }
   if (inStr == "flash_ping")  { handleFlashPing();        return; }
+  if (inStr == "reboot" || inStr == "restart") { handleReboot(); return; }
 
   int firstSpace = inStr.indexOf(' ');
   if (firstSpace < 0) { Serial.println(F("C?NFS")); return; }
@@ -2569,20 +2678,15 @@ void processSerialCommand(String inStr) {
     }
   } else if (cmdStr == "startload") {
     qc.messageType = START_LOAD;
-    int lastSpace = paramsStr.lastIndexOf(' ');
-    String mainParams = paramsStr;
-    if (lastSpace > 0) {
-      String lastToken = paramsStr.substring(lastSpace + 1);
-      int lastTokenVal = lastToken.toInt();
-      if (lastTokenVal > 0 && lastTokenVal <= 10) {
-        mainParams = paramsStr.substring(0, lastSpace);
-        qc.repeat_count = lastTokenVal;
-      }
-    }
-    int spaceIdx = mainParams.indexOf(' ');
+    // Grammar is exactly `startload IDENT <numTargets> <showId>` — no repeat
+    // suffix. Do NOT apply the trailing-token repeat heuristic here: a showId
+    // of 1..10 would be mistaken for a repeat count, dropping the last param
+    // and rejecting the command (CV startload). That leaves the receiver with
+    // currentShowId==0 even though cues still load (cyan LED, showId 0).
+    int spaceIdx = paramsStr.indexOf(' ');
     if (spaceIdx < 0) { Serial.println(F("CV startload")); return; }
-    qc.startload_numTargets = mainParams.substring(0, spaceIdx).toInt();
-    qc.startload_showId = mainParams.substring(spaceIdx + 1).toInt();
+    qc.startload_numTargets = paramsStr.substring(0, spaceIdx).toInt();
+    qc.startload_showId = paramsStr.substring(spaceIdx + 1).toInt();
   } else if (cmdStr == "showload") {
     qc.messageType = SHOW_LOAD;
     int lastSpace = paramsStr.lastIndexOf(' ');

@@ -1,9 +1,9 @@
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export default async function handler(req, res) {
   try {
@@ -16,6 +16,14 @@ export default async function handler(req, res) {
 
     if (!id) {
       return res.status(400).json({ error: 'Item ID is required.' });
+    }
+
+    // W4b: `id` flows into a child process. It used to be interpolated
+    // into a shell string passed to exec(), so `1; rm -rf ...` executed.
+    // Integer-validate and pass argv to execFile (no shell) below.
+    const itemId = Number(id);
+    if (!Number.isInteger(itemId) || itemId < 0) {
+      return res.status(400).json({ error: 'Item ID must be a non-negative integer.' });
     }
 
     // Safely get parameters from body
@@ -69,6 +77,10 @@ export default async function handler(req, res) {
     
     // Try possible paths in order of likelihood
     const possiblePaths = [
+      // Desktop bundle: the supervisor exports BYH_PYTHINGS_DIR.
+      ...(process.env.BYH_PYTHINGS_DIR
+        ? [path.join(process.env.BYH_PYTHINGS_DIR, 'fp_gen', 'process_firing_profiles.py')]
+        : []),
       // Production/Docker path (most common)
       '/app/pythings/fp_gen/process_firing_profiles.py',
       // Local development paths
@@ -125,45 +137,41 @@ export default async function handler(req, res) {
     // Get Python path - try python3 first, then python
     const pythonPath = process.env.PYTHON_PATH || 'python3';
 
-    // Build the command
-    let command = `${pythonPath} "${scriptPath}" --item-id ${id}`;
-    
-    // Add detection method
-    command += ` --detection-method ${detectionMethod || 'max_amplitude'}`;
-    
+    // Build an argv array (no shell) so nothing here can be interpreted
+    // as shell syntax. Numeric args are coerced to strings.
+    const args = [
+      scriptPath,
+      '--item-id', String(itemId),
+      '--detection-method', detectionMethod || 'max_amplitude',
+    ];
     if (detectionMethod === 'max_amplitude' && thresholdRatio !== undefined) {
-      command += ` --threshold-ratio ${thresholdRatio}`;
+      args.push('--threshold-ratio', String(thresholdRatio));
     }
-    
     if (detectionMethod === 'noise_floor' && floorPercent !== undefined) {
-      command += ` --floor-percent ${floorPercent}`;
+      args.push('--floor-percent', String(floorPercent));
     }
-    
     if (mergeThresholdMs !== undefined) {
-      command += ` --merge-threshold-ms ${mergeThresholdMs}`;
+      args.push('--merge-threshold-ms', String(mergeThresholdMs));
     }
-    
     if (overrideDuration === true) {
-      command += ` --override-duration`;
+      args.push('--override-duration');
     }
 
-    console.log(`Executing command: ${command}`);
+    console.log(`Executing: ${pythonPath} ${args.join(' ')}`);
     console.log(`Working directory: ${path.dirname(scriptPath)}`);
 
-    // Execute the script
-    // Note: This runs asynchronously, so we'll return immediately
-    // The script will process in the background
-    execAsync(command, {
+    // Execute the script via execFile (no shell). Runs asynchronously;
+    // we return immediately and let it process in the background.
+    execFileAsync(pythonPath, args, {
       cwd: path.dirname(scriptPath),
       timeout: 300000, // 5 minute timeout
       maxBuffer: 10 * 1024 * 1024 // 10MB buffer for output
     }).then(({ stdout, stderr }) => {
-      console.log(`Reprocess profile for item ${id} completed`);
+      console.log(`Reprocess profile for item ${itemId} completed`);
       if (stdout) console.log('stdout:', stdout);
       if (stderr) console.error('stderr:', stderr);
     }).catch((error) => {
-      console.error(`Error reprocessing profile for item ${id}:`, error);
-      console.error(`Command that failed: ${command}`);
+      console.error(`Error reprocessing profile for item ${itemId}:`, error);
       if (error.stdout) console.error('stdout:', error.stdout);
       if (error.stderr) console.error('stderr:', error.stderr);
       if (error.code) console.error('Error code:', error.code);
@@ -172,7 +180,7 @@ export default async function handler(req, res) {
     // Return immediately - processing happens in background
     return res.status(202).json({ 
       message: 'Reprocessing started. This may take a few minutes.',
-      itemId: id
+      itemId: itemId
     });
   } catch (error) {
     console.error('Error starting reprocess:', error);

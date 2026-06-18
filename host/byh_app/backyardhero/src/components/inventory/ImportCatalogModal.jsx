@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from "react";
 import axios from "axios";
 import { INV_TYPES } from "@/constants";
 import useAppStore from '@/store/useAppStore';
+import { apiUrl } from '@/util/clientEnv';
 
 // Note: Type mapping is now done in gather.py, so we just use the type directly from records
 
@@ -50,7 +51,7 @@ export default function ImportCatalogModal({ isOpen, onClose, onImportComplete }
     setError(null);
     setCatalogNotFound(false);
     try {
-      const res = await fetch('/api/catalog');
+      const res = await fetch(apiUrl('/api/catalog'));
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
         if (res.status === 404) {
@@ -82,7 +83,7 @@ export default function ImportCatalogModal({ isOpen, onClose, onImportComplete }
     if (refreshingCatalog) {
       const interval = setInterval(async () => {
         try {
-          const res = await fetch('/api/catalog/refresh');
+          const res = await fetch(apiUrl('/api/catalog/refresh'));
           const progress = await res.json();
           setCrawlProgress(progress);
           
@@ -270,7 +271,7 @@ export default function ImportCatalogModal({ isOpen, onClose, onImportComplete }
     setError(null);
     
     try {
-      const res = await fetch('/api/catalog/refresh', {
+      const res = await fetch(apiUrl('/api/catalog/refresh'), {
         method: 'POST'
       });
       

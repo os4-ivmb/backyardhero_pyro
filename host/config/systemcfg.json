@@ -1,5 +1,5 @@
 {
-  "host_version": 0.26,
+  "host_version": 0.27,
   "system": {
     "dongle_port": "/dev/tty.usbmodem01",
     "dongle_baud": 115200,

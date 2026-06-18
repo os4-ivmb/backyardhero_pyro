@@ -13,10 +13,16 @@ from led_control import *
 from .OtaFlashDriver import OtaFlashDriver
 from .DongleFlashDriver import DongleFlashDriver
 
-# Path for the full per-channel RF scan dump. Kept separate from
-# /data/state because it's bulky (~3KB JSON for 126 channels) and
-# infrequent (only updated on operator-initiated scans).
-LAST_SCAN_FILE_PATH = '/data/last_scan.json'
+# Base dirs are env-overridable (defaults reproduce the original container
+# paths so Docker/Pi are unchanged; the desktop supervisor sets them to
+# writable per-user dirs).
+_DATA_DIR = os.environ.get("BYH_DATA_DIR", "/data")
+_CONFIG_DIR = os.environ.get("BYH_CONFIG_DIR", "/config")
+
+# Path for the full per-channel RF scan dump. Kept separate from the state
+# file because it's bulky (~3KB JSON for 126 channels) and infrequent (only
+# updated on operator-initiated scans).
+LAST_SCAN_FILE_PATH = os.path.join(_DATA_DIR, 'last_scan.json')
 
 DEBUG = False
 
@@ -25,14 +31,21 @@ SHOW_START_TIME_SECONDS = 25
 #If we havent gotten start statuses from async nodes by ABORT_PRE_START_SECONDS before the start, abort.
 ABORT_PRE_START_SECONDS = 10
 
-cfg_filepath = '/config/systemcfg.json'
+cfg_filepath = os.path.join(_CONFIG_DIR, 'systemcfg.json')
 # The Receivers table in this DB is the source of truth for which receivers
 # the dongle should know about. systemcfg.json still owns protocols / types /
 # system block.
-db_filepath = '/data/backyardhero.db'
+db_filepath = os.path.join(_DATA_DIR, 'backyardhero.db')
 
 LATENCY_TO_CONSIDER_ONLINE_MS = 8000
 ASYNC_LOAD_TIMEOUT_MS = 5000
+
+# Hard ceiling on how long the daemon will keep retrying an async show
+# load before failing it visibly. Without this the retry loop in
+# updateRelevantStates spins forever on a receiver that never reaches
+# loadComplete (H4). The operator can also cancel manually from the UI
+# (abort_show_load) before this fires.
+LOAD_TIMEOUT_SECONDS = 60
 
 def chunk_list(lst, n):
     """Yield successive n-sized chunks from lst."""
@@ -81,6 +94,7 @@ class BYHProtocolHandler:
         self.last_status_ts = 0
         self.show_id=0
         self.load_waiting = False
+        self.load_start_ts = 0
         self.async_retry_ct = 0
         self.status = START_SEQUENCE_STEPS.STANDBY
         self.config = {}
@@ -545,9 +559,25 @@ class BYHProtocolHandler:
                 print("No more devices to wait on. calling it loaded.")
                 self.show_loaded = True
                 self.load_waiting = False
+                self.load_start_ts = 0
                 self.status = START_SEQUENCE_STEPS.LOADED
                 self.parent.signal_show_loaded(self.show_id)
             else:
+                # Fail the load visibly once we've exceeded the timeout
+                # instead of retrying the same cues forever (H4). Tear the
+                # async wait down, reset the half-loaded receivers, and tell
+                # the daemon so the UI drops out of the LOADING state and the
+                # error LED comes on -- previously this left show_load_state
+                # stuck on LOADING and the operator with no signal.
+                if self.load_start_ts and (time.time() - self.load_start_ts) > LOAD_TIMEOUT_SECONDS:
+                    incomplete = list(self.async_load_targets.keys())
+                    self._teardown_async_load(send_reset=True)
+                    self.status = START_SEQUENCE_STEPS.ABORTED
+                    self.parent.signal_show_load_failed(
+                        f"Show load timed out after {LOAD_TIMEOUT_SECONDS}s. "
+                        f"Receivers still not loaded: {incomplete}"
+                    )
+                    return
                 print("Waiting on targets to load:", incomplete_devices)
                 self.async_retry_ct += 1
                 if self.async_retry_ct > 10:
@@ -561,16 +591,25 @@ class BYHProtocolHandler:
     def get_async_load_targets_not_with_status(self, key, state):
         false_device_ids = []
         for device_id, alt in self.async_load_targets.items():
-            status = self.receivers[device_id]['status']
-            if(status['showId'] == self.show_id):
-                if(status[key]):
-                    print(f"{device_id}:{key} is TRUE as '{status[key]}'")
+            # A receiver can exist in self.receivers (registered with the
+            # dongle) but not yet have a `status` substructure if it hasn't
+            # answered a poll. Treat "no status" as "not in desired state"
+            # rather than KeyError-ing out of process_serial_in's JSON
+            # handler (M3).
+            status = self.receivers.get(device_id, {}).get('status')
+            if not status:
+                print(f"{device_id}: no status yet; treating as not loaded")
+                false_device_ids.append(device_id)
+                continue
+            if(status.get('showId') == self.show_id):
+                if(status.get(key)):
+                    print(f"{device_id}:{key} is TRUE as '{status.get(key)}'")
                     pass
                 else:
-                    print(f"{device_id}:{key} is FALSE as '{status[key]}'")
+                    print(f"{device_id}:{key} is FALSE as '{status.get(key)}'")
                     false_device_ids.append(device_id)
             else:
-                print(f"Show {self.show_id} not correct for {device_id}({status['showId']})")
+                print(f"Show {self.show_id} not correct for {device_id}({status.get('showId')})")
                 false_device_ids.append(device_id)
         return false_device_ids
 
@@ -1016,6 +1055,24 @@ class BYHProtocolHandler:
             except Exception as e:
                 print(f"OTA: bad pong {msg!r}: {e}")
             return True
+        # Dongle error / command-validation lines are plain text, not JSON.
+        # These used to be silently ignored, which is exactly how C1 (433fire
+        # rejected with "CV 433") and M7 (queue-full "ERR:" drops) went
+        # unnoticed in live shows. Surface them to the operator.
+        if msg.startswith('ERR:'):
+            detail = msg[4:].strip()
+            # A dropped fire command is safety-relevant: flag it loudly.
+            if 'queue full' in detail.lower():
+                self.parent.write_error(f"Dongle dropped a command (queue full): {detail}")
+            else:
+                self.parent.write_error(f"Dongle error: {detail}")
+            return True
+        # "CV ..." = command validation failure; "C? ..." = unknown command.
+        # Both mean the dongle rejected something the daemon sent.
+        if msg.startswith('CV ') or msg.startswith('C? ') or msg == 'CV' or msg == 'C?':
+            self.parent.write_error(f"Dongle rejected command: {msg.strip()}")
+            return True
+
         if(msg[0] == '{'):
             try:
                 msg_obj = json.loads(msg)
@@ -1112,7 +1169,11 @@ class BYHProtocolHandler:
             print("Ignoring async fire item. It'll take care of it.")
         else:
             msg = BSCFireTranslator.translate_zone_target_to_tx_pkg(item['zone'], item['target'])
-            self.parent.send_serial_command(f"433fire {msg} x")
+            # NB: no trailing " x" — the dongle's isValidMessage requires the
+            # arg to be exactly ">>BITS:REPS<<"; a trailing token makes it end
+            # with "<< x" and the dongle silently rejects it (replies "CV 433").
+            # Must match the manual-fire path (handle_manual_fire) exactly.
+            self.parent.send_serial_command(f"433fire {msg}")
 
     def handle_manual_fire(self, zone, target, kind=None):
         # Bilusocn manual fire is a direct broadcast: there is no DB
@@ -1212,6 +1273,37 @@ class BYHProtocolHandler:
         cmd = " ".join(parts)
         self.parent.send_serial_command(cmd)
 
+    def _dedupe_fire_targets(self, device_id, fire_targets):
+        """Collapse cues that share a (device, target) position to a single
+        entry (earliest start time wins) and surface a warning listing the
+        dropped duplicates. See H4: duplicate positions would otherwise
+        inflate expectedItemsCt past the receiver's single targetLoaded
+        slot and stall the load forever."""
+        seen = {}
+        dropped = []
+        for item in fire_targets:
+            tgt = item.get("target")
+            existing = seen.get(tgt)
+            if existing is None:
+                seen[tgt] = item
+                continue
+            # Keep whichever fires earliest; drop the other.
+            if item.get("startTime", 0) < existing.get("startTime", 0):
+                dropped.append(existing)
+                seen[tgt] = item
+            else:
+                dropped.append(item)
+        if dropped:
+            desc = ", ".join(
+                f"pos {d.get('target')}@{d.get('startTime')}s" for d in dropped
+            )
+            self.parent.write_error(
+                f"Load: {device_id} has duplicate cue positions; kept earliest, "
+                f"dropped {len(dropped)} duplicate(s): {desc}"
+            )
+        # Deterministic packing order by start time.
+        return sorted(seen.values(), key=lambda it: it.get("startTime", 0))
+
     def load_async_fire_targets(self, async_fire_targets, showId, setLoadTargets=True, skip_startload=False):
         if(setLoadTargets):
             self.async_load_targets = async_fire_targets
@@ -1220,7 +1312,14 @@ class BYHProtocolHandler:
 
         for target_key, fire_targets in async_fire_targets.items():
             print(f"Processing {target_key}:")
-            
+
+            # De-dupe (device, target) pairs before counting: the receiver
+            # has exactly one targetLoaded slot per position, but
+            # expectedItemsCt counts every cue. Two cues mapped to the same
+            # position would make recheckLoadComplete never reach
+            # expectedTargets, so the host retries the load forever (H4).
+            fire_targets = self._dedupe_fire_targets(target_key, fire_targets)
+
             # Only send START_LOAD if skip_startload is False (initial load) or if receiver has wrong showId
             should_send_startload = not skip_startload
             if skip_startload:
@@ -1243,8 +1342,11 @@ class BYHProtocolHandler:
             chunk_size = self.SHOW_LOADN_MAX_CUES
             for i in range(0, len(fire_targets), chunk_size):
                 chunk = fire_targets[i:i + chunk_size]
-                # Convert to (time_ms, zero_indexed_pos) tuples.
-                packed = [(round(item["startTime"] * 1000), item["target"] - 1) for item in chunk]
+                # Convert to (time_ms, zero_indexed_pos) tuples. Clamp a
+                # t=0 cue to 1ms: the receiver's loadOneCue silently
+                # ignores time==0, so the cue never sets targetLoaded and
+                # the load never completes (H4). One ms is inaudible in pyro.
+                packed = [(max(1, round(item["startTime"] * 1000)), item["target"] - 1) for item in chunk]
                 self.send_load_chunk_to_dev(target_key, packed, repeat=2)
                 # Light spacing so we don't outrun the dongle's 128-deep queue
                 # when loading huge shows. Dongle dispatch is ~3-5ms/cmd, so
@@ -1310,11 +1412,51 @@ class BYHProtocolHandler:
 
         if(self.async_load_targets):
             self.load_waiting = True
+            self.load_start_ts = time.time()
             print("Failure signaled, but implied that process is waiting for async load.")
             return False
         else:
             self.status = START_SEQUENCE_STEPS.LOADED
             return True
+
+    def _teardown_async_load(self, send_reset=True):
+        """Drop the in-flight async-load bookkeeping.
+
+        Shared by the timeout path and the operator-initiated abort. When
+        `send_reset` is set we first tell the receivers that were mid-load
+        to `reset` so they discard the partially-loaded program instead of
+        sitting on a stale half-show. We reassign async_load_targets to a
+        fresh dict (rather than mutating in place) so the read-thread's
+        updateRelevantStates can't trip over a dict-changed-size error if
+        it's iterating concurrently.
+        """
+        targets = self.async_load_targets
+        if send_reset and targets:
+            self.send_to_active_nodes("reset", " 0", rcv_dict_override=targets)
+        self.load_waiting = False
+        self.load_start_ts = 0
+        self.async_retry_ct = 0
+        self.async_load_targets = {}
+        self.show_loaded = False
+
+    def abort_show_load(self):
+        """Operator-requested cancel of an in-progress show load.
+
+        Valid whenever we're still sending cues (status LOADING) or waiting
+        on async receivers to confirm loadComplete. Resets the partially
+        loaded receivers, drops the wait, and parks the handler in ABORTED
+        so the UI falls back to a clean "Load show" state. Returns
+        (ok, message) mirroring abort_ota_flash / abort_dongle_flash.
+        """
+        if not (self.load_waiting or self.status == START_SEQUENCE_STEPS.LOADING):
+            return False, "no show load in progress"
+        incomplete = list(self.async_load_targets.keys())
+        self._teardown_async_load(send_reset=True)
+        self.status = START_SEQUENCE_STEPS.ABORTED
+        self.parent.write_error(
+            f"Show load cancelled by operator. Receivers reset: {incomplete}"
+        )
+        return True, "show load aborted"
 
     def send_to_active_nodes(self, cmdpre, cmdpost="", repeat=1, rcv_dict_override=None):
         receiver_dict = self.receivers.items()
@@ -1484,10 +1626,13 @@ class BYHProtocolHandler:
                 mask_idx  = bit_index // 64
                 bit_pos   = bit_index % 64
 
-                if mask_idx < 0 or mask_idx >= 4:
+                if mask_idx < 0 or mask_idx >= len(cont_arr):
+                    # Out-of-range cue index (e.g. a corrupt/imported show
+                    # with a position >= 128) must be a visible warning, not
+                    # an IndexError that kills the show-start thread (H5).
                     errors.append(
                         f"Precheck: Cue {entry['zone']}:{entry['target']} "
-                        f"out of continuity range for '{dev_id}'."
+                        f"out of continuity range for '{dev_id}' (treating as no continuity)."
                     )
                 else:
                     mask = cont_arr[mask_idx]
@@ -1512,7 +1657,17 @@ class BYHProtocolHandler:
         self.status = START_SEQUENCE_STEPS.START_PENDING
         self.parent.led_handler.update("show_run_state", RUN_STATE.PRECHECK.value)
         print("Checking battery and continuity states")
-        if(self.run_precheck()):
+        # run_precheck must never raise out of here unhandled — that would
+        # leave the start thread dead with the UI hung in "starting" (H5).
+        # Any unexpected exception fails the start visibly.
+        try:
+            precheck_errors = self.run_precheck()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            precheck_errors = [f"Precheck crashed: {e}"]
+            self.errors = precheck_errors
+        if(precheck_errors):
             self.parent.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
             self.status = START_SEQUENCE_STEPS.ABORTED
             self.parent.write_error("Precheck failed. Aborting show.")
@@ -1614,9 +1769,12 @@ class BYHProtocolHandler:
                             if self.schedule_stop_event.is_set():
                                 print("Schedule stopped.")
                                 self.send_to_active_nodes("stop", " 0", 5)
-             
+
                                 self.parent.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
                                 self.running_show = False
+                                # M4: set ABORTED so the UI doesn't show a
+                                # stale step after a stop-during-pause.
+                                self.status = START_SEQUENCE_STEPS.ABORTED
                                 return
 
                         if pause_start:

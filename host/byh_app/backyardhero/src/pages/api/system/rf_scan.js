@@ -1,8 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-
-const COMMAND_DIR = '/tmp/d_cmd';
-const LAST_SCAN_FILE = '/data/last_scan.json';
+import { ensureHardware } from '@/util/apiGuards';
+import { COMMAND_DIR, LAST_SCAN_FILE_PATH as LAST_SCAN_FILE } from '@/util/paths';
 
 /**
  * GET  /api/system/rf_scan
@@ -18,6 +17,7 @@ const LAST_SCAN_FILE = '/data/last_scan.json';
  *     Poll GET to know when it's done (host_ts_ms changes).
  */
 export default function handler(req, res) {
+  if (!ensureHardware(res)) return;
   if (req.method === 'GET') {
     try {
       if (!fs.existsSync(LAST_SCAN_FILE)) {

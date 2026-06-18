@@ -22,7 +22,13 @@ const formatDuration = (s) => {
   return `${m}:${String(r).padStart(2, "0")}`;
 };
 
-export default function ShowPicker() {
+export default function ShowPicker({
+  onStaged,
+  title = "Stage a show",
+  description = "Pick a saved show to stage. Staging arms the timeline and reveals the load workflow.",
+  stageLabel = "Stage",
+  emptyHint = "No shows yet. Build one in the Editor.",
+} = {}) {
   const { shows, deleteShow, setStagedShow, inventoryById, loadedShow } = useAppStore();
   const [filter, setFilter] = useState("");
 
@@ -49,6 +55,7 @@ export default function ShowPicker() {
       } catch { /* tolerated */ }
     }
     setStagedShow({ ...show, items, audioFile, audioTracks, audioOffsetMs });
+    if (typeof onStaged === "function") onStaged(show);
   };
 
   const handleDelete = async (e, show) => {
@@ -60,8 +67,8 @@ export default function ShowPicker() {
   return (
     <div className="w-full max-w-5xl mx-auto px-4 sm:px-6 py-8">
       <Section
-        title="Stage a show"
-        description="Pick a saved show to stage. Staging arms the timeline and reveals the load workflow."
+        title={title}
+        description={description}
         actions={
           <input
             type="search"
@@ -76,7 +83,7 @@ export default function ShowPicker() {
           <Card padding="lg" tone="neutral" className="text-center">
             <p className="text-fg-secondary">
               {shows.length === 0
-                ? "No shows yet. Build one in the Editor."
+                ? emptyHint
                 : "No shows match your search."}
             </p>
           </Card>
@@ -133,7 +140,7 @@ export default function ShowPicker() {
                         leading={<FiPlay />}
                         onClick={() => handleStage(show)}
                       >
-                        Stage
+                        {stageLabel}
                       </Button>
                     </div>
                   </div>

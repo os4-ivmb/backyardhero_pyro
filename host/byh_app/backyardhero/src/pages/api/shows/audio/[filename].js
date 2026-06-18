@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-
-const AUDIO_DIR = path.join(process.cwd(), 'public', 'uploads', 'audio');
+import { caps } from '@/util/profile';
+import { getBlobStore } from '@/data/blobStore';
 
 export default function handler(req, res) {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -17,12 +17,21 @@ export default function handler(req, res) {
     return res.status(400).json({ error: 'Invalid audio filename.' });
   }
 
-  const filePath = path.join(AUDIO_DIR, filename);
-  if (!filePath.startsWith(AUDIO_DIR + path.sep) || !fs.existsSync(filePath)) {
+  // Cloud profile serves audio via signed Storage URLs (the client gets the
+  // URL straight from the blob store on upload), so this byte-streaming route
+  // is local-only. Defense in depth: refuse here when there's no fs store.
+  if (caps.audioStore !== 'fs') {
+    return res.status(501).json({ error: 'Audio is served via signed URLs in this deployment.' });
+  }
+
+  const store = getBlobStore();
+  const opened = store.openForServe(filename);
+  if (!opened) {
     return res.status(404).json({ error: 'Audio file not found.' });
   }
 
-  const stat = fs.statSync(filePath);
+  const filePath = opened.path;
+  const stat = { size: opened.size };
   const contentType = contentTypeFor(filename);
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Content-Type', contentType);

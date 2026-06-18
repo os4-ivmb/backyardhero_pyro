@@ -12,6 +12,7 @@ import { cn, Stat, Dot, Badge } from "@/design";
 import Toast from "../common/Toast";
 import GpioOverrideBar from "../shell/GpioOverrideBar";
 import { isPollableReceiver } from "@/util/receivers";
+import { HARDWARE } from "@/util/clientEnv";
 
 // ---------------------------------------------------------------------------
 // MobileStatusBar -- mobile twin of `shell/StatusBar.jsx`.
@@ -87,6 +88,8 @@ export default function MobileStatusBar() {
   const connectWebSocketRef = useRef(null);
 
   const connectWebSocket = useCallback(() => {
+    // On-device daemon WS only; cloud has no daemon and ws:// from https throws.
+    if (!HARDWARE) return;
     if (socketRef.current && socketRef.current.readyState <= 1) return;
     intentionalDisconnectRef.current = false;
     const socket = new WebSocket(`ws://${window.location.host.split(":")[0]}:8090`);

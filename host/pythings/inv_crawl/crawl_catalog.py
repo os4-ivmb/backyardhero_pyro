@@ -3,15 +3,17 @@
 Fetch catalog data from backyard-hero.com and save to catalog.json
 Outputs to /data/catalog.json and writes progress to /data/catalog_crawl_progress.json
 """
+import os
 import urllib.request
 import ssl
 import json
 import math
 from typing import Dict, Any
 
+_DATA_DIR = os.environ.get("BYH_DATA_DIR", "/data")
 CATALOG_URL = "https://backyard-hero.com/catalog.json"
-OUTPUT_FILE = "/data/catalog.json"
-PROGRESS_FILE = "/data/catalog_crawl_progress.json"
+OUTPUT_FILE = os.path.join(_DATA_DIR, "catalog.json")
+PROGRESS_FILE = os.path.join(_DATA_DIR, "catalog_crawl_progress.json")
 
 
 

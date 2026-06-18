@@ -1,6 +1,13 @@
-import { rackQueries } from "@/util/sqldb";
+import { getRepo } from "@/data";
 
-export default function handler(req, res) {
+export default async function handler(req, res) {
+  let repo;
+  try {
+    repo = await getRepo(req);
+  } catch (err) {
+    return res.status(err?.status || 500).json({ error: err?.message || 'Failed to resolve data context.' });
+  }
+
   if (req.method === 'POST') {
     const { show_id, name, x_rows, x_spacing, y_rows, y_spacing, cells, fuses } = req.body;
 
@@ -11,21 +18,24 @@ export default function handler(req, res) {
     try {
       const cellsStr = cells ? (typeof cells === 'string' ? cells : JSON.stringify(cells)) : JSON.stringify({});
       const fusesStr = fuses ? (typeof fuses === 'string' ? fuses : JSON.stringify(fuses)) : JSON.stringify({});
-      const result = rackQueries.insert.run(show_id, name, x_rows, x_spacing, y_rows, y_spacing, cellsStr, fusesStr);
-      return res.status(201).json({ id: result.lastInsertRowid });
+      const result = await repo.racks.create({
+        show_id, name, x_rows, x_spacing, y_rows, y_spacing,
+        cells: cellsStr, fuses: fusesStr,
+      });
+      return res.status(201).json({ id: result.id });
     } catch (error) {
       console.error(error);
       return res.status(500).json({ error: 'Failed to create rack.' });
     }
   } else if (req.method === 'GET') {
     const { show_id } = req.query;
-    
+
     if (!show_id) {
       return res.status(400).json({ error: 'show_id is required.' });
     }
 
     try {
-      const racks = rackQueries.getAll.all(show_id);
+      const racks = await repo.racks.listByShow(show_id);
       // Parse JSON strings
       const parsedRacks = racks.map(rack => ({
         ...rack,
@@ -42,4 +52,3 @@ export default function handler(req, res) {
   res.setHeader('Allow', ['POST', 'GET']);
   res.status(405).end(`Method ${req.method} Not Allowed`);
 }
-

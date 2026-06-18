@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import useStateAppStore from "@/store/useStateAppStore";
 
 // ---------------------------------------------------------------------------
@@ -86,6 +86,17 @@ export default function useAppMode() {
   const stateData = useStateAppStore((s) => s.stateData);
   const fw = stateData?.fw_state || {};
 
+  // 1s liveness tick. `wsAlive` (and therefore `mode`) is time-based:
+  // it compares the client clock to the last WS receive time. If the
+  // daemon goes silent WITHOUT a socket `close`, nothing re-evaluates
+  // the threshold and the UI shows "connected" forever (W5). This tick
+  // forces a re-render + re-derive every second so liveness expires.
+  const [livenessTick, setLivenessTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setLivenessTick((n) => (n + 1) % 1000000), 1000);
+    return () => clearInterval(t);
+  }, []);
+
   const mode = useMemo(() => {
     const daemonActive = !!fw.daemon_active;
     // Liveness must compare client-clock to client-clock: the Pi has no
@@ -132,6 +143,9 @@ export default function useAppMode() {
     stateData?.fw_state,
     stateData?.fw_d_error,
     stateData?.fw_error,
+    // Re-derive on every liveness tick so a silently-dropped daemon
+    // transitions to `disconnected` once the 4.5s window lapses (W5).
+    livenessTick,
   ]);
 
   // Apply the mode token to <html> so CSS vars / palette can swing.

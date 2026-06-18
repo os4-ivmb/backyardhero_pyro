@@ -1,15 +1,25 @@
+import os
 import serial
 import socket
 import threading
 import time
 import json
 
-# Default configuration
+# Default configuration. The port can be seeded from the environment so the
+# desktop supervisor can pass an auto-detected COM/tty path; the daemon still
+# reconfigures it at runtime via a config_serial command.
 SERIAL_CONFIG = {
-    'port': '/dev/tty.usbmodem01',
-    'baud': 115200
+    'port': os.environ.get('SERIAL_PORT', '/dev/tty.usbmodem01'),
+    'baud': int(os.environ.get('SERIAL_BAUD', '115200'))
 }
-TCP_HOST = '0.0.0.0'
+# Bind address for the serial-injection TCP port. This port lets any
+# client write raw serial straight to the dongle ("fire <ident> <cue>"),
+# so it must NOT be exposed on the LAN / Wi-Fi AP interface (C4.1).
+# Default to loopback (works on Docker Desktop where host.docker.internal
+# forwards to the host loopback). On Linux/Pi the launcher sets
+# BYH_BRIDGE_BIND to the docker bridge gateway (e.g. 172.17.0.1) so the
+# container can still reach it while wlan0 clients cannot.
+TCP_HOST = os.environ.get('BYH_BRIDGE_BIND', '127.0.0.1')
 TCP_PORT = 9000
 
 # Global serial connection
@@ -256,62 +266,69 @@ def tcp_to_serial(client):
             data = client.recv(2048)
             if not data:
                 break  # Client disconnected
-                
+
             buffer += data
-            
-            # Check if this might be a command (JSON objects start with '{')
-            if buffer.startswith(b'{'):
-                # Try to process as command
-                if process_command(buffer, client):
-                    buffer = b''  # Command processed, clear buffer
+
+            # The daemon delimits EVERY line it sends (serial commands and
+            # bridge control JSON alike) with '\n'. Only act on complete
+            # lines: a control JSON ('config_serial', 'get_status') split
+            # across two TCP segments used to fail json.loads in
+            # process_command and then get forwarded to the dongle as a
+            # partial garbage line (M6). Buffer until newline first.
+            while b'\n' in buffer:
+                line, buffer = buffer.split(b'\n', 1)
+                if not line:
                     continue
 
-            # While the flasher has the port, drop everything we'd
-            # forward to serial. The daemon's OTA driver tolerates
-            # silent gaps via its existing dongle-silence-abort path,
-            # and the receiver-OTA driver isn't running concurrently
-            # (the daemon refuses to start a dongle flash while a
-            # receiver flash is mid-flight, and vice versa).
-            if flashing:
-                if buffer:
-                    buffer = b''
-                continue
+                # Bridge control command? (JSON object). Try to consume it
+                # locally; only fall through to serial if it's genuinely
+                # not a bridge command.
+                if line.lstrip().startswith(b'{'):
+                    if process_command(line, client):
+                        continue
 
-            # Not a command or command processing failed, send to serial
-            if serial_conn and serial_conn.is_open:
-                try:
-                    with serial_lock:
-                        if serial_conn and serial_conn.is_open:
-                            serial_conn.write(buffer)
-                        else:
-                            # Race: closed by serial_to_tcp between
-                            # the outer check and lock acquisition.
-                            raise serial.SerialException("closed mid-write")
-                    buffer = b''
-                except (OSError, serial.SerialException) as e:
-                    # Dongle disappeared between checks. Drop this
-                    # outbound buffer (host will retry the OTA chunk
-                    # via timeout) and let serial_to_tcp's auto-
-                    # reconnect bring the link back.
-                    print(f"tcp_to_serial: write error ({e}); "
-                          f"dropping {len(buffer)}B and continuing")
-                    with serial_lock:
-                        if serial_conn:
-                            try:
-                                serial_conn.close()
-                            except Exception:
-                                pass
-                            serial_conn = None
-                    buffer = b''
-            else:
-                # Can't send now -- drop the buffer rather than letting
-                # it grow unbounded while the dongle is offline. Host-
-                # side OTA retry will resend whatever we lose.
-                if buffer:
+                # While the flasher has the port, drop everything we'd
+                # forward to serial. The daemon's OTA driver tolerates
+                # silent gaps via its existing dongle-silence-abort path,
+                # and the receiver-OTA driver isn't running concurrently
+                # (the daemon refuses to start a dongle flash while a
+                # receiver flash is mid-flight, and vice versa).
+                if flashing:
+                    continue
+
+                # Re-attach the newline the dongle's line parser expects.
+                out = line + b'\n'
+
+                if serial_conn and serial_conn.is_open:
+                    try:
+                        with serial_lock:
+                            if serial_conn and serial_conn.is_open:
+                                serial_conn.write(out)
+                            else:
+                                # Race: closed by serial_to_tcp between
+                                # the outer check and lock acquisition.
+                                raise serial.SerialException("closed mid-write")
+                    except (OSError, serial.SerialException) as e:
+                        # Dongle disappeared between checks. Drop this
+                        # outbound line (host will retry the OTA chunk
+                        # via timeout) and let serial_to_tcp's auto-
+                        # reconnect bring the link back.
+                        print(f"tcp_to_serial: write error ({e}); "
+                              f"dropping {len(out)}B and continuing")
+                        with serial_lock:
+                            if serial_conn:
+                                try:
+                                    serial_conn.close()
+                                except Exception:
+                                    pass
+                                serial_conn = None
+                else:
+                    # Can't send now -- drop the line rather than letting
+                    # the buffer grow unbounded while the dongle is offline.
+                    # Host-side OTA retry will resend whatever we lose.
                     print(f"tcp_to_serial: serial offline, "
-                          f"dropping {len(buffer)}B")
-                    buffer = b''
-                
+                          f"dropping {len(out)}B")
+
     except Exception as e:
         print(f"Error in tcp_to_serial: {e}")
 

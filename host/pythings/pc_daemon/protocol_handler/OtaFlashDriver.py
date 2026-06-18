@@ -74,6 +74,14 @@ CHUNK_HOST_RETRIES = 12
 NACK_BACKOFF_S = 0.05
 PING_TIMEOUT_S = 1.5
 
+# H3: how many times we'll rewind to the receiver-reported lastChunk+1 and
+# resume a transfer rather than aborting. Each resume covers a whole-chunk
+# retry-budget exhaustion (i.e. a sustained ~5s fade or a dongle reboot
+# mid-stream). The receiver tolerates already-applied chunks (re-acks
+# without re-writing), so resuming is always safe; we just bound it so a
+# truly dead link still terminates instead of looping forever.
+OTA_MAX_RESUMES = 6
+
 # Map host-attempt index -> recovery level to send. Anything not in this
 # table is a plain `flash_data` resend.
 RECOVERY_SCHEDULE = {
@@ -99,6 +107,28 @@ REJOIN_DEADLINE_S = 33.0
 # Data rate byte sent over the wire. 0=250k, 1=1Mbps, 2=2Mbps. 2Mbps
 # keeps a typical ~340KB image under ~30s on a clean channel.
 DEFAULT_DATA_RATE = 2
+
+# --- H2.1: host-side image sanity ------------------------------------------
+# ESP32 firmware images start with the 0xE9 magic byte. The ESP-IDF app
+# descriptor (`esp_app_desc_t`) sits at a fixed offset of 0x20 from the
+# start of the image (right after the 24-byte image header + 8-byte first
+# segment header) and begins with its own magic word 0xABCD5432, followed
+# by secure_version(4), reserv1[2](8), version[32], project_name[32], ...
+# We parse it to (a) reject a structurally-wrong file before sending a
+# single chunk, and (b) refuse to flash an image built for a different
+# project (e.g. the dongle firmware onto a receiver), which is otherwise
+# bootable-but-wrong and bricks the node (H2).
+ESP_IMAGE_MAGIC = 0xE9
+ESP_APP_DESC_MAGIC = 0xABCD5432
+ESP_APP_DESC_OFFSET = 0x20
+EXPECTED_PROJECT_NAME = "os4_receiver"
+
+# After the dongle reports `done` (receiver re-answered a poll post-reboot),
+# poll the daemon's per-receiver telemetry this long for the reported FW
+# version to change from the pre-OTA baseline. If it does, the new image is
+# confirmed running ("verified"); if it doesn't, we report UNVERIFIED rather
+# than claiming success.
+POST_DONE_VERIFY_TIMEOUT_S = 8.0
 
 
 class OtaPhase(str, Enum):
@@ -133,6 +163,13 @@ class OtaState:
     rate: int = DEFAULT_DATA_RATE
     crc32_hex: Optional[str] = None
     file_name: Optional[str] = None
+    # H2.1: parsed from the staged image's esp_app_desc, plus post-flash
+    # version verification against the receiver's reported FW.
+    image_project: Optional[str] = None
+    image_version: Optional[str] = None
+    running_version: Optional[int] = None     # receiver fw before OTA
+    reported_version: Optional[int] = None    # receiver fw after rejoin
+    verified: Optional[bool] = None           # True/False once finalized
 
     def to_dict(self):
         return {
@@ -150,6 +187,11 @@ class OtaState:
             "rate": self.rate,
             "crc32_hex": self.crc32_hex,
             "file_name": self.file_name,
+            "image_project": self.image_project,
+            "image_version": self.image_version,
+            "running_version": self.running_version,
+            "reported_version": self.reported_version,
+            "verified": self.verified,
             "progress_pct": (
                 round((self.chunks_acked / self.total_chunks) * 100, 1)
                 if self.total_chunks else 0
@@ -191,6 +233,63 @@ class OtaFlashDriver:
         # `flash_ping`. feed_pong() sets it.
         self._pong_event = threading.Event()
         self._last_pong: Optional[dict] = None
+        # H3: most recent chunk index the receiver says it has applied
+        # (from ack idx / nack `last` / heartbeat `last`). -1 = none yet.
+        # The streaming loop rewinds to this+1 on a resume.
+        self._rx_last_chunk: int = -1
+
+    # ------------------------------------------------------------------
+    # H2.1 helpers: image sanity + version verification
+    # ------------------------------------------------------------------
+    @staticmethod
+    def parse_esp_app_desc(image: bytes) -> tuple[str, str]:
+        """Parse the ESP32 image header + esp_app_desc_t.
+
+        Returns (project_name, version). Raises ValueError if the bytes
+        are not a structurally-valid ESP32 application image (wrong magic
+        byte, missing/garbled app descriptor, truncated).
+        """
+        if len(image) < ESP_APP_DESC_OFFSET + 256:
+            raise ValueError("image too small to contain an app descriptor")
+        if image[0] != ESP_IMAGE_MAGIC:
+            raise ValueError(
+                f"bad image magic 0x{image[0]:02x} (expected 0xE9)"
+            )
+        magic = int.from_bytes(
+            image[ESP_APP_DESC_OFFSET:ESP_APP_DESC_OFFSET + 4], "little"
+        )
+        if magic != ESP_APP_DESC_MAGIC:
+            raise ValueError(
+                f"bad app descriptor magic 0x{magic:08x} "
+                f"(expected 0x{ESP_APP_DESC_MAGIC:08x})"
+            )
+        base = ESP_APP_DESC_OFFSET
+        version = (
+            image[base + 16:base + 48].split(b"\x00", 1)[0]
+            .decode("ascii", "replace")
+        )
+        project = (
+            image[base + 48:base + 80].split(b"\x00", 1)[0]
+            .decode("ascii", "replace")
+        )
+        return project, version
+
+    def _receiver_reported_fw(self, ident: Optional[str]) -> Optional[int]:
+        """Best-effort read of a receiver's last-reported integer FW version
+        from the daemon's live telemetry. Returns None if unknown."""
+        if not ident:
+            return None
+        try:
+            ph = getattr(self.parent, "protocol_handler", None)
+            if not ph:
+                return None
+            rx = ph.receivers.get(ident)
+            if not rx:
+                return None
+            fw = (rx.get("status") or {}).get("fwVersion")
+            return int(fw) if fw is not None else None
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # Public API
@@ -208,7 +307,9 @@ class OtaFlashDriver:
 
     def start_job(self, ident: str, image_bytes: bytes,
                   rate: int = DEFAULT_DATA_RATE,
-                  file_name: Optional[str] = None) -> tuple[bool, str]:
+                  file_name: Optional[str] = None,
+                  expected_project: str = EXPECTED_PROJECT_NAME
+                  ) -> tuple[bool, str]:
         """Submit a new OTA job. Returns (ok, message)."""
         if not ident:
             return False, "ident required"
@@ -216,6 +317,22 @@ class OtaFlashDriver:
             return False, "image is empty"
         if rate not in (0, 1, 2):
             return False, "rate must be 0/1/2"
+
+        # H2.1: validate the image BEFORE we touch any state or send a
+        # chunk. A structurally-bad file or one built for a different
+        # project (e.g. the dongle firmware) is bootable-but-wrong and
+        # would brick the receiver -- refuse it up front.
+        try:
+            image_project, image_version = self.parse_esp_app_desc(image_bytes)
+        except ValueError as e:
+            return False, f"image sanity check failed: {e}"
+        if expected_project and image_project != expected_project:
+            return False, (
+                f"image is for project '{image_project}', expected "
+                f"'{expected_project}' -- refusing to flash a wrong image"
+            )
+
+        running_version = self._receiver_reported_fw(ident)
 
         with self._lock:
             if self.state.phase not in (
@@ -245,6 +362,9 @@ class OtaFlashDriver:
                 rate=rate,
                 crc32_hex=f"{crc32:08x}",
                 file_name=file_name,
+                image_project=image_project,
+                image_version=image_version,
+                running_version=running_version,
             )
 
         self._thread = threading.Thread(
@@ -295,6 +415,21 @@ class OtaFlashDriver:
                 # is still authoritative.
             except (TypeError, ValueError):
                 pass
+            # H3: track the receiver-reported lastChunk for resume.
+            self._note_rx_last_chunk(hb.get('last'))
+
+    def _note_rx_last_chunk(self, last):
+        """Record the receiver's reported lastChunk (from ack/nack/heartbeat).
+        0xFFFF (65535) means 'no chunk yet'; anything else updates our
+        resume anchor monotonically forward."""
+        try:
+            v = int(last)
+        except (TypeError, ValueError):
+            return
+        if v == 0xFFFF:
+            return
+        if v > self._rx_last_chunk:
+            self._rx_last_chunk = v
 
     def feed_pong(self, pong: dict):
         """Called for the dongle's `OP ...` reply to `flash_ping`. Wakes
@@ -372,8 +507,15 @@ class OtaFlashDriver:
                 return
 
             # Phase 2: stream chunks, one at a time, gated on per-chunk ack.
+            # H3: idx is a cursor (not a simple range) so we can rewind to
+            # the receiver-reported lastChunk+1 and resume instead of
+            # restarting the whole transfer after a fade/dongle reboot.
             self._set_phase(OtaPhase.STREAMING)
-            for idx in range(total_chunks):
+            self._rx_last_chunk = -1
+            stride = max(1, total_chunks // 200)
+            idx = 0
+            resumes = 0
+            while idx < total_chunks:
                 if self._abort_requested:
                     self._send("flash_abort")
                     self._set_phase(OtaPhase.ABORTED, "host abort")
@@ -382,16 +524,50 @@ class OtaFlashDriver:
                 end = min(start + OTA_CHUNK_BYTES, total_size)
                 hex_payload = image[start:end].hex()
 
-                if not self._send_chunk_with_retry(idx, hex_payload):
+                outcome = self._send_chunk_with_retry(idx, hex_payload)
+                if outcome == "ack":
+                    idx += 1
+                    # Periodic dirty-mark so the UI progress bar updates
+                    # without waiting for the next heartbeat. Cap to ~10Hz
+                    # so a fast transfer doesn't spam the state writer.
+                    if (idx % stride) == 0:
+                        self._mark_dirty()
+                    continue
+                if outcome in ("abort", "fatal", "dongle_gone"):
+                    # Terminal: _send_chunk_with_retry/_await_chunk_outcome
+                    # already recorded the precise phase + reason.
                     return
 
-                # Periodic dirty-mark so the UI progress bar updates
-                # without the WS having to wait for the next heartbeat.
-                # Cap to ~10Hz so a fast transfer doesn't spam the
-                # state writer (10000 chunks at 100Hz would push 100
-                # disk writes per second).
-                if (idx % max(1, total_chunks // 200)) == 0:
-                    self._mark_dirty()
+                # outcome == "exhausted": try an H3 resume before giving up.
+                if resumes >= OTA_MAX_RESUMES:
+                    self._set_phase(
+                        OtaPhase.ERROR,
+                        f"chunk {idx} failed after {CHUNK_HOST_RETRIES} "
+                        f"retries and {resumes} resume attempts; link too lossy",
+                    )
+                    try:
+                        self._send("flash_abort")
+                    except Exception:
+                        pass
+                    return
+                resumes += 1
+                resume_to = (
+                    self._rx_last_chunk + 1 if self._rx_last_chunk >= 0 else idx
+                )
+                resume_to = max(0, min(resume_to, total_chunks))
+                if resume_to != idx:
+                    print(
+                        f"OTA: H3 resume #{resumes} -- rewinding from chunk "
+                        f"{idx} to receiver-reported {resume_to} "
+                        f"(rx lastChunk={self._rx_last_chunk})"
+                    )
+                    idx = resume_to
+                else:
+                    print(
+                        f"OTA: H3 resume #{resumes} -- retrying chunk {idx} "
+                        f"(rx lastChunk={self._rx_last_chunk})"
+                    )
+                self._mark_dirty()
 
             # Phase 3: flash_end + post-reboot rejoin
             self._set_phase(OtaPhase.FINALIZING)
@@ -452,7 +628,7 @@ class OtaFlashDriver:
         with self._lock:
             return self._last_pong
 
-    def _send_chunk_with_retry(self, idx: int, hex_payload: str) -> bool:
+    def _send_chunk_with_retry(self, idx: int, hex_payload: str) -> str:
         """Send one OTA chunk and wait for ack, retrying nacks/timeouts.
 
         The receiver de-duplicates by chunkIdx (silently re-acks if it has
@@ -474,16 +650,22 @@ class OtaFlashDriver:
         If it isn't, we log the wedge but continue retrying -- the
         dongle's hardware task watchdog (20s) is the backstop.
 
-        Returns True on ack, False on terminal failure (host abort or
-        all retries exhausted). On terminal failure the driver is left
-        in ERROR/ABORTED state and `flash_abort` has been issued.
+        Returns one of:
+          "ack"        - chunk acked, advance to the next chunk.
+          "abort"      - host abort; phase set to ABORTED, flash_abort sent.
+          "fatal"      - receiver dropped OTA; phase set to ERROR.
+          "dongle_gone"- dongle went silent; phase set to ERROR.
+          "exhausted"  - retry budget burned but NOT terminal: the caller
+                         (H3 resume rung) decides whether to rewind to the
+                         receiver-reported lastChunk+1 or give up. State is
+                         left untouched so the caller owns the outcome.
         """
         last_err = "unknown"
         for attempt in range(CHUNK_HOST_RETRIES):
             if self._abort_requested:
                 self._send("flash_abort")
                 self._set_phase(OtaPhase.ABORTED, "host abort")
-                return False
+                return "abort"
 
             # Drain any leftover events from a prior attempt before we
             # send -- otherwise a stale nack from `idx-1` could be
@@ -522,15 +704,15 @@ class OtaFlashDriver:
 
             outcome = self._await_chunk_outcome(idx)
             if outcome == "ack":
-                return True
+                return "ack"
             if outcome == "abort":
-                return False  # _await_chunk_outcome already set state
+                return "abort"  # _await_chunk_outcome already set state
             if outcome == "fatal":
-                return False
+                return "fatal"
             if outcome == "dongle_gone":
                 # Silence-based abort already set ERROR phase; no point
                 # sending flash_abort because the dongle isn't listening.
-                return False
+                return "dongle_gone"
             # outcome is "nack" or "timeout" -- back off and retry.
             last_err = (
                 f"{outcome}{'+recover'+str(recovery_level) if recovery_level is not None else ''}"
@@ -546,17 +728,15 @@ class OtaFlashDriver:
             # the session out from under us.
             time.sleep(min(1.0, NACK_BACKOFF_S * (attempt + 1)))
 
-        # Out of retries. Tear the receiver down before bailing.
-        self._set_phase(
-            OtaPhase.ERROR,
-            f"chunk {idx} failed after {CHUNK_HOST_RETRIES} host retries "
-            f"(last={last_err}); link is too lossy",
+        # Out of per-chunk retries. NOT terminal -- hand control to the
+        # H3 resume rung in _run(), which may rewind to the receiver's
+        # reported lastChunk+1 and continue. We deliberately do not set
+        # ERROR or send flash_abort here.
+        print(
+            f"OTA: chunk {idx} exhausted {CHUNK_HOST_RETRIES} host retries "
+            f"(last={last_err}); deferring to resume logic"
         )
-        try:
-            self._send("flash_abort")
-        except Exception:
-            pass
-        return False
+        return "exhausted"
 
     def _dongle_silence_s(self) -> float:
         """Seconds since we last heard *anything* from the dongle.
@@ -611,8 +791,14 @@ class OtaFlashDriver:
                     if self.state.bytes_acked > self.state.total_bytes:
                         self.state.bytes_acked = self.state.total_bytes
                     self.state.last_event_ms = int(time.time() * 1000)
+                # H3: this chunk is applied; advance the resume anchor.
+                self._note_rx_last_chunk(idx)
                 return "ack"
             if phase == "nack" and int(evt.get("idx", -1)) == idx:
+                # H3: a nack carries the receiver's lastChunk -- remember
+                # it so an exhausted retry budget can resume from there
+                # instead of restarting the whole transfer.
+                self._note_rx_last_chunk(evt.get("last"))
                 if evt.get("fatal"):
                     self._set_phase(
                         OtaPhase.ERROR,
@@ -650,7 +836,7 @@ class OtaFlashDriver:
                 # Keep waiting for done/timeout.
                 continue
             if phase == "done":
-                self._set_phase(OtaPhase.DONE)
+                self._finalize_done_with_verify()
                 return
             if phase == "timeout":
                 self._set_phase(OtaPhase.ERROR, "receiver did not rejoin")
@@ -660,3 +846,51 @@ class OtaFlashDriver:
                 self._set_phase(OtaPhase.ERROR, f"finalization error: {err}")
                 return
             # Anything else is informational; keep waiting.
+
+    def _finalize_done_with_verify(self):
+        """H2.1: the dongle confirmed the receiver rejoined. Now confirm the
+        NEW image is actually running by polling the receiver's reported FW
+        version until it changes from the pre-OTA baseline. If it never
+        changes, the flash "completed" but we can't prove the new image
+        took -- surface that as UNVERIFIED rather than a clean DONE.
+        """
+        ident = self.state.target_ident
+        running = self.state.running_version
+        deadline = time.time() + POST_DONE_VERIFY_TIMEOUT_S
+        reported = None
+        while time.time() < deadline:
+            reported = self._receiver_reported_fw(ident)
+            if reported is not None and reported != running:
+                break
+            time.sleep(0.5)
+
+        if reported is None:
+            verified = False
+            note = "UNVERIFIED -- receiver did not report a version after rejoin"
+        elif running is None:
+            # No pre-OTA baseline (receiver hadn't reported a version yet);
+            # accept the post-reboot version at face value.
+            verified = True
+            note = f"verified fw v{reported}"
+        elif reported != running:
+            verified = True
+            note = f"verified fw v{reported}"
+        else:
+            verified = False
+            note = (
+                f"UNVERIFIED -- still reports v{reported} "
+                f"(staged {self.state.image_version or 'unknown'})"
+            )
+
+        with self._lock:
+            self.state.reported_version = reported
+            self.state.verified = verified
+            # Clear any stale error on a verified result; carry the
+            # UNVERIFIED note as the error string otherwise.
+            self.state.error = None if verified else note
+        print(f"OTA: finalize done -- {note}")
+        # Phase is DONE either way; the receiver came back online. The
+        # verified flag + (on failure) the error string carry the nuance
+        # to the UI. We deliberately do NOT mark the job ERROR on an
+        # unverified result -- the transfer itself succeeded.
+        self._set_phase(OtaPhase.DONE)

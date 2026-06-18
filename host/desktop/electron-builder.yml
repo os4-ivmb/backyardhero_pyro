@@ -1,0 +1,70 @@
+appId: com.backyardhero.host
+productName: Backyard Hero
+copyright: Backyard Hero
+
+directories:
+  output: dist
+  buildResources: build
+
+# Only the small Electron glue is packed into the asar; the heavy payload
+# (Next bundle + embedded Python + sources) ships as extraResources, assembled
+# by scripts/build-resources.mjs into ./resources before electron-builder runs.
+files:
+  - src/**
+  - package.json
+
+asar: true
+
+extraResources:
+  - from: resources
+    to: .
+    filter:
+      - "**/*"
+
+# ---------------------------------------------------------------------------
+# macOS: .dmg, hardened runtime + entitlements so the app can be notarized.
+# Signing identity is taken from the keychain / CSC_LINK env; notarization is
+# enabled in CI when APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID
+# (or an App Store Connect API key) are present in the environment.
+# ---------------------------------------------------------------------------
+mac:
+  category: public.app-category.utilities
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # The embedded Python ships many unsigned .so/.dylib files; let them load
+  # under the hardened runtime via the entitlements rather than failing.
+  extendInfo:
+    NSSupportsAutomaticGraphicsSwitching: true
+
+dmg:
+  title: Backyard Hero
+
+# ---------------------------------------------------------------------------
+# Windows: NSIS installer (per-user, no admin required). Code signing is via
+# CSC_LINK / CSC_KEY_PASSWORD env when a cert is available.
+# ---------------------------------------------------------------------------
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Backyard Hero
+
+linux:
+  target:
+    - AppImage
+  category: Utility

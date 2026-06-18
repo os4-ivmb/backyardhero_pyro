@@ -1,10 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-
-const COMMAND_DIR = '/tmp/d_cmd';
-// Where uploaded firmware images get staged before the daemon picks
-// them up. Kept on tmpfs so old jobs don't accumulate across reboots.
-const STAGING_DIR = '/tmp/ota_staging';
+import { ensureHardware } from '@/util/apiGuards';
+import { COMMAND_DIR, STAGING_DIR } from '@/util/paths';
 // Hard cap on the upload size. The receiver image today is ~340KB; we
 // allow ~4MB to give headroom for partition-scheme growth and base64
 // expansion (~4/3 vs raw bytes).
@@ -41,6 +38,7 @@ export const config = {
  *   command).
  */
 export default function handler(req, res) {
+  if (!ensureHardware(res)) return;
   if (req.method === 'POST') {
     try {
       const { ident, file_name, image_b64, rate } = req.body || {};

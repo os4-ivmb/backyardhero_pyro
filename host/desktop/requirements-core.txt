@@ -1,0 +1,13 @@
+# Lean Python requirement set for the desktop bundle (BYH_INCLUDE_AUDIO=0).
+# Covers only the always-on services + serial bridge; omits the heavy
+# firing-profile audio stack (librosa/numpy/scipy/yt-dlp), so the
+# "reprocess firing profile from YouTube" feature is unavailable in this
+# build. Use the default full build (pythings/requirements.txt) to include it.
+pyserial==3.5
+websockets
+psutil
+watchfiles
+flask==2.3.3
+# esptool drives UI-initiated dongle firmware flashing (see
+# tcp_serial_bridge/requirements.txt for the >=4.9 rationale).
+esptool>=4.9

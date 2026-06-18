@@ -1,10 +1,10 @@
-import Database from 'better-sqlite3';
 import formidable from 'formidable';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { DB_PATH, db } from '@/util/sqldb';
+import { DB_PATH, getDb, closeDb } from '@/util/sqldb';
+import { ensureLocalDb } from '@/util/apiGuards';
 
 export const config = {
   api: {
@@ -47,6 +47,9 @@ function cleanupFile(filePath) {
 }
 
 function validateBackyardHeroDb(filePath) {
+  // Lazy-require the native addon so it's never loaded in the cloud build
+  // (this whole route is gated on ensureLocalDb anyway).
+  const Database = require('better-sqlite3');
   let importedDb;
   try {
     importedDb = new Database(filePath, { readonly: true, fileMustExist: true });
@@ -75,7 +78,7 @@ async function handleExport(req, res) {
   );
 
   try {
-    await db.backup(exportPath);
+    await getDb().backup(exportPath);
     const stat = await fs.promises.stat(exportPath);
     const filename = `backyardhero-${timestampForFilename()}.db`;
 
@@ -104,7 +107,14 @@ async function handleExport(req, res) {
 
 async function handleImport(req, res) {
   let uploadedPath = null;
+  let stagedPath = null;
   const backupPath = `${DB_PATH}.backup-${timestampForFilename()}`;
+  // W4b: track whether we've closed the live connection / swapped the
+  // file so the catch block can restore from backup if anything fails
+  // mid-swap, instead of leaving a half-overwritten live DB behind.
+  let dbClosed = false;
+  let swapStarted = false;
+  let swapCompleted = false;
 
   try {
     const { files } = await parseUpload(req);
@@ -116,10 +126,37 @@ async function handleImport(req, res) {
 
     validateBackyardHeroDb(uploadedPath);
 
-    await db.backup(backupPath);
-    db.close();
-    await fs.promises.copyFile(uploadedPath, DB_PATH);
+    // Back up the current DB first so we always have a restore point.
+    await getDb().backup(backupPath);
 
+    // Stage the import as a sibling temp file on the SAME filesystem as
+    // the live DB so the final swap can be an atomic rename(2). Validate
+    // the staged copy too (defense against a copy that silently
+    // truncated).
+    stagedPath = `${DB_PATH}.import-${process.pid}-${Date.now()}.tmp`;
+    await fs.promises.copyFile(uploadedPath, stagedPath);
+    validateBackyardHeroDb(stagedPath);
+
+    // Close the live connection only once we're about to swap. Anything
+    // that failed above left the live DB and its open connection intact.
+    // closeDb() also drops the memoized handle so a failed-swap restore
+    // path can reopen cleanly without a process restart.
+    closeDb();
+    dbClosed = true;
+    swapStarted = true;
+
+    // Remove stale WAL/SHM sidecars so the freshly-swapped main DB file
+    // isn't reinterpreted through a previous database's write-ahead log.
+    for (const sidecar of [`${DB_PATH}-wal`, `${DB_PATH}-shm`]) {
+      try { await fs.promises.unlink(sidecar); } catch { /* may not exist */ }
+    }
+
+    // Atomic publish.
+    await fs.promises.rename(stagedPath, DB_PATH);
+    stagedPath = null;
+    swapCompleted = true;
+
+    // Only schedule the restart AFTER a verified, completed swap.
     res.once('finish', () => {
       setTimeout(() => process.exit(0), 500);
     });
@@ -131,15 +168,39 @@ async function handleImport(req, res) {
     });
   } catch (error) {
     console.error('Failed to import database:', error);
-    res.status(500).json({
-      error: error?.message || 'Failed to import database.',
-    });
+
+    // If we got far enough to disturb the live DB, restore it from the
+    // backup we took above so we never leave the operator with a broken
+    // database. (process.exit is only scheduled on the success path, so
+    // the restored DB will be picked up without a restart.)
+    if (swapStarted && !swapCompleted) {
+      try {
+        await fs.promises.copyFile(backupPath, DB_PATH);
+        for (const sidecar of [`${DB_PATH}-wal`, `${DB_PATH}-shm`]) {
+          try { await fs.promises.unlink(sidecar); } catch { /* may not exist */ }
+        }
+        console.error('Import failed mid-swap; restored DB from backup', backupPath);
+      } catch (restoreErr) {
+        console.error('CRITICAL: failed to restore DB from backup:', restoreErr);
+      }
+    }
+
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: error?.message || 'Failed to import database.',
+        backupPath: dbClosed ? backupPath : undefined,
+      });
+    }
   } finally {
     cleanupFile(uploadedPath);
+    if (stagedPath) cleanupFile(stagedPath);
   }
 }
 
 export default async function handler(req, res) {
+  // Whole-database export/import only makes sense against the local SQLite
+  // file; the cloud profile uses Supabase Postgres (per-user, RLS).
+  if (!ensureLocalDb(res)) return;
   if (req.method === 'GET') {
     return handleExport(req, res);
   }

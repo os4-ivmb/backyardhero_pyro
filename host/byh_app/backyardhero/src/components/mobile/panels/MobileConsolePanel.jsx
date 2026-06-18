@@ -178,9 +178,21 @@ function MobileShowControl({ allReceiversOnline, hasErrors, errors, isReadyToFir
   const handleUnload = () => callDaemon("unload_show", { id: stagedShow.id });
   const handleStart = () => callDaemon("start_show");
   const handleStop = () => callDaemon("stop_show");
+  const handleAbortLoad = () => callDaemon("abort_show_load");
   const handleUnstage = () => setStagedShow({});
 
+  // LOADING covers cue-send + the async wait for receivers; lets us turn
+  // the hero button into "Cancel load" so a stuck load can be aborted.
+  const isLoadingShow = protoStatus === "LOADING";
+
   const primary = useMemo(() => {
+    if (isLoadingShow) return {
+      label: "Cancel load",
+      variant: "danger",
+      onClick: handleAbortLoad,
+      icon: <FiX className="text-2xl" aria-hidden />,
+      hint: "Sending cues… cancel if stuck (auto-fails after 60s).",
+    };
     if (isLive) return {
       label: "Abort",
       variant: "danger",
@@ -281,7 +293,7 @@ function MobileShowControl({ allReceiversOnline, hasErrors, errors, isReadyToFir
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    isLive, waitingClientStart, dstc, isShowLoaded, hasErrors, isReadyToFire,
+    isLive, isLoadingShow, waitingClientStart, dstc, isShowLoaded, hasErrors, isReadyToFire,
     allReceiversOnline, errors?.length, protoStatus, isArmed, startSwActive,
     showRcvVerification.hasError, showRcvVerification.summary,
   ]);
@@ -291,11 +303,12 @@ function MobileShowControl({ allReceiversOnline, hasErrors, errors, isReadyToFir
       if (protoStatus === "STARTED") return { tone: "live", label: protoStatusBadge("STARTED") };
       if (protoStatus === "START_PENDING") return { tone: "armed", label: protoStatusBadge("START_PENDING") };
     }
+    if (isLoadingShow) return { tone: "armed", label: "Loading" };
     if (!isShowLoaded) return { tone: "neutral", label: "Not loaded" };
     if (hasErrors) return { tone: "danger", label: "Checks failed" };
     if (isReadyToFire) return { tone: "ok", label: "Ready" };
     return { tone: "neutral", label: "Loaded" };
-  }, [isLive, protoStatus, isShowLoaded, hasErrors, isReadyToFire]);
+  }, [isLive, protoStatus, isShowLoaded, hasErrors, isReadyToFire, isLoadingShow]);
 
   const inCountdown = isLive && protoStatus === "START_CONFIRMED";
 

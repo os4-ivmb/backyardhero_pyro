@@ -1,4 +1,4 @@
-import { receiverQueries } from "@/util/sqldb";
+import { getRepo } from "@/data";
 
 /**
  * GET /api/receivers/:id
@@ -24,20 +24,27 @@ import { receiverQueries } from "@/util/sqldb";
  *   → deletes the row outright. Note: the daemon won't know about this
  *     until a reload_receivers command is issued.
  */
-export default function handler(req, res) {
+export default async function handler(req, res) {
   const { id } = req.query;
   if (!id || typeof id !== 'string') {
     return res.status(400).json({ error: 'Invalid receiver id.' });
   }
 
+  let repo;
+  try {
+    repo = await getRepo(req);
+  } catch (err) {
+    return res.status(err?.status || 500).json({ error: err?.message || 'Failed to resolve data context.' });
+  }
+
   if (req.method === 'GET') {
-    const row = receiverQueries.getById(id);
+    const row = await repo.receivers.getById(id);
     if (!row) return res.status(404).json({ error: 'Receiver not found.' });
     return res.status(200).json(row);
   }
 
   if (req.method === 'PATCH') {
-    if (!receiverQueries.getById(id)) {
+    if (!(await repo.receivers.getById(id))) {
       return res.status(404).json({ error: 'Receiver not found.' });
     }
     const { label, type, cues_data, enabled, metadata, config_data } = req.body || {};
@@ -76,8 +83,8 @@ export default function handler(req, res) {
     }
 
     try {
-      receiverQueries.update(id, { label, type, cues_data, enabled, metadata, config_data });
-      return res.status(200).json(receiverQueries.getById(id));
+      await repo.receivers.update(id, { label, type, cues_data, enabled, metadata, config_data });
+      return res.status(200).json(await repo.receivers.getById(id));
     } catch (error) {
       console.error(`Failed to update receiver ${id}:`, error);
       return res.status(500).json({ error: 'Failed to update receiver.' });
@@ -86,7 +93,7 @@ export default function handler(req, res) {
 
   if (req.method === 'DELETE') {
     try {
-      const result = receiverQueries.delete(id);
+      const result = await repo.receivers.remove(id);
       if (result.changes === 0) return res.status(404).json({ error: 'Receiver not found.' });
       return res.status(200).json({ message: 'Receiver deleted.' });
     } catch (error) {

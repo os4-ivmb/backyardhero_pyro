@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { ensureHardware } from '@/util/apiGuards';
 
 // /api/system/update
 //
@@ -164,6 +165,7 @@ async function loadStatus() {
 }
 
 export default async function handler(req, res) {
+  if (!ensureHardware(res)) return;
   if (req.method === 'GET') {
     try {
       const wantPreflight = String(req.query.preflight ?? '') === '1';

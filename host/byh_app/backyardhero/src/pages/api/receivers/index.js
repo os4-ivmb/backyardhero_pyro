@@ -1,4 +1,4 @@
-import { receiverQueries } from "@/util/sqldb";
+import { getRepo } from "@/data";
 
 /**
  * GET /api/receivers
@@ -14,10 +14,17 @@ import { receiverQueries } from "@/util/sqldb";
  * board_version, cues_available, config_data. fw/board/cues_available
  * are NULL until the receiver has answered a CONFIG_QUERY at least once.
  */
-export default function handler(req, res) {
+export default async function handler(req, res) {
+  let repo;
+  try {
+    repo = await getRepo(req);
+  } catch (err) {
+    return res.status(err?.status || 500).json({ error: err?.message || 'Failed to resolve data context.' });
+  }
+
   if (req.method === 'GET') {
     try {
-      const receivers = receiverQueries.getAll();
+      const receivers = await repo.receivers.list();
       return res.status(200).json(receivers);
     } catch (error) {
       console.error('Failed to list receivers:', error);
@@ -33,11 +40,11 @@ export default function handler(req, res) {
     if (!type || typeof type !== 'string') {
       return res.status(400).json({ error: 'type is required (string).' });
     }
-    if (receiverQueries.getById(id)) {
+    if (await repo.receivers.getById(id)) {
       return res.status(409).json({ error: `Receiver with id "${id}" already exists.` });
     }
     try {
-      receiverQueries.insert({
+      await repo.receivers.insert({
         id,
         label: label || id,
         type,
@@ -46,7 +53,7 @@ export default function handler(req, res) {
         metadata: metadata || {},
         config_data: config_data || {},
       });
-      return res.status(201).json(receiverQueries.getById(id));
+      return res.status(201).json(await repo.receivers.getById(id));
     } catch (error) {
       console.error('Failed to insert receiver:', error);
       return res.status(500).json({ error: 'Failed to insert receiver.' });

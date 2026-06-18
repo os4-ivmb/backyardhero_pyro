@@ -1,19 +1,31 @@
-import { showQueries } from "@/util/sqldb";
+import { getRepo } from "@/data";
 
 export const config = {
   api: {
       bodyParser: {
-          sizeLimit: '2mb' // Set desired value here
+          // W6: a 2mb cap silently rejected large shows (the body carries
+          // both display_payload and runtime_payload JSON), and the client
+          // only console.logged the failure -- so a big show looked saved
+          // but wasn't. Raise the ceiling to comfortably fit a dense show;
+          // the client now also surfaces any save failure (see updateShow).
+          sizeLimit: '32mb'
       }
   }
 }
 
-export default function handler(req, res) {
+export default async function handler(req, res) {
   const { id } = req.query;
+
+  let repo;
+  try {
+    repo = await getRepo(req);
+  } catch (err) {
+    return res.status(err?.status || 500).json({ error: err?.message || 'Failed to resolve data context.' });
+  }
 
   if (req.method === 'DELETE') {
     try {
-      const result = showQueries.delete.run(id); // Run the delete query
+      const result = await repo.shows.remove(id); // Run the delete query
       if (result.changes === 0) {
         return res.status(404).json({ error: "Show not found." });
       }
@@ -46,7 +58,7 @@ export default function handler(req, res) {
     try {
       // Convert audioFile object to JSON string for storage
       const audio_file = audioFile ? JSON.stringify(audioFile) : null;
-      const result = showQueries.update.run(
+      const result = await repo.shows.update(id, {
         name,
         duration,
         version,
@@ -59,8 +71,7 @@ export default function handler(req, res) {
         receiver_locations,
         receiver_labels,
         show_receivers,
-        id
-      );
+      });
       if (result.changes === 0) return res.status(404).json({ error: "Show not found." });
       return res.status(200).json({ message: "Show updated successfully." });
     } catch (error) {

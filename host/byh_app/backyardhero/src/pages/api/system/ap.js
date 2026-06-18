@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { ensureHardware } from '@/util/apiGuards';
 
 // /api/system/ap
 //
@@ -155,6 +156,7 @@ async function pollForStatus(requestId, timeoutMs) {
 }
 
 export default async function handler(req, res) {
+  if (!ensureHardware(res)) return;
   if (req.method === 'GET') {
     try {
       const current = await loadCurrent();

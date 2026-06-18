@@ -1,0 +1,84 @@
+name: Build desktop installers
+
+# Builds the "ready to go" Backyard Hero desktop installers for macOS
+# (Apple Silicon + Intel) and Windows. Native pieces (embedded CPython,
+# better-sqlite3) can't cross-compile, so each target builds on a matching
+# runner. Artifacts are uploaded per job; wire signing/notarization secrets
+# (see env below) to get installable, gatekeeper-clean builds.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "desktop-v*"
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            label: macOS (arm64)
+            ebflags: --mac --arm64
+          - os: macos-13
+            label: macOS (x64)
+            ebflags: --mac --x64
+          - os: windows-latest
+            label: Windows (x64)
+            ebflags: --win --x64
+
+    defaults:
+      run:
+        working-directory: host/desktop
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # node-gyp (better-sqlite3 rebuild) needs Python + a C toolchain. macOS
+      # runners ship Xcode; Windows runners ship MSVC. setup-python gives
+      # node-gyp a predictable interpreter.
+      - name: Set up Python (for node-gyp)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install desktop deps
+        run: npm ci
+
+      - name: Assemble resources (Next standalone + embedded Python)
+        run: npm run build:resources
+        env:
+          BYH_INCLUDE_AUDIO: "1"
+
+      - name: Build installer
+        run: npx electron-builder ${{ matrix.ebflags }} --publish never
+        env:
+          # macOS signing + notarization (no-ops if the secrets are unset;
+          # the build then produces an unsigned artifact).
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Windows signing (no-op if unset).
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: backyardhero-${{ matrix.os }}
+          path: |
+            host/desktop/dist/*.dmg
+            host/desktop/dist/*.exe
+            host/desktop/dist/*.blockmap
+            host/desktop/dist/latest*.yml
+          if-no-files-found: warn

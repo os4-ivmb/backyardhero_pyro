@@ -1,7 +1,14 @@
-import { inventoryQueries } from "@/util/sqldb";
+import { getRepo } from "@/data";
 import { parseOptionalUnitCost } from "@/util/inventoryUnitCost";
 
-export default function handler(req, res) {
+export default async function handler(req, res) {
+  let repo;
+  try {
+    repo = await getRepo(req);
+  } catch (err) {
+    return res.status(err?.status || 500).json({ error: err?.message || 'Failed to resolve data context.' });
+  }
+
   if (req.method === 'POST') {
     const { name, type, duration, fuse_delay, lift_delay, burn_rate, color, available_ct, youtube_link , youtube_link_start_sec, image, metadata, source, unit_cost } = req.body;
 
@@ -21,15 +28,19 @@ export default function handler(req, res) {
       const metadataStr = metadata ? (typeof metadata === 'string' ? metadata : JSON.stringify(metadata)) : null;
       const sourceValue = source || 'user_created';
       const unitCost = parseOptionalUnitCost(unit_cost);
-      const result = inventoryQueries.insert.run(name, type, duration, fuse_delay, lift_delay, burn_rate, color, available_ct, youtube_link, youtube_link_start_sec, image, metadataStr, unitCost, sourceValue);
-      return res.status(201).json({ id: result.lastInsertRowid });
+      const result = await repo.inventory.create({
+        name, type, duration, fuse_delay, lift_delay, burn_rate, color,
+        available_ct, youtube_link, youtube_link_start_sec, image,
+        metadata: metadataStr, unit_cost: unitCost, source: sourceValue,
+      });
+      return res.status(201).json({ id: result.id });
     } catch (error) {
       console.error(error);
       return res.status(500).json({ error: 'Failed to create inventory item.' });
     }
-  }else if (req.method === 'GET') {
+  } else if (req.method === 'GET') {
     try {
-      const inventory = inventoryQueries.getAll.all();
+      const inventory = await repo.inventory.list();
       return res.status(200).json(inventory);
     } catch (error) {
       console.error(error);

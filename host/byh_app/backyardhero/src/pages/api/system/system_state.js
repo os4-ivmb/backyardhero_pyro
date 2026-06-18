@@ -1,22 +1,25 @@
 import fs from 'fs/promises';
+import { ensureHardware } from '@/util/apiGuards';
+import { CURSOR_FILE, FIRING_FILE } from '@/util/paths';
 
 export default async function handler(req, res) {
+  if (!ensureHardware(res)) return;
   try {
     const result = {
       fw_cursor: null,
       fw_firing: null,
     };
 
-    // Check for /tmp/fw_cursor
+    // Check for the firmware-cursor marker
     try {
-      const fwCursorExists = await fs.stat('/tmp/fw_cursor');
+      const fwCursorExists = await fs.stat(CURSOR_FILE);
       if (fwCursorExists.isFile()) {
-        const cursorContent = await fs.readFile('/tmp/fw_cursor', 'utf8');
+        const cursorContent = await fs.readFile(CURSOR_FILE, 'utf8');
         result.fw_cursor = parseFloat(cursorContent.trim());
       }
     } catch (err) {
       if (err.code !== 'ENOENT') {
-        console.error('Error reading /tmp/fw_cursor:', err);
+        console.error('Error reading fw_cursor:', err);
         result.fw_cursor = -1;
       }else{
         console.error(err);
@@ -24,11 +27,11 @@ export default async function handler(req, res) {
       }
     }
 
-    // Check for /tmp/fw_firing
+    // Check for the firmware-firing marker
     try {
-      const fwFiringExists = await fs.stat('/tmp/fw_firing');
+      const fwFiringExists = await fs.stat(FIRING_FILE);
       if (fwFiringExists.isFile()) {
-        const firingContent = await fs.readFile('/tmp/fw_firing', 'utf8');
+        const firingContent = await fs.readFile(FIRING_FILE, 'utf8');
         result.fw_firing = JSON.parse(firingContent.trim());
       }
     } catch (err) {
