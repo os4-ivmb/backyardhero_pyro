@@ -1070,6 +1070,15 @@ class BYHProtocolHandler:
         # "CV ..." = command validation failure; "C? ..." = unknown command.
         # Both mean the dongle rejected something the daemon sent.
         if msg.startswith('CV ') or msg.startswith('C? ') or msg == 'CV' or msg == 'C?':
+            # `forget IDENT` is idempotent: the daemon issues it during a
+            # reload for every receiver that left the DB, but the dongle only
+            # holds receivers it has actually heard from (or that survived its
+            # last reboot). "RNF" (receiver-not-found) on a forget just means
+            # it was already absent -- which is the exact end state we wanted.
+            # Don't surface that benign reconcile no-op as an operator error.
+            if msg.startswith('CV forget') and 'RNF' in msg:
+                print(f"INFO: forget no-op (already absent): {msg.strip()}")
+                return True
             self.parent.write_error(f"Dongle rejected command: {msg.strip()}")
             return True
 
