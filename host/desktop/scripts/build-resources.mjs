@@ -119,7 +119,15 @@ async function buildNext() {
     '--force',
   ], { cwd: APP_SRC });
 
-  run(npm, ['run', 'build'], {
+  // Force the webpack builder for the standalone output. Next 16 defaults
+  // `next build` to Turbopack, whose standalone packaging (16.1+) omits
+  // externalized node_modules (e.g. axios) or emits hashed external refs
+  // that resolve via a separate .next/node_modules which never ends up in
+  // the bundle -- the packaged server then crashes at startup with
+  // "Failed to load external module axios-<hash>" (vercel/next.js#88844,
+  // #91654, #90567). Webpack standalone tracing copies them correctly.
+  // `-- --webpack` forwards the flag through the `build` npm script.
+  run(npm, ['run', 'build', '--', '--webpack'], {
     cwd: APP_SRC,
     env: { ...process.env, BYH_BUILD_STANDALONE: '1', NODE_ENV: 'production' },
   });
