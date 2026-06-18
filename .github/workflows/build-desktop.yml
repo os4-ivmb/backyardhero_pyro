@@ -58,19 +58,43 @@ jobs:
         env:
           BYH_INCLUDE_AUDIO: "1"
 
-      - name: Build installer
-        run: npx electron-builder ${{ matrix.ebflags }} --publish never
+      # Only export signing/notarization vars when the secret is actually
+      # present. A bare `env: CSC_LINK: ${{ secrets.X }}` injects an EMPTY
+      # string when the secret is unset, and electron-builder treats ""
+      # as a cert path -- resolving it to the project dir and dying with
+      # "<dir> not a file" (both macPackager and winPackager). Leaving the
+      # vars unset makes electron-builder produce a clean unsigned artifact;
+      # CSC_IDENTITY_AUTO_DISCOVERY=false stops it probing the keychain too.
+      # shell: bash runs on the Windows runner as well (git-bash).
+      - name: Configure code signing
+        shell: bash
         env:
-          # macOS signing + notarization (no-ops if the secrets are unset;
-          # the build then produces an unsigned artifact).
-          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Windows signing (no-op if unset).
-          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          if [ -n "$MAC_CSC_LINK" ]; then
+            echo "CSC_LINK=$MAC_CSC_LINK" >> "$GITHUB_ENV"
+            echo "CSC_KEY_PASSWORD=$MAC_CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
+          else
+            echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
+          fi
+          if [ -n "$WIN_CSC_LINK" ]; then
+            echo "WIN_CSC_LINK=$WIN_CSC_LINK" >> "$GITHUB_ENV"
+            echo "WIN_CSC_KEY_PASSWORD=$WIN_CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
+          fi
+          if [ -n "$APPLE_ID" ]; then
+            echo "APPLE_ID=$APPLE_ID" >> "$GITHUB_ENV"
+            echo "APPLE_APP_SPECIFIC_PASSWORD=$APPLE_APP_SPECIFIC_PASSWORD" >> "$GITHUB_ENV"
+            echo "APPLE_TEAM_ID=$APPLE_TEAM_ID" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build installer
+        run: npx electron-builder ${{ matrix.ebflags }} --publish never
 
       - name: Upload installers
         uses: actions/upload-artifact@v4

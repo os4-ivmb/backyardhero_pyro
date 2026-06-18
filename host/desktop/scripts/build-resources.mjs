@@ -56,7 +56,16 @@ function log(...a) {
 
 function run(cmd, args, opts = {}) {
   log('$', cmd, args.join(' '));
-  const r = spawnSync(cmd, args, { stdio: 'inherit', shell: false, ...opts });
+  // Node (>=18.20 / >=20.12, CVE-2024-27980) refuses to spawn .cmd/.bat
+  // shims without shell:true, failing with status=null / EINVAL. On Windows
+  // npm.cmd / npx.cmd therefore need a shell; native exes (python.exe, tar)
+  // do not. CI paths have no spaces, so the lack of arg-quoting under
+  // shell:true is fine here.
+  const needsShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(cmd);
+  const r = spawnSync(cmd, args, { stdio: 'inherit', ...opts, shell: opts.shell ?? needsShell });
+  if (r.error) {
+    throw new Error(`Failed to spawn ${cmd}: ${r.error.message}`);
+  }
   if (r.status !== 0) {
     throw new Error(`Command failed (${r.status}): ${cmd} ${args.join(' ')}`);
   }
