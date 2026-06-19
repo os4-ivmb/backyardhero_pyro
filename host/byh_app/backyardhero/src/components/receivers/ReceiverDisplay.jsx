@@ -140,6 +140,18 @@ function isBilusocnType(type) {
   return type === BILUSOCN_TYPE;
 }
 
+// Friendly names for the add-receiver type dropdown. The raw type keys
+// (e.g. "BKYD_TS_24_1") are an internal/hardware detail; operators just
+// want to pick "BYH Receiver". Falls back to the config-provided label,
+// then the raw key.
+const TYPE_DISPLAY_LABELS = {
+  BKYD_TS_24_1: 'BYH Receiver',
+};
+
+function typeDisplayLabel(type, cfgLabel) {
+  return TYPE_DISPLAY_LABELS[type] || cfgLabel || type;
+}
+
 // Pulls { zone, rangeStart } out of a cues_data map. Falls back to the
 // defaults (zone 1, range 1-4) when the map is empty or malformed so the
 // edit UI always has sane initial values.
@@ -1731,7 +1743,9 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                         Select type…
                       </option>
                       {availableTypes.map((t) => (
-                        <option key={t} value={t}>{t}</option>
+                        <option key={t} value={t}>
+                          {typeDisplayLabel(t, systemConfig?.types?.[t]?.label)}
+                        </option>
                       ))}
                     </select>
                   </label>

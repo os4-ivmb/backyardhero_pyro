@@ -46,14 +46,18 @@ mac:
     # on macOS additionally requires a signed + notarized app, so on unsigned
     # CI builds the feed is still valid but the runtime update is a no-op
     # until signing secrets are wired in.
+    #
+    # arm64 only: the CI macOS leg runs `electron-builder --mac --arm64` (see
+    # .github/workflows/build-desktop.yml for why there's no Intel leg). These
+    # per-target arch lists OVERRIDE the --arm64 CLI flag, so leaving x64 here
+    # makes electron-builder cross-build an unwanted Intel DMG -- and that x64
+    # dmgbuild/hdiutil step is what was failing ("no mountable file systems").
     - target: dmg
       arch:
         - arm64
-        - x64
     - target: zip
       arch:
         - arm64
-        - x64
   hardenedRuntime: true
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
