@@ -187,9 +187,11 @@ function createWindow() {
 }
 
 function createTray(dirs) {
-  // Tray is best-effort: if no icon ships in the build, skip it rather than
-  // crash (the main window is the primary surface anyway).
-  const iconPath = path.join(__dirname, '..', 'build', isWin ? 'tray.ico' : 'trayTemplate.png');
+  // Tray assets live under src/assets so they're packed into the asar -- the
+  // build/ buildResources dir (where icon.png lives for electron-builder) is
+  // NOT bundled into the running app. Best-effort: if the icon can't load, skip
+  // the tray rather than crash (the main window is the primary surface anyway).
+  const iconPath = path.join(__dirname, 'assets', isWin ? 'tray.ico' : 'tray.png');
   let image = nativeImage.createFromPath(iconPath);
   if (image.isEmpty()) return;
 
