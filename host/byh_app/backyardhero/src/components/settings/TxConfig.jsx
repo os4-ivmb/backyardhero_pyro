@@ -1,6 +1,7 @@
 import React from "react";
 import axios from "axios";
 import useStateAppStore from "@/store/useStateAppStore";
+import useAppStore from "@/store/useAppStore";
 import { Field, inputClass, selectClass } from "@/design";
 import useDraft from "@/hooks/useDraft";
 import SaveBar from "./SaveBar";
@@ -15,6 +16,7 @@ const DEFAULTS = { addr: "/dev/tty.usbmodem01", baud: 115200, protocol: PROTOCOL
 
 export default function TxConfig() {
   const { stateData } = useStateAppStore();
+  const { systemConfig, saveSystemConfig } = useAppStore();
   const rf = stateData?.fw_state?.settings?.rf || {};
   const upstream = {
     addr: rf.addr || DEFAULTS.addr,
@@ -25,16 +27,34 @@ export default function TxConfig() {
 
   const onSave = () =>
     draft.save(async (s) => {
+      const baud = parseInt(s.baud, 10);
+      // 1. Reconfigure the live daemon/bridge immediately so the dongle
+      //    starts using the new port without a restart.
       await axios.post(
         "/api/system/cmd_daemon",
         {
           type: "select_serial",
           device: s.addr,
-          baud: parseInt(s.baud, 10),
+          baud,
           protocol: s.protocol,
         },
         { headers: { "Content-Type": "application/json" } },
       );
+      // 2. Persist into the operator's systemcfg.user.json so the choice
+      //    survives a restart. Without this the daemon/bridge re-read the
+      //    git-tracked base on boot and revert to the default port. Merge
+      //    into the existing config so we don't drop other system fields /
+      //    overrides (the API extracts just the user-owned subset).
+      const next = {
+        ...systemConfig,
+        system: {
+          ...(systemConfig?.system || {}),
+          dongle_port: s.addr,
+          dongle_baud: baud,
+          dongle_protocol: s.protocol,
+        },
+      };
+      await saveSystemConfig(next);
     });
 
   return (
