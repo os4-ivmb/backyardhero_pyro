@@ -1,6 +1,6 @@
 {
   "_README": "Git-tracked BASE config. Operator overrides (dongle port/baud, protocol config, default_location) live in systemcfg.user.json (NOT git-tracked) and are layered on top at read time. Edit settings from the UI, not here.",
-  "host_version": "0.30.7",
+  "host_version": "0.30.8",
   "system": {
     "dongle_port": "/dev/tty.usbmodem01",
     "dongle_baud": 115200,
