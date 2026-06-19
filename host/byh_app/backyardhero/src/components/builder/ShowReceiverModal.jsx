@@ -150,12 +150,14 @@ export default function ShowReceiverModal({
 
   const handleCreateReceiver = async () => {
     setCreateError(null);
-    const id = (newIdent || "").trim();
-    // Mirror the Receivers-page rule: the dongle parses the node id out of
-    // "RX<digits>", so enforce it even in the cloud so a pulled-to-device show
-    // addresses correctly later.
-    if (!/^RX\d+$/i.test(id)) {
-      setCreateError('Receiver id must look like "RX<digits>" (e.g. RX163).');
+    // The id field holds only the number; "RX" is fixed chrome and prepended
+    // here. Mirrors the Receivers page so the dongle (which parses the node id
+    // out of "RX<digits>") can always address it, and operators can't mistype
+    // the prefix.
+    const digits = (newIdent || "").replace(/\D/g, "");
+    const id = digits ? `RX${digits}` : "";
+    if (!digits) {
+      setCreateError("Enter the receiver number (e.g. 163).");
       return;
     }
     if (dbReceivers && dbReceivers[id]) {
@@ -448,14 +450,24 @@ function NewReceiverCard({
       <div className="text-xs font-semibold text-fg-secondary">New receiver</div>
 
       <Field label="Receiver id">
-        <input
-          type="text"
-          value={ident}
-          onChange={(e) => onIdentChange(e.target.value)}
-          className={inputClass}
-          placeholder="RX163"
-          autoFocus
-        />
+        {/* "RX" is a fixed prefix; the operator only types the number, so the
+            ident is always a valid "RX<digits>". */}
+        <div className="relative">
+          <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-fg-muted select-none">
+            RX
+          </span>
+          <input
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            maxLength={3}
+            value={ident}
+            onChange={(e) => onIdentChange(e.target.value.replace(/\D/g, "").slice(0, 3))}
+            className={inputClass + " pl-9 font-mono"}
+            placeholder="163"
+            autoFocus
+          />
+        </div>
       </Field>
 
       <Field label="Label (optional)">
@@ -464,7 +476,7 @@ function NewReceiverCard({
           value={label}
           onChange={(e) => onLabelChange(e.target.value)}
           className={inputClass}
-          placeholder={ident ? `defaults to ${ident}` : ""}
+          placeholder={ident ? `defaults to RX${ident}` : ""}
         />
       </Field>
 

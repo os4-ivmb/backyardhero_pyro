@@ -16,6 +16,7 @@ import {
   MdAdd,
   MdClose,
   MdSettingsBackupRestore,
+  MdDelete,
 } from 'react-icons/md';
 import { FaSpinner } from 'react-icons/fa';
 import { FaCircleQuestion, FaTriangleExclamation } from 'react-icons/fa6';
@@ -180,6 +181,9 @@ function SingleReceiver({
   onPendingEditChange, // (id, patch) => void
   onRetry, // (id) => void
   retryBusy = false,
+  // Delete (edit-mode only)
+  onDelete, // (id) => Promise<void> | void
+  deleteBusy = false,
   // Receiver-config fetch (FW v22+ / dongle FW v16+)
   onFetchConfig, // (id) => Promise<void> | void
   fetchConfigBusy = false,
@@ -681,6 +685,25 @@ function SingleReceiver({
               </span>
             </div>
           )}
+
+          {/* Delete: removes the row from the DB outright. Only surfaced
+              while unlocked. The parent confirms, deletes, drops any
+              staged edits, and reloads the dongle's poll list. */}
+          {typeof onDelete === 'function' && (
+            <button
+              type="button"
+              disabled={deleteBusy}
+              onClick={() => onDelete(rcv_name)}
+              className={`mt-1 flex items-center justify-center gap-1 px-2 py-1.5 text-xs rounded
+                ${deleteBusy
+                  ? 'bg-red-900/50 text-red-300 cursor-wait'
+                  : 'bg-red-700 hover:bg-red-600 text-white'}`}
+              title="Delete this receiver permanently"
+            >
+              <MdDelete className={deleteBusy ? 'animate-pulse' : ''} />
+              {deleteBusy ? 'Deleting…' : 'Delete receiver'}
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -881,6 +904,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       fetchReceivers,
       createReceiver,
       updateReceiver,
+      deleteReceiver,
       reloadReceiversOnDaemon,
       retryReceiver,
       fetchReceiverConfig,
@@ -926,6 +950,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
     const [savingEdits, setSavingEdits] = useState(false);
     const [retryBusy, setRetryBusy] = useState({}); // { [rcvId]: true }
     const [fetchConfigBusy, setFetchConfigBusy] = useState({}); // { [rcvId]: true }
+    const [deleteBusy, setDeleteBusy] = useState({}); // { [rcvId]: true }
 
     // Add-receiver form state. Controlled inputs live here so the form
     // survives editing surrounding cards. The form is only rendered when the
@@ -1086,6 +1111,44 @@ export default function ReceiverDisplay({ setCurrentTab }) {
         }, 800);
       }
     }, [retryReceiver]);
+
+    // Delete a receiver outright (edit-mode only). Confirms first, drops
+    // any staged edits for the now-gone row, then reloads the daemon's
+    // poll list so the dongle stops polling it immediately.
+    const handleDelete = useCallback(async (id) => {
+      const def = dbReceivers?.[id];
+      const label = def?.label || id;
+      if (
+        typeof window !== 'undefined' &&
+        !window.confirm(
+          `Delete receiver "${label}" (${id})?\n\nThis permanently removes it from the system.`,
+        )
+      ) {
+        return;
+      }
+      setDeleteBusy((prev) => ({ ...prev, [id]: true }));
+      try {
+        await deleteReceiver(id);
+        // Discard any pending edit staged for the row we just removed so the
+        // dirty indicator doesn't dangle on a non-existent receiver.
+        setPendingEdits((prev) => {
+          if (!prev[id]) return prev;
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        // Reconcile the dongle's poll list right away.
+        await reloadReceiversOnDaemon();
+      } catch (e) {
+        console.error('Delete failed', e);
+      } finally {
+        setDeleteBusy((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+      }
+    }, [deleteReceiver, dbReceivers, reloadReceiversOnDaemon]);
 
     // Fire a CONFIG_QUERY at one receiver and re-pull the DB after a
     // short delay so the new fw / cues_available / fire_duration_ms
@@ -1266,11 +1329,15 @@ export default function ReceiverDisplay({ setCurrentTab }) {
     const handleAddSubmit = useCallback(async (e) => {
       e?.preventDefault?.();
       setAddError(null);
-      const id = (addForm.id || "").trim();
+      // The ID field holds only the numeric part; the "RX" prefix is fixed
+      // chrome and auto-prepended here so operators can't fat-finger the
+      // ident (lowercase rx, missing prefix, stray spaces) anymore.
+      const digits = (addForm.id || "").replace(/\D/g, "");
+      const id = digits ? `RX${digits}` : "";
       const label = (addForm.label || "").trim() || id;
       const type = addForm.type;
 
-      if (!id) { setAddError("ID is required."); return; }
+      if (!digits) { setAddError("Enter the receiver number (e.g. 163)."); return; }
       if (dbReceivers && dbReceivers[id]) {
         setAddError(`Receiver "${id}" already exists.`);
         return;
@@ -1611,16 +1678,33 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                 <div className="flex flex-wrap items-end gap-3">
                   <label className="flex flex-col gap-1">
                     <span className="text-xs text-gray-400">ID</span>
-                    <input
-                      type="text"
-                      value={addForm.id}
-                      onChange={(e) =>
-                        setAddForm((f) => ({ ...f, id: e.target.value }))
-                      }
-                      placeholder="RX163"
-                      className="bg-gray-900 text-white text-sm rounded border border-gray-600 px-2 py-1 w-32"
-                      autoFocus
-                    />
+                    {/* The ident is always "RX<digits>". We render "RX" as a
+                        fixed prefix and only let the operator type the number,
+                        so malformed idents (lowercase, missing prefix) can't
+                        happen. */}
+                    <div className="flex items-stretch rounded border border-gray-600 overflow-hidden focus-within:border-emerald-500">
+                      <span className="flex items-center px-2 bg-gray-700 text-gray-300 text-sm font-mono select-none">
+                        RX
+                      </span>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        maxLength={3}
+                        value={addForm.id}
+                        onChange={(e) =>
+                          setAddForm((f) => ({
+                            ...f,
+                            // Keep only digits and cap at 3 so the field can
+                            // only ever hold a valid receiver number.
+                            id: e.target.value.replace(/\D/g, "").slice(0, 3),
+                          }))
+                        }
+                        placeholder="163"
+                        className="bg-gray-900 text-white text-sm px-2 py-1 w-20 font-mono outline-none"
+                        autoFocus
+                      />
+                    </div>
                   </label>
                   <label className="flex flex-col gap-1">
                     <span className="text-xs text-gray-400">Label</span>
@@ -1751,6 +1835,8 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                               retryBusy={!!retryBusy[id]}
                               onFetchConfig={handleFetchConfig}
                               fetchConfigBusy={!!fetchConfigBusy[id]}
+                              onDelete={handleDelete}
+                              deleteBusy={!!deleteBusy[id]}
                               debugDisplay={debugDisplay}
                               latestReceiverVersion={latestReceiverVersion}
                             />
@@ -1804,6 +1890,8 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                                       retryBusy={!!retryBusy[rcv_key]}
                                       onFetchConfig={handleFetchConfig}
                                       fetchConfigBusy={!!fetchConfigBusy[rcv_key]}
+                                      onDelete={handleDelete}
+                                      deleteBusy={!!deleteBusy[rcv_key]}
                                       debugDisplay={debugDisplay}
                                       latestReceiverVersion={latestReceiverVersion}
                                     />
@@ -1832,6 +1920,8 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                           retryBusy={!!retryBusy[rcv_key]}
                           onFetchConfig={handleFetchConfig}
                           fetchConfigBusy={!!fetchConfigBusy[rcv_key]}
+                          onDelete={handleDelete}
+                          deleteBusy={!!deleteBusy[rcv_key]}
                           debugDisplay={debugDisplay}
                           latestReceiverVersion={latestReceiverVersion}
                         />
@@ -1867,6 +1957,8 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                                   retryBusy={!!retryBusy[rcv_key]}
                                   onFetchConfig={handleFetchConfig}
                                   fetchConfigBusy={!!fetchConfigBusy[rcv_key]}
+                                  onDelete={handleDelete}
+                                  deleteBusy={!!deleteBusy[rcv_key]}
                                   debugDisplay={debugDisplay}
                                   latestReceiverVersion={latestReceiverVersion}
                                 />

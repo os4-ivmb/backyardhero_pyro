@@ -423,6 +423,30 @@ const useAppStore = create(persist((set, get) => ({
   },
 
   /**
+   * Delete a receiver row outright. Removes it from local state on success.
+   * The daemon won't drop it from its poll list until a reload_receivers
+   * command is issued, so callers should follow with reloadReceiversOnDaemon().
+   */
+  deleteReceiver: async (id) => {
+    try {
+      await axios.delete(`/api/receivers/${id}`);
+      set((state) => {
+        const receivers = { ...state.receivers };
+        delete receivers[id];
+        const sysReceivers = { ...(state.systemConfig?.receivers || {}) };
+        delete sysReceivers[id];
+        return {
+          receivers,
+          systemConfig: { ...state.systemConfig, receivers: sysReceivers },
+        };
+      });
+    } catch (error) {
+      console.error(`Failed to delete receiver ${id}:`, error);
+      throw error;
+    }
+  },
+
+  /**
    * Tell the daemon (and ultimately the dongle) to re-read the Receivers
    * table and reconcile its in-memory poll list. Call this after one or more
    * updateReceiver() calls.
