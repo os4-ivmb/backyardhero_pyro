@@ -72,10 +72,17 @@ jobs:
       # present. A bare `env: CSC_LINK: ${{ secrets.X }}` injects an EMPTY
       # string when the secret is unset, and electron-builder treats ""
       # as a cert path -- resolving it to the project dir and dying with
-      # "<dir> not a file" (both macPackager and winPackager). Leaving the
-      # vars unset makes electron-builder produce a clean unsigned artifact;
-      # CSC_IDENTITY_AUTO_DISCOVERY=false stops it probing the keychain too.
-      # shell: bash runs on the Windows runner as well (git-bash).
+      # "<dir> not a file" (both macPackager and winPackager).
+      #
+      # When no macOS cert is present we do NOT leave the app fully unsigned:
+      # an unsigned arm64 app trips Gatekeeper's "is damaged" error, which the
+      # user can't clear from the GUI (only by removing the quarantine xattr in
+      # a terminal). Instead we ad-hoc sign it (mac.identity "-"), which yields
+      # the normal, bypassable "unidentified developer" prompt. Ad-hoc keeps the
+      # hardened runtime on, so the embedded-Python entitlements in
+      # build/entitlements.mac.plist (allow-jit, disable-library-validation, …)
+      # are what keep it from crashing on launch. The build step reads
+      # BYH_MAC_IDENTITY below. shell: bash runs on Windows too (git-bash).
       - name: Configure code signing
         shell: bash
         env:
@@ -90,8 +97,8 @@ jobs:
           if [ -n "$MAC_CSC_LINK" ]; then
             echo "CSC_LINK=$MAC_CSC_LINK" >> "$GITHUB_ENV"
             echo "CSC_KEY_PASSWORD=$MAC_CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
-          else
-            echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            echo "BYH_MAC_IDENTITY=-" >> "$GITHUB_ENV"
           fi
           if [ -n "$WIN_CSC_LINK" ]; then
             echo "WIN_CSC_LINK=$WIN_CSC_LINK" >> "$GITHUB_ENV"
@@ -103,8 +110,17 @@ jobs:
             echo "APPLE_TEAM_ID=$APPLE_TEAM_ID" >> "$GITHUB_ENV"
           fi
 
+      # `-c.mac.identity=-` ad-hoc signs when no real cert is configured (set
+      # via BYH_MAC_IDENTITY above). Empty on the signed path and on Windows, so
+      # electron-builder uses the cert / its own defaults there.
       - name: Build installer
-        run: npx electron-builder ${{ matrix.ebflags }} --publish never
+        shell: bash
+        run: |
+          extra=""
+          if [ -n "${BYH_MAC_IDENTITY:-}" ]; then
+            extra="-c.mac.identity=${BYH_MAC_IDENTITY}"
+          fi
+          npx electron-builder ${{ matrix.ebflags }} $extra --publish never
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
