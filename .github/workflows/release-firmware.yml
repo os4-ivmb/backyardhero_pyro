@@ -91,6 +91,9 @@ jobs:
       - name: Install arduino-cli + ESP32 toolchain
         run: |
           set -euo pipefail
+          # The arduino-cli install.sh now bails if BINDIR doesn't already
+          # exist ("$BINDIR folder not found"), so create it first.
+          mkdir -p "${HOME}/.local/bin"
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh \
             | BINDIR="${HOME}/.local/bin" sh
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
