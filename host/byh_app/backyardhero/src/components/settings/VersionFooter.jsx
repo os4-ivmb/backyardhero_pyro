@@ -22,9 +22,14 @@ import { fwOutOfDate } from "@/util/firmwareVersion";
 // reuses the existing firmware-latest plumbing (DongleFlashPanel does the
 // actual flashing).
 
-// While an update check / download is in flight we re-poll the host_update
-// endpoint so the badge tracks progress without the operator refreshing.
-const POLL_MS = 3000;
+// The footer polls host_update while mounted so it reflects the background
+// auto-updater (which checks 15s after launch, then every 6h, entirely in the
+// Electron main process). We poll slowly when idle so a background
+// check/download that starts while Settings is open still surfaces as
+// "Downloading…"/"Update ready" without the operator hitting refresh, and
+// fast once an update is actively in flight.
+const ACTIVE_POLL_MS = 3000;
+const IDLE_POLL_MS = 15000;
 const ACTIVE_PHASES = new Set(["checking", "downloading"]);
 
 export default function VersionFooter() {
@@ -54,27 +59,31 @@ export default function VersionFooter() {
     fetchHostUpdate(false);
   }, [fetchHostUpdate]);
 
-  // Keep polling while the updater is actively checking/downloading so the
-  // progress badge stays live; stop once it settles.
-  const updaterPhase = host?.updater?.phase;
+  // Poll continuously while mounted so a background check/download surfaces on
+  // its own. Self-scheduling timeout picks the cadence from the latest phase:
+  // fast (3s) while checking/downloading, slow (15s) otherwise. This is what
+  // lets the badge move idle -> Downloading X% -> Update ready without the
+  // operator pressing "Check for updates".
   useEffect(() => {
-    const active = ACTIVE_PHASES.has(updaterPhase);
-    if (!active) {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-      return undefined;
-    }
-    if (pollRef.current) return undefined;
-    pollRef.current = setInterval(() => fetchHostUpdate(false), POLL_MS);
+    let cancelled = false;
+    const schedule = (ms) => {
+      pollRef.current = setTimeout(tick, ms);
+    };
+    const tick = async () => {
+      const data = await fetchHostUpdate(false);
+      if (cancelled) return;
+      const active = ACTIVE_PHASES.has(data?.updater?.phase);
+      schedule(active ? ACTIVE_POLL_MS : IDLE_POLL_MS);
+    };
+    schedule(IDLE_POLL_MS);
     return () => {
+      cancelled = true;
       if (pollRef.current) {
-        clearInterval(pollRef.current);
+        clearTimeout(pollRef.current);
         pollRef.current = null;
       }
     };
-  }, [updaterPhase, fetchHostUpdate]);
+  }, [fetchHostUpdate]);
 
   const handleCheck = useCallback(async () => {
     setChecking(true);

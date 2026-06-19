@@ -142,6 +142,16 @@ export function createSupabaseRepo(ctx, req, res) {
         if (error) raise(error, 'Failed to list inventory.');
         return (data || []).map((r) => rowToText(r, INVENTORY_JSON));
       },
+      async getById(id) {
+        const { data, error } = await sb
+          .from(T_INVENTORY)
+          .select('*')
+          .eq('id', id)
+          .eq('user_id', uid)
+          .maybeSingle();
+        if (error) raise(error, 'Failed to load inventory item.');
+        return data ? rowToText(data, INVENTORY_JSON) : undefined;
+      },
       async create(row) {
         const { data, error } = await sb
           .from(T_INVENTORY)

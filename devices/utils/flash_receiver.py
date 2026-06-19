@@ -53,14 +53,27 @@ from pathlib import Path
 # under the venv's interpreter. Steady state: ~50ms to detect we're
 # already in the venv and continue.
 
+def _venv_paths(venv_dir: Path) -> tuple[Path, Path]:
+    """Return (python, pip) inside a venv. Windows puts these under
+    Scripts\\*.exe; POSIX puts them under bin/."""
+    if os.name == "nt":
+        return venv_dir / "Scripts" / "python.exe", venv_dir / "Scripts" / "pip.exe"
+    return venv_dir / "bin" / "python3", venv_dir / "bin" / "pip"
+
+
+def _same_path(a: str, b: str) -> bool:
+    # Windows paths are case-insensitive and may differ in casing/slashes.
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+
 def _ensure_venv() -> None:
     script_dir = Path(__file__).resolve().parent
     venv_dir = script_dir / ".venv"
-    venv_python = venv_dir / "bin" / "python3"
+    venv_python, venv_pip = _venv_paths(venv_dir)
     requirements = script_dir / "requirements.txt"
 
     # Already running under our venv -> everything should import.
-    if sys.executable == str(venv_python):
+    if _same_path(sys.executable, str(venv_python)):
         try:
             import serial  # noqa: F401
             return
@@ -71,13 +84,14 @@ def _ensure_venv() -> None:
                 file=sys.stderr,
             )
             subprocess.run(
-                [str(venv_dir / "bin" / "pip"), "install", "-q", "-r", str(requirements)],
+                [str(venv_pip), "install", "-q", "-r", str(requirements)],
                 check=True,
             )
             os.execv(str(venv_python), [str(venv_python), __file__, *sys.argv[1:]])
 
     # Outside venv. If the host Python already has pyserial (rare on
-    # macOS, normal on Linux), just use it directly.
+    # macOS, normal on Linux, common on Windows if installed manually),
+    # just use it directly.
     try:
         import serial  # noqa: F401
         return
@@ -93,7 +107,7 @@ def _ensure_venv() -> None:
         subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
         print("[flash_receiver] installing dependencies...", file=sys.stderr)
         subprocess.run(
-            [str(venv_dir / "bin" / "pip"), "install", "-q", "-r", str(requirements)],
+            [str(venv_pip), "install", "-q", "-r", str(requirements)],
             check=True,
         )
 
@@ -303,22 +317,42 @@ def prompt_ident(default: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _arduino_data_dirs() -> list[Path]:
+    """Candidate arduino-cli / Arduino IDE data directories, per-OS.
+
+      * macOS:   ~/Library/Arduino15
+      * Linux:   ~/.arduino15
+      * Windows: %LOCALAPPDATA%\\Arduino15
+    """
+    home = Path.home()
+    dirs = [home / "Library" / "Arduino15", home / ".arduino15"]
+    localappdata = os.environ.get("LOCALAPPDATA")
+    if localappdata:
+        dirs.append(Path(localappdata) / "Arduino15")
+    return dirs
+
+
 def find_esptool() -> list[str]:
     """Return the argv prefix for invoking esptool, in priority order:
 
-      1. The Arduino-bundled esptool (~/Library/Arduino15/packages/esp32/
-         tools/esptool_py/<ver>/esptool). This is the EXACT binary the
-         Arduino IDE shells out to when you hit Upload, so by definition
-         it's the one we know works on this machine. Its USB-CDC reset
-         handling for ESP32-S2 boards is what we want to inherit.
-      2. The venv-installed esptool (pyproject installs >=4.9). Used if
-         arduino-cli isn't installed and the IDE has never been used.
+      1. The Arduino-bundled esptool (<arduino-data>/packages/esp32/
+         tools/esptool_py/<ver>/esptool[.exe]). This is the EXACT binary
+         the Arduino IDE shells out to when you hit Upload, so by
+         definition it's the one we know works on this machine. Its
+         USB-CDC reset handling for ESP32-S2 boards is what we inherit.
+      2. The venv-installed esptool (requirements.txt installs >=4.9).
+         Used if arduino-cli isn't installed and the IDE has never run.
       3. esptool.py / esptool on PATH (likely brew, possibly old).
     """
-    arduino_pkg = Path.home() / "Library" / "Arduino15" / "packages" / "esp32" / "tools" / "esptool_py"
-    if arduino_pkg.is_dir():
+    for data_dir in _arduino_data_dirs():
+        arduino_pkg = data_dir / "packages" / "esp32" / "tools" / "esptool_py"
+        if not arduino_pkg.is_dir():
+            continue
         for v in sorted(arduino_pkg.iterdir(), reverse=True):
-            for cand in (v / "esptool", v / "esptool.py"):
+            for cand in (v / "esptool.exe", v / "esptool", v / "esptool.py"):
+                # os.access(..., X_OK) is effectively always true for
+                # existing files on Windows, so existence is the real
+                # gate there; on POSIX it correctly filters non-exes.
                 if cand.exists() and os.access(cand, os.X_OK):
                     return [str(cand)]
 

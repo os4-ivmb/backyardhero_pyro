@@ -1,7 +1,10 @@
 import "@/styles/globals.css";
 import { Inter, JetBrains_Mono } from "next/font/google";
+import { useEffect } from "react";
 import axios from "axios";
 import { BASE_PATH } from "@/util/clientEnv";
+import { installDesktopDialogFocusFix } from "@/util/desktopFocusFix";
+import { AsyncPromptHost } from "@/components/common/AsyncPrompt";
 
 // next/link, next/router and next/image apply basePath automatically, but raw
 // axios/fetch calls do not. Point axios at the basePath so the existing
@@ -23,9 +26,16 @@ const mono = JetBrains_Mono({
 });
 
 export default function App({ Component, pageProps }) {
+  // Desktop (Electron) only: repair keyboard focus after native dialogs so
+  // typing keeps working after a confirm/alert (e.g. deleting a receiver).
+  useEffect(() => {
+    installDesktopDialogFocusFix();
+  }, []);
+
   return (
     <div className={`${sans.variable} ${mono.variable} font-sans`}>
       <Component {...pageProps} />
+      <AsyncPromptHost />
     </div>
   );
 }

@@ -15,6 +15,7 @@ import { protoStatusBadge, protoStatusLabel } from "@/util/protoStatus";
 import { isPollableReceiver } from "@/util/receivers";
 import { parseAudioField } from "@/utils/audioTracks";
 import { computeShowStats, formatShowCreatedAt } from "@/util/showStats";
+import { asyncPrompt } from "@/components/common/AsyncPrompt";
 
 import ShowHealthStrip from "../../console/ShowHealthStrip";
 
@@ -169,7 +170,14 @@ function MobileShowControl({ allReceiversOnline, hasErrors, errors, isReadyToFir
 
   const handleLoad = async () => {
     if (!stagedShow?.id) return;
-    if (window.prompt("Auth code for this show:") !== stagedShow.authorization_code) {
+    const code = await asyncPrompt({
+      title: "Load show",
+      message: "Auth code for this show:",
+      type: "password",
+      okLabel: "Load",
+    });
+    if (code === null) return; // cancelled
+    if (code !== stagedShow.authorization_code) {
       window.alert("Auth code is incorrect.");
       return;
     }

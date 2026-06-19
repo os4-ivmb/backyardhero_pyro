@@ -16,7 +16,7 @@
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
-const { app, BrowserWindow, Tray, Menu, shell, nativeImage } = require('electron');
+const { app, BrowserWindow, Tray, Menu, shell, nativeImage, ipcMain } = require('electron');
 
 const { isWin, resources, userDirs } = require('./paths');
 const { Supervisor } = require('./supervisor');
@@ -172,7 +172,10 @@ function createWindow() {
     title: 'Backyard Hero',
     backgroundColor: '#0b0b0f',
     show: false,
-    webPreferences: { contextIsolation: true },
+    webPreferences: {
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js'),
+    },
   });
 
   const loading = `data:text/html,${encodeURIComponent(
@@ -246,6 +249,18 @@ async function main() {
 
   createWindow();
   createTray(dirs);
+
+  // Work around the Electron/Chromium Windows bug where keyboard focus to the
+  // web contents dies after a native confirm/alert/prompt (the renderer asks
+  // for this via the preload's byhDesktop.fixDialogFocus). Bouncing the window
+  // focus restores typing; element/window.focus() alone does not. Harmless on
+  // macOS/Linux, where the dialogs don't break focus.
+  ipcMain.on('byh:fix-dialog-focus', () => {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused()) {
+      mainWindow.blur();
+      mainWindow.focus();
+    }
+  });
 
   supervisor.startAll();
 

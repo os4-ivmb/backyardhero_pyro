@@ -414,6 +414,7 @@ export function getQueries() {
     insert: db.prepare(`INSERT INTO inventory (name, type, duration, fuse_delay, lift_delay, burn_rate, color, available_ct, youtube_link, youtube_link_start_sec, image, metadata, unit_cost, source)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     getAll: db.prepare(`SELECT * FROM inventory`),
+    getById: db.prepare(`SELECT * FROM inventory WHERE id = ?`),
     update: db.prepare(`UPDATE inventory SET name = ?, type = ?, duration = ?, fuse_delay = ?, lift_delay = ?, burn_rate = ?, color = ?, available_ct = ?, youtube_link = ?, youtube_link_start_sec = ?, image = ?, metadata = ?, unit_cost = ?, source = ? WHERE id = ?`),
     delete: db.prepare(`DELETE FROM inventory WHERE id = ?`),
   };

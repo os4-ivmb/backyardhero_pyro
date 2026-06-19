@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { MdClose } from "react-icons/md";
+import { FaImage } from "react-icons/fa6";
 
 import useAppStore from "@/store/useAppStore";
 import { Section, Button, IconButton, Card } from "@/design";
@@ -8,6 +9,7 @@ import InventoryList from "./InventoryList";
 import { INV_TYPES } from "@/constants";
 import { normalizeYouTubeUrl } from "@/util/youtube";
 import { parseOptionalUnitCost } from "@/util/inventoryUnitCost";
+import { apiUrl, PROFILE } from "@/util/clientEnv";
 
 const DEFAULT_DATA = {
   id: "", name: "", type: "FUSE",
@@ -30,6 +32,110 @@ function Field({ label, hint, children }) {
       {children}
       {hint ? <p className={helpClass}>{hint}</p> : null}
     </div>
+  );
+}
+
+// Image picker: paste a URL or (local profile only) upload a file. Uploaded
+// images go through /api/inventory/upload-image, which stores them in the
+// persistent uploads dir (same place music tracks live) and returns a URL we
+// stash in formObject.image -- so the data model is unchanged (still a single
+// URL string). The on-device build is the only one with local file storage;
+// in the cloud profile we keep the URL field only.
+function ImageField({ value, onChange }) {
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState(null);
+  const fileRef = useRef(null);
+  const canUpload = PROFILE === "local";
+
+  // App-absolute paths (our serve route) need the deploy basePath; external
+  // URLs are used verbatim.
+  const previewSrc = value ? (value.startsWith("/") ? apiUrl(value) : value) : null;
+
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // let the user re-pick the same file later
+    if (!file) return;
+    setError(null);
+    setUploading(true);
+    try {
+      const body = new FormData();
+      body.append("image", file);
+      const resp = await fetch(apiUrl("/api/inventory/upload-image"), {
+        method: "POST",
+        body,
+      });
+      if (!resp.ok) {
+        const j = await resp.json().catch(() => ({}));
+        throw new Error(j.error || "Upload failed.");
+      }
+      const result = await resp.json();
+      onChange(result.url);
+    } catch (err) {
+      setError(err.message || "Upload failed.");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <Field
+      label="Image"
+      hint={canUpload
+        ? "Paste an image URL or upload a file. Uploads are stored locally and survive app updates."
+        : "Paste an image URL."}
+    >
+      <div className="flex items-start gap-3">
+        {previewSrc ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={previewSrc}
+            alt="Item preview"
+            className="h-14 w-14 shrink-0 rounded-sm border border-border bg-surface-2 object-cover"
+            onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
+          />
+        ) : (
+          <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-sm border border-dashed border-border bg-surface-2 text-fg-muted">
+            <FaImage aria-hidden />
+          </div>
+        )}
+        <div className="min-w-0 flex-1 space-y-2">
+          <input
+            value={value || ""}
+            onChange={(e) => onChange(e.target.value)}
+            name="image" type="text"
+            placeholder={canUpload ? "https://… or upload a file" : "https://…"}
+            className={inputClass}
+          />
+          <div className="flex items-center gap-2">
+            {canUpload ? (
+              <>
+                <input
+                  ref={fileRef} type="file" accept="image/*"
+                  className="hidden" onChange={handleFile}
+                />
+                <Button
+                  type="button" size="sm" variant="outline"
+                  onClick={() => fileRef.current?.click()}
+                  disabled={uploading} loading={uploading}
+                >
+                  {uploading ? "Uploading…" : "Upload"}
+                </Button>
+              </>
+            ) : null}
+            {value ? (
+              <Button
+                type="button" size="sm" variant="ghost"
+                onClick={() => onChange("")}
+                className="text-fg-muted hover:text-danger"
+              >
+                Remove
+              </Button>
+            ) : null}
+          </div>
+          {error ? <p className="text-xs text-danger">{error}</p> : null}
+        </div>
+      </div>
+    </Field>
   );
 }
 
@@ -233,10 +339,10 @@ const AddInventoryForm = (props) => {
               placeholder="0.00" className={inputClass}
             />
           </Field>
-          <Field label="Image URL">
-            <input value={formObject.image || ""} onChange={handleInputChange}
-              name="image" type="text" className={inputClass} />
-          </Field>
+          <ImageField
+            value={formObject.image}
+            onChange={(v) => setFormObject((prev) => ({ ...prev, image: v }))}
+          />
 
           <div className="border-t border-border-subtle pt-4">
             <Fields

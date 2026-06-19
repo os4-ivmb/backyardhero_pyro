@@ -1,6 +1,20 @@
 import { getRepo } from "@/data";
 import { parseOptionalUnitCost } from "@/util/inventoryUnitCost";
 import { caps } from "@/util/profile";
+import { getBlobStore, localImageKey } from "@/data/blobStore";
+
+// Best-effort removal of a locally-uploaded inventory image so deleting (or
+// re-imaging) an item doesn't leave orphaned files in the persistent uploads
+// dir. External image URLs and empty values are ignored.
+async function removeLocalImage(imageValue) {
+  const key = localImageKey(imageValue);
+  if (!key) return;
+  try {
+    await getBlobStore("image").delete(key);
+  } catch (err) {
+    console.error("Failed to remove inventory image blob:", err);
+  }
+}
 
 
 export default async function handler(req, res) {
@@ -25,9 +39,13 @@ export default async function handler(req, res) {
 
   if (req.method === 'DELETE') {
     try {
+      // Capture the image reference before the row is gone so we can clean up
+      // any locally-stored file once the delete succeeds.
+      const existing = repo.inventory.getById ? await repo.inventory.getById(entityId) : null;
       await repo.firingProfiles.removeByInventoryId(entityId);
       const result = await repo.inventory.remove(entityId);
       if (result.changes === 0) return res.status(404).json({ error: 'Inventory item not found.' });
+      await removeLocalImage(existing?.image);
       return res.status(200).json({ message: 'Inventory item deleted successfully.' });
     } catch (error) {
       console.error(error);
@@ -53,12 +71,18 @@ export default async function handler(req, res) {
       const metadataStr = metadata ? (typeof metadata === 'string' ? metadata : JSON.stringify(metadata)) : null;
       const sourceValue = source || 'user_created';
       const unitCost = parseOptionalUnitCost(unit_cost);
+      // Note the prior image so a swapped-out local upload can be cleaned up.
+      const existing = repo.inventory.getById ? await repo.inventory.getById(entityId) : null;
       const result = await repo.inventory.update(entityId, {
         name, type, duration, fuse_delay, lift_delay, burn_rate, color,
         available_ct, youtube_link, youtube_link_start_sec, image,
         metadata: metadataStr, unit_cost: unitCost, source: sourceValue,
       });
       if (result.changes === 0) return res.status(404).json({ error: 'Inventory item not found.' });
+      const oldKey = localImageKey(existing?.image);
+      if (oldKey && oldKey !== localImageKey(image)) {
+        await removeLocalImage(existing.image);
+      }
       return res.status(200).json({ message: 'Inventory item updated successfully.' });
     } catch (error) {
       console.error(error);

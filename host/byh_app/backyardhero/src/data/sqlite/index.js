@@ -51,6 +51,9 @@ export function createSqliteRepo(/* ctx */) {
       async list() {
         return inventoryQueries.getAll.all();
       },
+      async getById(id) {
+        return inventoryQueries.getById.get(id);
+      },
       async create(row) {
         const r = inventoryQueries.insert.run(
           row.name, row.type, row.duration, row.fuse_delay, row.lift_delay,

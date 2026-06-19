@@ -33,6 +33,10 @@ const nextConfig = {
         source: '/uploads/audio/:filename',
         destination: '/api/shows/audio/:filename',
       },
+      {
+        source: '/uploads/images/:filename',
+        destination: '/api/inventory/image/:filename',
+      },
     ];
   },
 };

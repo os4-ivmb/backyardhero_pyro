@@ -41,20 +41,32 @@ from pathlib import Path
 # script is independently runnable even if flash_receiver isn't around).
 # ---------------------------------------------------------------------------
 
+def _venv_paths(venv_dir: Path) -> tuple[Path, Path]:
+    """Return (python, pip) inside a venv. Windows uses Scripts\\*.exe,
+    POSIX uses bin/."""
+    if os.name == "nt":
+        return venv_dir / "Scripts" / "python.exe", venv_dir / "Scripts" / "pip.exe"
+    return venv_dir / "bin" / "python3", venv_dir / "bin" / "pip"
+
+
+def _same_path(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+
 def _ensure_venv() -> None:
     script_dir = Path(__file__).resolve().parent
     venv_dir = script_dir / ".venv"
-    venv_python = venv_dir / "bin" / "python3"
+    venv_python, venv_pip = _venv_paths(venv_dir)
     requirements = script_dir / "requirements.txt"
 
-    if sys.executable == str(venv_python):
+    if _same_path(sys.executable, str(venv_python)):
         try:
             import serial  # noqa: F401
             return
         except ImportError:
             print("[set_node_id] dependencies changed -- updating .venv...", file=sys.stderr)
             subprocess.run(
-                [str(venv_dir / "bin" / "pip"), "install", "-q", "-r", str(requirements)],
+                [str(venv_pip), "install", "-q", "-r", str(requirements)],
                 check=True,
             )
             os.execv(str(venv_python), [str(venv_python), __file__, *sys.argv[1:]])
@@ -70,7 +82,7 @@ def _ensure_venv() -> None:
         subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
         print("[set_node_id] installing dependencies...", file=sys.stderr)
         subprocess.run(
-            [str(venv_dir / "bin" / "pip"), "install", "-q", "-r", str(requirements)],
+            [str(venv_pip), "install", "-q", "-r", str(requirements)],
             check=True,
         )
 

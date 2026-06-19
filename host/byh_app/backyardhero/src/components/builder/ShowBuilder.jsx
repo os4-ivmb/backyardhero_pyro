@@ -8,6 +8,7 @@ import ShowTargetGrid from "./ShowTargetGrid";
 import ShowReceiverModal from "./ShowReceiverModal";
 import ShowStateHeader from "./ShowStateHeader";
 import VideoPreviewPopup from "../common/VideoPreviewPopup";
+import { asyncPrompt } from "../common/AsyncPrompt";
 import SpatialLayoutMap from "./SpatialLayoutMap";
 import RacksTab from "./RacksTab";
 import RackShellsSelector from "./RackShellsSelector";
@@ -2577,20 +2578,32 @@ const ShowBuilder = (props) => {
       ? receivers
       : systemConfig.receivers;
 
-  // Test Show Builder used to filter the DB receivers by the show's
-  // protocol; under per-show receivers it's simply the DB rows
-  // referenced by the show. Bilusocn-zone entries are intentionally
-  // excluded -- the Test Show Builder generates probe items and cares
-  // about feedback (battery, continuity), which one-way 433MHz TX
-  // doesn't provide. This is a memo on activeReceivers so it stays
-  // live as receiver edits stream in.
-  const filteredReceivers = useMemo(() => {
+  // Receiver map for the Test Show Builder. Maps each native show
+  // receiver to the cue count the show ACTUALLY designates for it
+  // (entry.cues -> [1..N]), NOT the DB receiver's full hardware cue map.
+  // The test generator should probe exactly the cues the show defines,
+  // not every cue the physical receiver happens to support. Bilusocn
+  // zones are excluded -- the test builder generates probe items and
+  // cares about feedback (battery, continuity), which one-way 433MHz TX
+  // doesn't provide. Missing/disabled rows are dropped (the daemon can't
+  // address them). Memoized on showReceivers + activeReceivers so it
+  // stays live as receiver edits / cue-count changes stream in.
+  const testShowReceivers = useMemo(() => {
     const out = {};
     for (const entry of showReceivers) {
       if (!entry || !entry.id) continue;
       if (isBilusocnEntry(entry)) continue;
       const row = (activeReceivers || {})[entry.id];
-      if (row) out[entry.id] = row;
+      if (!row || row.enabled === false) continue;
+      const n = Math.max(0, parseInt(entry.cues, 10) || 0);
+      out[entry.id] = {
+        ...row,
+        // Override the DB hardware cue map with the show's designated
+        // cue slots, keyed by the receiver ident (== item.zone for
+        // native receivers). Keeps the test builder's zone lookup,
+        // cue-count display and generation correct off show data.
+        cues: { [entry.id]: Array.from({ length: n }, (_, i) => i + 1) },
+      };
     }
     return out;
   }, [showReceivers, activeReceivers]);
@@ -3190,9 +3203,12 @@ const ShowBuilder = (props) => {
     let authorization_code = showMetadata.authorization_code;
     if (!authorization_code) {
       if (silent) return null; // never prompt mid-edit
-      authorization_code = prompt(
-        "Please enter an auth code for this show. It will be used to both edit and launch the show.",
-      );
+      authorization_code = await asyncPrompt({
+        title: "Set show auth code",
+        message:
+          "Please enter an auth code for this show. It will be used to both edit and launch the show.",
+        okLabel: "Save",
+      });
       if (!authorization_code) return null;
     }
 
@@ -3750,7 +3766,7 @@ const ShowBuilder = (props) => {
               
               {activeTab === "test" && (
                 <TestShowBuilder
-                  receivers={filteredReceivers}
+                  receivers={testShowReceivers}
                   onGenerate={handleTestShowGenerate}
                   currentIndex={currentIndex}
                   setCurrentIndex={setCurrentIndex}

@@ -15,8 +15,23 @@ import path from 'path';
 import { createReadStream } from 'fs';
 import { createServiceSupabase } from '@/util/supabase/server';
 
-const BUCKET = process.env.BYH_AUDIO_BUCKET || 'show-audio';
 const SIGNED_URL_TTL_S = 60 * 60 * 24 * 7; // 7 days; re-signed via getUrl()
+
+// Per-kind bucket + object-key prefix. Image support mirrors audio so the
+// cloud profile can store inventory images alongside tracks; both are served
+// via signed URLs that getUrl() re-signs on demand.
+const KIND = {
+  audio: {
+    bucket: process.env.BYH_AUDIO_BUCKET || 'show-audio',
+    prefix: 'audio',
+    defaultExt: '.mp3',
+  },
+  image: {
+    bucket: process.env.BYH_IMAGE_BUCKET || 'inventory-images',
+    prefix: 'images',
+    defaultExt: '.png',
+  },
+};
 
 function contentTypeFor(filename) {
   const ext = path.extname(filename).toLowerCase();
@@ -28,16 +43,19 @@ function contentTypeFor(filename) {
   return 'application/octet-stream';
 }
 
-export function createSupabaseBlobStore() {
+export function createSupabaseBlobStore(kind = 'audio') {
   const sb = createServiceSupabase();
+  const cfg = KIND[kind] || KIND.audio;
+  const BUCKET = cfg.bucket;
 
   return {
     kind: 'supabase',
+    blobKind: kind,
 
     async put({ tmpPath, originalName, mimetype, userId }) {
       if (!userId) throw new Error('Supabase blob store requires a userId.');
-      const ext = path.extname(originalName || '') || '.mp3';
-      const key = `audio/${userId}/${randomUUID()}${ext}`;
+      const ext = path.extname(originalName || '') || cfg.defaultExt;
+      const key = `${cfg.prefix}/${userId}/${randomUUID()}${ext}`;
 
       const body = createReadStream(tmpPath);
       const { error } = await sb.storage.from(BUCKET).upload(key, body, {

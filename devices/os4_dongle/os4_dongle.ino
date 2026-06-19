@@ -166,7 +166,27 @@
 //     kept currentShowId==0 while cues still loaded (cyan LED, showId 0).
 //     Now parses exactly two params. Not an RF/protocol change -- no
 //     receiver version dependency.
-#define FW_VERSION 21
+// v22 why not
+// v25: 2026-06-XX - RESCUE release (temporary): disables the H8 RF address
+//   entropy mask (RF_ADDR_ENTROPY_MASK -> 0x0) so receiverAddress() reverts to
+//   the pre-v20 unmasked scheme. This lets the dongle reach PRE-v24 receivers
+//   -- specifically v23 units stranded by the v20/v24 addressing break -- to
+//   operate them and OTA them forward. A v25 dongle CANNOT talk to v24+
+//   receivers; the follow-up release restores the mask for normal operation.
+//   (Version jumps 22->25 to align with the receiver line; no v23/v24 dongle.)
+// v26: 2026-06-XX - Follow-up to the v25 rescue: restores the H8 RF address
+//   entropy mask (RF_ADDR_ENTROPY_MASK = 0xA3C5E1B400ULL). This is the normal
+//   build -- once stranded v23 units have been OTA'd forward on the v25 rescue
+//   dongle, flash v26 to resume standard masked addressing (v24+ receivers).
+// v27: 2026-06-XX - RESCUE release again (identical to v25): disables the H8
+//   entropy mask (-> 0x0) for another round of reaching/OTA'ing stranded
+//   PRE-v24 (v23) receivers. CANNOT talk to v24+ receivers. The follow-up v28
+//   restores the mask (same as v26) for normal operation.
+// v28: 2026-06-XX - Follow-up to the v27 rescue (identical to v26): restores
+//   the H8 RF address entropy mask (RF_ADDR_ENTROPY_MASK = 0xA3C5E1B400ULL).
+//   Normal build -- flash after the v27 rescue dongle has OTA'd stranded v23
+//   units forward, to resume standard masked addressing (v24+ receivers).
+#define FW_VERSION 28
 
 #define BOARD_VERSION 2
 
@@ -649,6 +669,10 @@ RF24 radio(RF24_CE_PIN, RF24_CSN_PIN);
 // BREAKING RF CHANGE: the receiver firmware applies the IDENTICAL mask, so
 // dongle and receiver MUST ship together (dongle FW v20+ / receiver FW v24+,
 // see the version-gate note at RECEIVER_BASE above for the precedent).
+//
+// NOTE: the v25 and v27 RESCUE releases temporarily set this to 0x0 (pre-v20
+// unmasked addressing) to reach stranded v23 receivers. v26 and v28 restore
+// the real mask -- they are the normal builds and only talk to v24+ receivers.
 #define RF_ADDR_ENTROPY_MASK 0xA3C5E1B400ULL
 
 static inline uint64_t systemSalt() {

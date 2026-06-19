@@ -22,6 +22,7 @@ import { FaSpinner } from 'react-icons/fa';
 import { FaCircleQuestion, FaTriangleExclamation } from 'react-icons/fa6';
 import ShowHealth from "../homepanel/ShowHealth";
 import { isPollableReceiver } from "@/util/receivers";
+import { toAsciiDigits } from "@/util/digits";
 import {
   SHOW_RECEIVER_STATUS,
   isBilusocnEntry,
@@ -1344,7 +1345,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       // The ID field holds only the numeric part; the "RX" prefix is fixed
       // chrome and auto-prepended here so operators can't fat-finger the
       // ident (lowercase rx, missing prefix, stray spaces) anymore.
-      const digits = (addForm.id || "").replace(/\D/g, "");
+      const digits = toAsciiDigits(addForm.id);
       const id = digits ? `RX${digits}` : "";
       const label = (addForm.label || "").trim() || id;
       const type = addForm.type;
@@ -1709,7 +1710,10 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                             ...f,
                             // Keep only digits and cap at 3 so the field can
                             // only ever hold a valid receiver number.
-                            id: e.target.value.replace(/\D/g, "").slice(0, 3),
+                            // toAsciiDigits (not /\D/) so full-width / Arabic-
+                            // Indic digits from a localized keyboard aren't
+                            // stripped as if they were letters.
+                            id: toAsciiDigits(e.target.value).slice(0, 3),
                           }))
                         }
                         placeholder="163"
