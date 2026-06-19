@@ -10,6 +10,8 @@
  *   resources/pythings/ Python service sources (ws_server, pc_daemon, fp_gen,
  *                       inv_crawl)
  *   resources/bridge/   tcp_serial_bridge + flash_server
+ *   resources/devices/utils/  shared esptool helpers (dongle_flasher.py) the
+ *                       flash_server imports for UI-driven dongle flashing
  *   resources/config/   default systemcfg.json seed
  *
  * Runs on macOS, Windows, and Linux. Designed to be the single command a CI
@@ -31,6 +33,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DESKTOP_DIR = path.resolve(__dirname, '..');
 const HOST_DIR = path.resolve(DESKTOP_DIR, '..');
+const REPO_ROOT = path.resolve(HOST_DIR, '..');
 const APP_SRC = path.join(HOST_DIR, 'byh_app', 'backyardhero');
 const RES = path.join(DESKTOP_DIR, 'resources');
 
@@ -207,6 +210,18 @@ async function copySources() {
   const bridgeOut = path.join(RES, 'bridge');
   await rm(bridgeOut, { recursive: true, force: true });
   await cp(path.join(HOST_DIR, 'tcp_serial_bridge'), bridgeOut, { recursive: true, filter: skipPy });
+
+  // The bridge's flash_server imports the shared esptool helpers from
+  // devices/utils (dongle_flasher.py). In a source checkout these are two
+  // levels up from the bridge; in the bundle there's no repo tree, so ship
+  // them alongside under resources/devices/utils. The Python side finds them
+  // via BYH_DEVICES_UTILS_DIR (set by the supervisor) or a bundle-relative
+  // fallback. Without this, the flash server fails to start and UI dongle
+  // flashing dies with "could not reach bridge at …:9001".
+  const devUtilsOut = path.join(RES, 'devices', 'utils');
+  await rm(devUtilsOut, { recursive: true, force: true });
+  await mkdir(path.dirname(devUtilsOut), { recursive: true });
+  await cp(path.join(REPO_ROOT, 'devices', 'utils'), devUtilsOut, { recursive: true, filter: skipPy });
 
   const cfgOut = path.join(RES, 'config');
   await mkdir(cfgOut, { recursive: true });

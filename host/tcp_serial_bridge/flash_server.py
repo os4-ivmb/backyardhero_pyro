@@ -79,11 +79,33 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-# The shared esptool helpers live next to flash_dongle.py. Add the
-# repo's devices/utils to sys.path so the bridge venv (which doesn't
-# install dongle_flasher itself, only its deps) can import them.
+# The shared esptool helpers (dongle_flasher.py) live in devices/utils. Add
+# that dir to sys.path so the bridge venv (which installs only its deps, not
+# dongle_flasher itself) can import them. The location differs by deployment:
+#   - source checkout / Docker: <repo>/devices/utils (two levels up from here)
+#   - desktop bundle: there is no repo tree; build-resources.mjs ships a copy
+#     under resources/devices/utils and the supervisor exports
+#     BYH_DEVICES_UTILS_DIR pointing at it.
+# Try the explicit env first, then both layout candidates; fall back to the
+# source-checkout guess so a missing copy yields an actionable ImportError.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_DEVICES_UTILS = _REPO_ROOT / "devices" / "utils"
+
+
+def _resolve_devices_utils() -> Path:
+    here = Path(__file__).resolve()
+    candidates = []
+    env_dir = os.environ.get("BYH_DEVICES_UTILS_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+    candidates.append(_REPO_ROOT / "devices" / "utils")      # source checkout
+    candidates.append(here.parents[1] / "devices" / "utils")  # desktop bundle
+    for cand in candidates:
+        if (cand / "dongle_flasher.py").is_file():
+            return cand
+    return _REPO_ROOT / "devices" / "utils"
+
+
+_DEVICES_UTILS = _resolve_devices_utils()
 if str(_DEVICES_UTILS) not in sys.path:
     sys.path.insert(0, str(_DEVICES_UTILS))
 

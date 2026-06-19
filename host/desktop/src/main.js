@@ -81,6 +81,11 @@ function buildEnv(dirs, serialPort) {
     // listens on -> "connection refused" (WinError 10061).
     BYH_BRIDGE_HOST: '127.0.0.1',
     BYH_FLASH_HOST: '127.0.0.1',
+    // The bridge's flash_server imports devices/utils/dongle_flasher.py. There
+    // is no repo tree in the bundle, so point it at the copy shipped under
+    // resources/devices/utils. Without this the flash server never binds :9001
+    // and UI dongle flashing fails with WinError 10061 (connection refused).
+    BYH_DEVICES_UTILS_DIR: resources.devicesUtilsDir,
     // Let the Next server surface the running host version + "this is the
     // desktop app" flag (drives the Settings version/update footer). The
     // actual self-update is handled by electron-updater in this process.
@@ -171,7 +176,7 @@ function createWindow() {
   });
 
   const loading = `data:text/html,${encodeURIComponent(
-    '<body style="background:#0b0b0f;color:#eee;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h2>Backyard Hero</h2><p>Starting services…</p></div></body>'
+    '<body style="background:#0b0b0f;color:#eee;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h2>Backyard Hero</h2><p>Starting services</p></div></body>'
   )}`;
   mainWindow.loadURL(loading);
   mainWindow.once('ready-to-show', () => mainWindow.show());

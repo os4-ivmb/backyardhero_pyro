@@ -48,6 +48,10 @@ const resources = {
   python: pythonBin(),
   pythingsDir: path.join(resourcesRoot, 'pythings'),
   bridgeDir: path.join(resourcesRoot, 'bridge'),
+  // Shared esptool helpers (devices/utils/dongle_flasher.py) the bridge's
+  // flash_server imports for the UI-driven dongle flash. Exported to the
+  // bridge as BYH_DEVICES_UTILS_DIR (no repo tree exists in the bundle).
+  devicesUtilsDir: path.join(resourcesRoot, 'devices', 'utils'),
   defaultConfig: path.join(resourcesRoot, 'config', 'systemcfg.json'),
   // ffmpeg is optional (only the firing-profile audio feature needs it).
   ffmpeg: path.join(resourcesRoot, 'ffmpeg', isWin ? 'ffmpeg.exe' : 'ffmpeg'),

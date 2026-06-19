@@ -7,12 +7,32 @@ import time
 import json
 from pathlib import Path
 
-# The shared esptool/port helpers live in devices/utils (next to
-# flash_dongle.py). Add it to sys.path so we can reuse resolve_dongle_port
-# for VID-based auto-reconnect. Import stays lazy (inside the helper) so a
-# missing dep degrades to "no auto-redetect" rather than failing startup.
+# The shared esptool/port helpers live in devices/utils (dongle_flasher.py).
+# Add it to sys.path so we can reuse resolve_dongle_port for VID-based
+# auto-reconnect. Import stays lazy (inside the helper) so a missing dep
+# degrades to "no auto-redetect" rather than failing startup. The dir's
+# location differs by deployment:
+#   - source checkout / Docker: <repo>/devices/utils (two levels up from here)
+#   - desktop bundle: no repo tree; build-resources.mjs ships a copy under
+#     resources/devices/utils and the supervisor exports BYH_DEVICES_UTILS_DIR.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_DEVICES_UTILS = _REPO_ROOT / "devices" / "utils"
+
+
+def _resolve_devices_utils():
+    here = Path(__file__).resolve()
+    candidates = []
+    env_dir = os.environ.get("BYH_DEVICES_UTILS_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+    candidates.append(_REPO_ROOT / "devices" / "utils")       # source checkout
+    candidates.append(here.parents[1] / "devices" / "utils")  # desktop bundle
+    for cand in candidates:
+        if (cand / "dongle_flasher.py").is_file():
+            return cand
+    return _REPO_ROOT / "devices" / "utils"
+
+
+_DEVICES_UTILS = _resolve_devices_utils()
 if str(_DEVICES_UTILS) not in sys.path:
     sys.path.insert(0, str(_DEVICES_UTILS))
 
