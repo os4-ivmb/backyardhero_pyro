@@ -7,9 +7,13 @@ import {
   MdStop,
   MdReplay,
   MdMemory,
+  MdRefresh,
+  MdCloudDownload,
 } from "react-icons/md";
 import useStateAppStore from "@/store/useStateAppStore";
+import useAppStore from "@/store/useAppStore";
 import { Button, Card, Badge, Modal, cn } from "@/design";
+import { fwOutOfDate } from "@/util/firmwareVersion";
 
 // FW_VERSION: Dongle firmware update panel
 // v1.0.0: Initial multi-file version (app + boot_app0, optional full reflash).
@@ -79,7 +83,11 @@ function fmtElapsed(startMs, endMs) {
 
 export default function DongleFlashPanel() {
   const { stateData } = useStateAppStore();
+  const { latestFirmware, fetchLatestFirmware } = useAppStore();
   const [open, setOpen] = useState(false);
+  const [latestBusy, setLatestBusy] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [latestMsg, setLatestMsg] = useState(null); // { tone, text }
 
   const dongleOta = stateData?.fw_state?.dongle_ota || null;
   const dongleFw  = stateData?.fw_state?.dongle_fw_version ?? null;
@@ -116,7 +124,9 @@ export default function DongleFlashPanel() {
       return `Dongle update OK${dongleFw != null ? ` (now v${dongleFw})` : ""}.`;
     }
     if (phase === "needs_manual_reset") {
-      return "Waiting for BOOT+RESET on the dongle.";
+      return dongleOta.stuck_reason === "port_changed_unresolved"
+        ? "Dongle changed serial ports — pick the right one to continue."
+        : "Waiting for BOOT+RESET on the dongle.";
     }
     if (phase === "error" || phase === "aborted") {
       const err = dongleOta.error || dongleOta.driver_error || "see logs";
@@ -125,6 +135,44 @@ export default function DongleFlashPanel() {
     const pct = dongleOta.overall_pct ?? 0;
     return `${phaseMeta.label.toLowerCase()} (${pct}%)`;
   }, [dongleOta, phase, phaseMeta.label, dongleFw]);
+
+  // Latest published dongle firmware (from the static site). null when
+  // offline / not fetched -- in that case we just don't show the buttons'
+  // version info.
+  const latestDongle = latestFirmware?.dongle?.available
+    ? latestFirmware.dongle
+    : null;
+  const latestDongleVersion = latestDongle?.version ?? null;
+  const outOfDate = fwOutOfDate(dongleFw, latestDongleVersion);
+
+  const handleCheck = useCallback(async () => {
+    setChecking(true);
+    setLatestMsg(null);
+    try {
+      await fetchLatestFirmware(true);
+    } finally {
+      setChecking(false);
+    }
+  }, [fetchLatestFirmware]);
+
+  const handleFlashLatest = useCallback(async () => {
+    setLatestMsg(null);
+    if (blockedReason) {
+      setLatestMsg({ tone: "warn", text: blockedReason });
+      return;
+    }
+    setLatestBusy(true);
+    try {
+      const { data } = await axios.post("/api/system/flash_latest", {
+        device: "dongle",
+      });
+      setLatestMsg({ tone: "ok", text: `Flashing dongle v${data.version}…` });
+    } catch (e) {
+      setLatestMsg({ tone: "danger", text: e?.response?.data?.error || e.message });
+    } finally {
+      setLatestBusy(false);
+    }
+  }, [blockedReason]);
 
   return (
     <div className="flex flex-col gap-3" data-fw-version={FW_VERSION}>
@@ -149,16 +197,67 @@ export default function DongleFlashPanel() {
             <span className="text-fg-muted text-xs">{summary}</span>
           </span>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setOpen(true)}
-          leading={<MdSystemUpdateAlt />}
-          className="ml-auto"
-        >
-          Open flasher
-        </Button>
+        <div className="ml-auto flex items-center gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleCheck}
+            leading={<MdRefresh className={checking ? "animate-spin" : ""} />}
+            disabled={checking}
+          >
+            Check for updates
+          </Button>
+          {latestDongleVersion != null && (
+            <Button
+              variant={outOfDate ? "primary" : "outline"}
+              size="sm"
+              onClick={handleFlashLatest}
+              leading={<MdCloudDownload />}
+              disabled={latestBusy || isActive || !!blockedReason}
+              loading={latestBusy}
+              title={
+                blockedReason ||
+                `Download and flash os4_dongle_v${latestDongleVersion}.bin from backyard-hero.com`
+              }
+            >
+              {outOfDate
+                ? `Flash latest (v${latestDongleVersion})`
+                : `Reflash latest (v${latestDongleVersion})`}
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setOpen(true)}
+            leading={<MdSystemUpdateAlt />}
+          >
+            Open flasher
+          </Button>
+        </div>
       </div>
+
+      {latestDongleVersion != null && (
+        <p className="text-xs text-fg-muted">
+          {outOfDate
+            ? `Update available: v${latestDongleVersion}` +
+              `${dongleFw != null ? ` (running v${dongleFw})` : ""}.`
+            : `Up to date${dongleFw != null ? ` (v${dongleFw})` : ""}.`}
+          {latestDongle?.stale ? " (cached — couldn't reach the server)" : ""}
+        </p>
+      )}
+
+      {latestMsg && (
+        <div
+          className={cn(
+            "text-xs px-2 py-1 rounded-sm",
+            latestMsg.tone === "danger" && "text-danger-fg bg-danger-bg/50",
+            latestMsg.tone === "warn" && "text-warn-fg bg-warn-bg/50",
+            latestMsg.tone === "ok" && "text-ok-fg bg-ok-bg/50",
+          )}
+        >
+          {latestMsg.text}
+        </div>
+      )}
 
       <FlashModal
         isOpen={open}
@@ -186,7 +285,15 @@ function FlashModal({
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
   const [confirmDisruptive, setConfirmDisruptive] = useState(false);
+  const [selectedPort, setSelectedPort] = useState("");
   const fileInputRef = useRef(null);
+
+  const stuckReason = dongleOta?.stuck_reason || null;
+  const availablePorts = useMemo(
+    () => (Array.isArray(dongleOta?.available_ports) ? dongleOta.available_ports : []),
+    [dongleOta?.available_ports],
+  );
+  const portChanged = phase === "needs_manual_reset" && stuckReason === "port_changed_unresolved";
 
   // Wipe form when modal closes so a successful flash doesn't leave
   // stale state lurking next time the operator opens it.
@@ -195,8 +302,20 @@ function FlashModal({
     setSubmitError(null);
     setFile(null);
     setConfirmDisruptive(false);
+    setSelectedPort("");
     if (fileInputRef.current) fileInputRef.current.value = "";
   }, [isOpen]);
+
+  // When we enter the "port changed" stuck state, default the picker to
+  // our best guess (the auto-detected port, else the first candidate) so
+  // the operator can usually just click retry.
+  useEffect(() => {
+    if (!portChanged) return;
+    setSelectedPort(
+      (prev) =>
+        prev || dongleOta?.detected_port || availablePorts[0]?.device || "",
+    );
+  }, [portChanged, dongleOta?.detected_port, availablePorts]);
 
   const handlePick = useCallback((e) => {
     setSubmitError(null);
@@ -269,9 +388,12 @@ function FlashModal({
     }
   }, []);
 
-  const handleContinue = useCallback(async () => {
+  const handleContinue = useCallback(async (port) => {
     try {
-      await axios.patch("/api/system/dongle_flash");
+      await axios.patch(
+        "/api/system/dongle_flash",
+        port ? { port } : {},
+      );
     } catch (e) {
       setSubmitError(e?.response?.data?.error || e.message);
     }
@@ -301,9 +423,12 @@ function FlashModal({
             <Button
               variant="primary"
               leading={<MdReplay />}
-              onClick={handleContinue}
+              onClick={() => handleContinue(portChanged ? selectedPort : undefined)}
+              disabled={portChanged && !selectedPort}
             >
-              I&apos;ve BOOT+RESET&apos;d it — retry
+              {portChanged
+                ? "Retry on selected port"
+                : "I've BOOT+RESET'd it — retry"}
             </Button>
           ) : null}
           {isActive ? (
@@ -389,7 +514,51 @@ function FlashModal({
           </span>
         </label>
 
-        {phase === "needs_manual_reset" && (
+        {portChanged && (
+          <Card padding="md" tone="warn">
+            <div className="flex items-start gap-2 text-sm text-warn-fg">
+              <MdWarning className="mt-0.5 shrink-0" />
+              <div className="flex flex-col gap-2 w-full">
+                <span className="font-semibold">
+                  Dongle changed serial ports — no BOOT+RESET needed.
+                </span>
+                <span className="text-fg-secondary">
+                  The dongle reset into its bootloader and re-enumerated on a
+                  different port, but I couldn&apos;t tell which one
+                  automatically. Pick it below and retry.
+                </span>
+                <label className="flex flex-col gap-1">
+                  <span className="eyebrow">Dongle port</span>
+                  <select
+                    value={selectedPort}
+                    onChange={(e) => setSelectedPort(e.target.value)}
+                    className="text-sm bg-bg-raised text-fg-primary border border-border rounded px-2 py-1.5"
+                  >
+                    <option value="">Select a port…</option>
+                    {availablePorts.map((p) => (
+                      <option key={p.device} value={p.device}>
+                        {p.device}
+                        {p.desc ? ` — ${p.desc}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {availablePorts.length === 0 && (
+                  <span className="text-xs text-fg-muted">
+                    No serial ports detected right now — replug the dongle, or
+                    BOOT+RESET it and retry.
+                  </span>
+                )}
+                <span className="text-xs text-fg-muted">
+                  Still stuck after retrying? Hold BOOT, tap RESET, release
+                  BOOT, then retry.
+                </span>
+              </div>
+            </div>
+          </Card>
+        )}
+
+        {phase === "needs_manual_reset" && !portChanged && (
           <Card padding="md" tone="warn">
             <div className="flex items-start gap-2 text-sm text-warn-fg">
               <MdWarning className="mt-0.5 shrink-0" />
@@ -439,6 +608,13 @@ function FlashModal({
             <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-xs text-fg-muted tabular-nums num">
               <span>{pct}%</span>
               <span>{fmtBytes(dongleOta.total_bytes)} total</span>
+              {dongleOta.port && (
+                <span>
+                  {dongleOta.detected_port
+                    ? `followed → ${dongleOta.port}`
+                    : `port ${dongleOta.port}`}
+                </span>
+              )}
               {dongleOta.exit_code != null && (
                 <span>esptool exit {dongleOta.exit_code}</span>
               )}

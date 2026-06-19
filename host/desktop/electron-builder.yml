@@ -6,6 +6,17 @@ directories:
   output: dist
   buildResources: build
 
+# Auto-update feed. electron-updater reads latest.yml / latest-mac.yml from
+# this URL; configuring it here makes electron-builder (a) emit those feed
+# files + .blockmap during the build and (b) embed app-update.yml into the
+# packaged app so the runtime knows where to look. We DON'T let
+# electron-builder upload (CI runs `--publish never`): the installers + feed
+# files are rsynced to this same static path by .github/scripts/publish_desktop.sh.
+publish:
+  - provider: generic
+    url: https://backyard-hero.com/download/desktop/
+    channel: latest
+
 # Only the small Electron glue is packed into the asar; the heavy payload
 # (Next bundle + embedded Python + sources) ships as extraResources, assembled
 # by scripts/build-resources.mjs into ./resources before electron-builder runs.
@@ -30,7 +41,16 @@ extraResources:
 mac:
   category: public.app-category.utilities
   target:
+    # dmg is the human download; zip is what electron-updater consumes for
+    # macOS auto-update (Squirrel.Mac can't update from a .dmg). Auto-update
+    # on macOS additionally requires a signed + notarized app, so on unsigned
+    # CI builds the feed is still valid but the runtime update is a no-op
+    # until signing secrets are wired in.
     - target: dmg
+      arch:
+        - arm64
+        - x64
+    - target: zip
       arch:
         - arm64
         - x64

@@ -1,7 +1,7 @@
 {
   "name": "backyardhero-desktop",
   "productName": "Backyard Hero",
-  "version": "0.26.0",
+  "version": "0.27.0",
   "description": "Backyard Hero host - desktop bundle (Next.js UI + Python services + serial bridge) for macOS and Windows.",
   "private": true,
   "main": "src/main.js",
@@ -18,5 +18,8 @@
     "@electron/rebuild": "^3.7.0",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }

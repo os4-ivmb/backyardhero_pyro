@@ -1,0 +1,129 @@
+name: Release firmware
+
+# Builds an ESP32 firmware image (receiver or dongle) and publishes it to the
+# static download site whenever a firmware tag is pushed:
+#
+#   h-rcv-<N>   -> build + publish os4_receiver  v<N>
+#   h-dng-<N>   -> build + publish os4_dongle    v<N>
+#
+# These are the same tags ownerutils/deploy_*_firmware create; pushing one is
+# now all you need -- CI builds the four bins, writes per-device latest.json,
+# updates the aggregate download/firmware/manifest.json, and rsyncs ONLY the
+# download/firmware tree up via a deploy key that is locked to that directory
+# (see ownerutils/FIRMWARE_RELEASE.md for the secrets + host setup).
+#
+# workflow_dispatch lets you (re)publish a device manually -- it builds whatever
+# FW_VERSION the sketch currently declares.
+
+on:
+  push:
+    tags:
+      - "h-rcv-*"
+      - "h-dng-*"
+  workflow_dispatch:
+    inputs:
+      device:
+        description: "Which firmware to build + publish"
+        type: choice
+        options: [receiver, dongle]
+        required: true
+
+# Serialize all firmware releases. The manifest merge reads the currently
+# published manifest.json over HTTPS, so two releases running at once could
+# race; queueing them avoids it.
+concurrency:
+  group: release-firmware
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build + publish firmware
+    runs-on: ubuntu-latest
+    # Avoid failing on forks that don't have the deploy secrets configured.
+    if: github.repository == 'os4-ivmb/backyardhero_pyro'
+    env:
+      DOWNLOAD_BASE_URL: ${{ vars.FIRMWARE_DOWNLOAD_BASE_URL || 'https://backyard-hero.com/download/firmware' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve device + version
+        id: meta
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF_NAME:-}"
+          dispatch_device="${{ github.event.inputs.device || '' }}"
+
+          if [[ -n "${dispatch_device}" ]]; then
+            device="${dispatch_device}"
+          elif [[ "${ref}" == h-rcv-* ]]; then
+            device="receiver"
+          elif [[ "${ref}" == h-dng-* ]]; then
+            device="dongle"
+          else
+            echo "::error::cannot determine device from ref '${ref}'"; exit 1
+          fi
+
+          case "${device}" in
+            receiver) sketch="devices/os4_receiver/os4_receiver.ino"; build="devices/utils/build_receiver.sh" ;;
+            dongle)   sketch="devices/os4_dongle/os4_dongle.ino";     build="devices/utils/build_dongle.sh" ;;
+          esac
+
+          version="$(awk '/^#define[[:space:]]+FW_VERSION[[:space:]]+/ { print $3; exit }' "${sketch}")"
+          [[ -n "${version}" ]] || { echo "::error::could not parse FW_VERSION from ${sketch}"; exit 1; }
+
+          # When triggered by a tag, the tag's number must match the sketch so we
+          # never publish os4_<device>_v<N>.bin whose contents aren't really v<N>.
+          if [[ "${ref}" == h-rcv-* || "${ref}" == h-dng-* ]]; then
+            tagver="${ref##*-}"
+            if [[ "${tagver}" != "${version}" ]]; then
+              echo "::error::tag ${ref} says v${tagver} but ${sketch} declares FW_VERSION ${version}"; exit 1
+            fi
+          fi
+
+          {
+            echo "device=${device}"
+            echo "version=${version}"
+            echo "build=${build}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Building ${device} v${version}"
+
+      - name: Install arduino-cli + ESP32 toolchain
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh \
+            | BINDIR="${HOME}/.local/bin" sh
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          export PATH="${HOME}/.local/bin:${PATH}"
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls \
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          # build_receiver.sh doesn't auto-install libs (build_dongle.sh does);
+          # install the shared set here so both builds work.
+          arduino-cli lib install "RF24" "Adafruit NeoPixel" "ArduinoJson"
+
+      - name: Build firmware
+        run: ./${{ steps.meta.outputs.build }}
+
+      - name: Configure scoped deploy SSH key
+        env:
+          DEPLOY_KEY: ${{ secrets.DOWNLOAD_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DOWNLOAD_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "${HOME}/.ssh"
+          printf '%s\n' "${DEPLOY_KEY}" > "${HOME}/.ssh/id_ed25519"
+          chmod 600 "${HOME}/.ssh/id_ed25519"
+          printf '%s\n' "${KNOWN_HOSTS}" > "${HOME}/.ssh/known_hosts"
+          chmod 644 "${HOME}/.ssh/known_hosts"
+
+      - name: Publish to static site
+        env:
+          DEVICE: ${{ steps.meta.outputs.device }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          REMOTE_HOST: ${{ secrets.DOWNLOAD_DEPLOY_HOST }}
+          REMOTE_USER: ${{ secrets.DOWNLOAD_DEPLOY_USER }}
+          REMOTE_PORT: ${{ vars.DOWNLOAD_DEPLOY_PORT || '22' }}
+        run: ./devices/utils/ci_publish_firmware.sh

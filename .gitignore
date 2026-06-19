@@ -6,6 +6,11 @@ __pycache__/
 *.pyo
 *.pyd
 
+# Operator config overrides (dongle port/baud, protocol knobs,
+# default_location). Written by the UI / install script, layered on top of
+# the git-tracked host/config/systemcfg.json at read time. Never committed.
+host/config/systemcfg.user.json
+
 host/data/log/*
 host/data/backyardhero.db
 host/data/ledstate

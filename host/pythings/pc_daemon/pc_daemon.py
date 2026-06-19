@@ -12,6 +12,7 @@ from led_control import *
 import socket
 import select
 
+from config_loader import load_system_config
 from protocol_handler.BYHProtocolHandler import BYHProtocolHandler
 
 # Configuration
@@ -31,6 +32,16 @@ COMMAND_POLL_INTERVAL_S = 0.05
 CURSOR_FILE = os.path.join(_RUN_DIR, "fw_cursor")
 SERIAL_PORT = os.environ.get("SERIAL_PORT", "/dev/ttyACM0")
 BAUD_RATE = int(os.environ.get("SERIAL_BAUD", "115200"))
+# Where the tcp_serial_bridge is reachable. Inside Docker the daemon dials
+# the host loopback via host.docker.internal (Docker Desktop on mac/Win
+# resolves this natively; on Linux/Pi it's wired up via extra_hosts). On a
+# native desktop install (no Docker) the Electron supervisor sets
+# BYH_BRIDGE_HOST=127.0.0.1 so the daemon talks to the locally-supervised
+# bridge directly -- otherwise host.docker.internal either fails to resolve
+# or points at an interface the loopback-bound bridge never listens on,
+# producing endless "connection refused" (WinError 10061) on Windows.
+BRIDGE_HOST = os.environ.get("BYH_BRIDGE_HOST", "host.docker.internal")
+BRIDGE_PORT = int(os.environ.get("BYH_BRIDGE_PORT", "9000"))
 DB_PATH = os.path.join(_DATA_DIR, "backyardhero.db")
 STATE_FILE_PATH = os.path.join(_DATA_DIR, "state")
 # M1: minimum wall-clock interval between /data/state FILE writes. The
@@ -56,6 +67,8 @@ SHOW_STATE_MARKER_PATH = os.path.join(_DATA_DIR, "byh_show_state")
 # delivery if no listener is bound.
 STATE_SOCKET_PATH = os.path.join(_RUN_DIR, "byh_state.sock")
 LAST_SCAN_FILE_PATH = os.path.join(_DATA_DIR, "last_scan.json")
+# Base config path (kept for reference). The daemon reads config via
+# load_system_config(), which overlays systemcfg.user.json on top of this.
 CONFIG_PATH = os.path.join(_CONFIG_DIR, "systemcfg.json")
 ERR_LOG_PATH = os.path.join(_DATA_DIR, "log", "daemon.err")
 LED_DATA_PATH = os.path.join(_DATA_DIR, "leddata")  # Path for persisting LED states
@@ -462,20 +475,14 @@ class FireworkDaemon:
         return self.led_handler.debug_enabled()
 
     def load_config(self):
-        try:
-            with open(CONFIG_PATH, 'r') as file:
-                data = json.load(file)
-
-                cfg_file = data.get('system')
-                if(cfg_file):
-                    self.serial_addr = data['system'].get("dongle_port", SERIAL_PORT)
-                    self.serial_baud = data['system'].get("dongle_baud", BAUD_RATE)
-                else:
-                    print("No system config.")
-                    
-
-        except (FileNotFoundError, json.JSONDecodeError):
-            print("Could not initialize from config. Oh well.")
+        # Merged base systemcfg.json + operator systemcfg.user.json overrides.
+        data = load_system_config()
+        cfg_file = data.get('system')
+        if(cfg_file):
+            self.serial_addr = cfg_file.get("dongle_port", SERIAL_PORT)
+            self.serial_baud = cfg_file.get("dongle_baud", BAUD_RATE)
+        else:
+            print("No system config.")
 
     def _init_blank_webact_file(self):
         with open(LED_FILE_PATH_WEB, 'w') as file:
@@ -534,7 +541,7 @@ class FireworkDaemon:
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            sock.connect(('host.docker.internal', 9000))  # Use the service name in Docker Compose
+            sock.connect((BRIDGE_HOST, BRIDGE_PORT))  # Docker: host.docker.internal; native desktop: 127.0.0.1
 
             # Configure the serial port on the bridge
             config_cmd = {
@@ -1179,7 +1186,10 @@ class FireworkDaemon:
                 )):
                     print("dongle_flash_continue: protocol handler not ready.")
                 else:
-                    ok, msg = self.protocol_handler.continue_dongle_flash()
+                    # Optional operator-chosen port (from the UI picker when
+                    # auto-detection was ambiguous).
+                    port = command.get('port')
+                    ok, msg = self.protocol_handler.continue_dongle_flash(port=port)
                     if not ok:
                         self.write_error(f"dongle_flash_continue: {msg}")
             elif command['type'] == 'dongle_flash_abort':

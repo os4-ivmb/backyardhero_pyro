@@ -57,8 +57,10 @@ export const config = {
  *   Aborts the in-flight dongle update.
  *
  * PATCH /api/system/dongle_flash
+ *   Body (optional): { port: "COM4" }
  *   Confirms manual bootloader entry (operator hit BOOT+RESET on the
- *   dongle). Forwards to the bridge's /flash_dongle/continue.
+ *   dongle) or selects the port to retry on when auto-detection was
+ *   ambiguous. Forwards to the bridge's /flash_dongle/continue.
  */
 export default function handler(req, res) {
   if (!ensureHardware(res)) return;
@@ -69,7 +71,15 @@ export default function handler(req, res) {
     return queueDaemonCmd(res, { type: 'dongle_flash_abort' }, 'abort');
   }
   if (req.method === 'PATCH') {
-    return queueDaemonCmd(res, { type: 'dongle_flash_continue' }, 'continue');
+    // Optional operator-chosen serial port, used when auto-detection was
+    // ambiguous and the UI surfaced a port picker. Sanitize lightly --
+    // the bridge treats it as an opaque device path (COM4, /dev/tty...).
+    const rawPort = req.body?.port;
+    const cmd = { type: 'dongle_flash_continue' };
+    if (typeof rawPort === 'string' && rawPort.trim()) {
+      cmd.port = rawPort.trim().slice(0, 256);
+    }
+    return queueDaemonCmd(res, cmd, 'continue');
   }
   res.setHeader('Allow', ['POST', 'DELETE', 'PATCH']);
   return res.status(405).end(`Method ${req.method} Not Allowed`);

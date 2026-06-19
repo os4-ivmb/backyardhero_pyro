@@ -50,6 +50,16 @@ OFFSET_APP        = "0x10000"
 # CLI to pick the right port out of a noisy `list_ports` result.
 ESPRESSIF_VID = 0x303a
 
+# USB product id the ESP32-S2 ROM exposes while sitting in download
+# (serial bootloader) mode. The app firmware enumerates with a
+# different PID, so when the chip drops into the bootloader it
+# re-enumerates as a *new* OS-level serial device (COM3 -> COM4 on
+# Windows, a fresh /dev/tty.usbmodem* on macOS). We use this only as a
+# secondary disambiguation hint -- the primary signal is "a port that
+# appeared after we asked the chip to reset" -- so a future ROM revving
+# the PID doesn't silently break detection.
+ROM_BOOTLOADER_PID = 0x0002
+
 # What we tell esptool we're flashing. The dongle is a lolin_s2_mini
 # which is plain esp32s2.
 ESPTOOL_CHIP = "esp32s2"
@@ -174,3 +184,96 @@ def build_esptool_cmd(
     for offset, path in flash_pairs:
         cmd.extend([offset, str(path)])
     return cmd
+
+
+# ---------------------------------------------------------------------------
+# Serial port discovery
+# ---------------------------------------------------------------------------
+#
+# The dongle is an ESP32-S2 with native USB-CDC. The OS-level serial
+# device it presents depends on which firmware is running:
+#
+#   * app firmware  -> one COM/tty (e.g. COM3, /dev/tty.usbmodem01)
+#   * ROM bootloader -> a *different* COM/tty (e.g. COM4), because the
+#     ROM exposes a different USB descriptor and the host re-enumerates.
+#
+# That re-enumeration is exactly why a UI-driven flash that pins one
+# fixed port fails with "couldn't connect" the moment esptool resets the
+# chip into the bootloader: the port it was holding just disappeared and
+# the chip is now waiting on a brand-new port. These helpers let callers
+# (the bridge flasher, the CLI) follow the dongle across that hop instead
+# of giving up.
+
+
+def list_dongle_ports() -> list[dict]:
+    """Enumerate serial ports as a list of plain dicts.
+
+    Shape: ``[{"device": str, "vid": int|None, "pid": int|None,
+    "desc": str}]``. Returns ``[]`` if pyserial isn't importable (kept a
+    soft failure so importing this module stays side-effect free and a
+    missing dep degrades to "no auto-detect" rather than a crash).
+    """
+    try:
+        from serial.tools import list_ports  # type: ignore
+    except Exception:
+        return []
+    out: list[dict] = []
+    for p in list_ports.comports():
+        out.append({
+            "device": p.device,
+            "vid": p.vid,
+            "pid": p.pid,
+            "desc": p.description or "",
+        })
+    return out
+
+
+def _is_espressif(port: dict) -> bool:
+    return port.get("vid") == ESPRESSIF_VID
+
+
+def resolve_dongle_port(
+    prefer: "str | None" = None,
+    before: "set[str] | None" = None,
+) -> "str | None":
+    """Pick the serial device the dongle is most likely on right now.
+
+    Disambiguation order (first match wins):
+      1. An Espressif port that appeared *after* `before` was captured --
+         the strongest signal that "the chip just reset into a new port".
+      2. An Espressif port advertising the ROM download-mode PID.
+      3. `prefer` (the configured/last-known port) if it's still present.
+      4. The sole Espressif port, if exactly one is plugged in.
+
+    Returns the chosen device path, or ``None`` when the result is
+    ambiguous (multiple Espressif devices and no better signal) so the
+    caller can fall back to asking the operator.
+    """
+    ports = list_dongle_ports()
+    espressif = [p for p in ports if _is_espressif(p)]
+
+    # 1. Newly-appeared Espressif port (the chip hopped to the bootloader).
+    if before is not None:
+        appeared = [p for p in espressif if p["device"] not in before]
+        if len(appeared) == 1:
+            return appeared[0]["device"]
+        if len(appeared) > 1:
+            # Several appeared at once -- prefer one in download mode.
+            boot = [p for p in appeared if p.get("pid") == ROM_BOOTLOADER_PID]
+            if len(boot) == 1:
+                return boot[0]["device"]
+
+    # 2. A port explicitly in ROM download mode.
+    boot = [p for p in espressif if p.get("pid") == ROM_BOOTLOADER_PID]
+    if len(boot) == 1:
+        return boot[0]["device"]
+
+    # 3. The caller's preferred port if it's still on the bus.
+    if prefer and any(p["device"] == prefer for p in ports):
+        return prefer
+
+    # 4. The only Espressif device present.
+    if len(espressif) == 1:
+        return espressif[0]["device"]
+
+    return None

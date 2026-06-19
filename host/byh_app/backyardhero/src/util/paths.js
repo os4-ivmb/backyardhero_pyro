@@ -33,9 +33,19 @@ export const DB_PATH = path.join(DATA_DIR, 'backyardhero.db');
 export const STATE_FILE_PATH = path.join(DATA_DIR, 'state');
 export const LAST_SCAN_FILE_PATH = path.join(DATA_DIR, 'last_scan.json');
 export const LOG_DIR = path.join(DATA_DIR, 'log');
+// Desktop auto-updater status, written by the Electron main process
+// (src/updater.js) so the Settings version footer can read it.
+export const HOST_UPDATE_STATUS_PATH = path.join(DATA_DIR, 'host_update.json');
 
 // --- User config (CONFIG_DIR) ----------------------------------------------
+// systemcfg.json is the git-tracked base config (protocols/types/caps plus
+// default system block). systemcfg.user.json holds the operator's overrides
+// (dongle port/baud, protocol safety knobs, default_location). It is NOT
+// git-tracked and is written only by the UI / install script. Every reader
+// loads the base and overlays the user file on top -- see util/systemcfg.js
+// (JS) and pythings/pc_daemon/config_loader.py (Python).
 export const SYSTEM_CFG_PATH = path.join(CONFIG_DIR, 'systemcfg.json');
+export const SYSTEM_USER_CFG_PATH = path.join(CONFIG_DIR, 'systemcfg.user.json');
 
 // --- Ephemeral IPC (RUN_DIR) -----------------------------------------------
 // The daemon polls COMMAND_DIR for one-shot command files dropped by the API;
@@ -47,3 +57,6 @@ export const STAGING_DIR = path.join(RUN_DIR, 'ota_staging');
 export const CURSOR_FILE = path.join(RUN_DIR, 'fw_cursor');
 export const FIRING_FILE = path.join(RUN_DIR, 'fw_firing');
 export const STATE_SOCKET_PATH = path.join(RUN_DIR, 'byh_state.sock');
+// One-shot command file the Settings footer drops for the Electron updater
+// (src/updater.js polls + consumes it): { action: "check" | "install" }.
+export const HOST_UPDATE_CMD_PATH = path.join(RUN_DIR, 'host_update_cmd.json');

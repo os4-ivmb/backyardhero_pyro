@@ -113,6 +113,67 @@ jobs:
           path: |
             host/desktop/dist/*.dmg
             host/desktop/dist/*.exe
+            host/desktop/dist/*.zip
             host/desktop/dist/*.blockmap
             host/desktop/dist/latest*.yml
           if-no-files-found: warn
+
+  # Publish the built installers to the static download site, scoped exactly
+  # like the firmware release: the deploy key is locked (authorized_keys forced
+  # rrsync command) to the download/ folder, so this can only write into
+  # download/desktop/. It also writes download/desktop/manifest.json (version +
+  # per-platform links) for the website / in-app update check. Runs once, after
+  # all matrix legs, so the manifest is written from the full installer set.
+  # See ownerutils/FIRMWARE_RELEASE.md for the shared secrets + host setup.
+  publish:
+    name: Publish to download site
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.repository == 'os4-ivmb/backyardhero_pyro'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download built installers
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-artifacts
+          pattern: backyardhero-*
+          merge-multiple: true
+
+      - name: Resolve + validate version
+        id: meta
+        run: |
+          set -euo pipefail
+          version="$(python3 -c "import json;print(json.load(open('host/desktop/package.json'))['version'])")"
+          [[ -n "${version}" ]] || { echo "::error::could not read version from package.json"; exit 1; }
+          ref="${GITHUB_REF_NAME:-}"
+          if [[ "${ref}" == desktop-v* ]]; then
+            tagver="${ref#desktop-v}"
+            if [[ "${tagver}" != "${version}" ]]; then
+              echo "::error::tag ${ref} says v${tagver} but package.json is ${version}"; exit 1
+            fi
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "Publishing desktop v${version}"
+
+      - name: Configure scoped deploy SSH key
+        env:
+          DEPLOY_KEY: ${{ secrets.DOWNLOAD_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DOWNLOAD_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "${HOME}/.ssh"
+          printf '%s\n' "${DEPLOY_KEY}" > "${HOME}/.ssh/id_ed25519"
+          chmod 600 "${HOME}/.ssh/id_ed25519"
+          printf '%s\n' "${KNOWN_HOSTS}" > "${HOME}/.ssh/known_hosts"
+          chmod 644 "${HOME}/.ssh/known_hosts"
+
+      - name: Publish installers + manifest
+        env:
+          SRC_DIR: dist-artifacts
+          VERSION: ${{ steps.meta.outputs.version }}
+          DESKTOP_BASE_URL: ${{ vars.DESKTOP_DOWNLOAD_BASE_URL || 'https://backyard-hero.com/download/desktop' }}
+          REMOTE_HOST: ${{ secrets.DOWNLOAD_DEPLOY_HOST }}
+          REMOTE_USER: ${{ secrets.DOWNLOAD_DEPLOY_USER }}
+          REMOTE_PORT: ${{ vars.DOWNLOAD_DEPLOY_PORT || '22' }}
+        run: ./.github/scripts/publish_desktop.sh

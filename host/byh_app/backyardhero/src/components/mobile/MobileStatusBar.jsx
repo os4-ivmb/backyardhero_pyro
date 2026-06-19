@@ -13,6 +13,7 @@ import Toast from "../common/Toast";
 import GpioOverrideBar from "../shell/GpioOverrideBar";
 import { isPollableReceiver } from "@/util/receivers";
 import { HARDWARE } from "@/util/clientEnv";
+import { fwOutOfDate } from "@/util/firmwareVersion";
 
 // ---------------------------------------------------------------------------
 // MobileStatusBar -- mobile twin of `shell/StatusBar.jsx`.
@@ -61,7 +62,7 @@ export default function MobileStatusBar() {
     fwCursor,
     activeProtocol,
   } = useAppMode();
-  const { systemConfig } = useAppStore();
+  const { systemConfig, latestFirmware } = useAppStore();
 
   const [isConnected, setIsConnected] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -192,6 +193,13 @@ export default function MobileStatusBar() {
     else if (!activeProtocol) { dongleTone = "warn"; dongleLabel = "Unbound"; }
     else { dongleTone = "ok"; dongleLabel = activeProtocol; }
   }
+
+  // Dongle firmware freshness (see StatusBar.jsx for the full rationale).
+  const dongleFwVersion = stateData.fw_state?.dongle_fw_version ?? null;
+  const latestDongleVersion = latestFirmware?.dongle?.available
+    ? latestFirmware.dongle.version
+    : null;
+  const dongleFwStale = fwOutOfDate(dongleFwVersion, latestDongleVersion);
 
   const rfSettings = stateData.fw_state?.settings?.rf || {};
   const restartDongle = useCallback(async () => {
@@ -333,6 +341,15 @@ export default function MobileStatusBar() {
                 <span className="w-1.5 h-1.5 rounded-full bg-live animate-livePulse" />
                 TX
               </span>
+            ) : null}
+            {dongleTone === "ok" && dongleFwStale ? (
+              <Badge
+                tone="warn"
+                size="xs"
+                title={`Dongle firmware v${latestDongleVersion} available (running v${dongleFwVersion}).`}
+              >
+                Update v{latestDongleVersion}
+              </Badge>
             ) : null}
           </span>
 

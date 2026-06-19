@@ -21,6 +21,7 @@ const { app, BrowserWindow, Tray, Menu, shell, nativeImage } = require('electron
 const { isWin, resources, userDirs } = require('./paths');
 const { Supervisor } = require('./supervisor');
 const { detectDonglePort } = require('./serial');
+const { initAutoUpdates } = require('./updater');
 
 const UI_PORT = 1776;
 const UI_URL = `http://127.0.0.1:${UI_PORT}/`;
@@ -72,6 +73,19 @@ function buildEnv(dirs, serialPort) {
     BYH_RUN_DIR: dirs.runDir,
     SERIAL_PORT: serialPort || process.env.SERIAL_PORT || '',
     SERIAL_BAUD: '115200',
+    // Native (non-Docker) build: the bridge + flash server are supervised
+    // here on the same machine and bind 127.0.0.1. Point the daemon's
+    // serial-bridge socket (:9000) and dongle-flash HTTP client (:9001) at
+    // loopback. The Python defaults are the Docker-only host.docker.internal,
+    // which on Windows resolves to a non-loopback interface the bridge never
+    // listens on -> "connection refused" (WinError 10061).
+    BYH_BRIDGE_HOST: '127.0.0.1',
+    BYH_FLASH_HOST: '127.0.0.1',
+    // Let the Next server surface the running host version + "this is the
+    // desktop app" flag (drives the Settings version/update footer). The
+    // actual self-update is handled by electron-updater in this process.
+    BYH_HOST_VERSION: app.getVersion(),
+    BYH_DESKTOP: '1',
   };
 }
 
@@ -227,6 +241,16 @@ async function main() {
   createTray(dirs);
 
   supervisor.startAll();
+
+  // Background auto-updates. Reads/writes status + command files under the
+  // same per-user dirs the services use, so the Settings footer can show
+  // update state and trigger an install. Best-effort; only active in a
+  // packaged build.
+  try {
+    initAutoUpdates(dirs);
+  } catch (err) {
+    console.error('Auto-update init failed:', err.message);
+  }
 
   try {
     await waitForUI();

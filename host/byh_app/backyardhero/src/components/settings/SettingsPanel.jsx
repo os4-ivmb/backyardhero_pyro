@@ -28,6 +28,7 @@ import AccessPointSettings from "./AccessPointSettings";
 import UpdateSettings from "./UpdateSettings";
 import DataSettings from "./DataSettings";
 import CloudSyncPanel from "./CloudSyncPanel";
+import VersionFooter from "./VersionFooter";
 
 // Settings page. Top-level tabs:
 //   Dongle    — physical box knobs: LEDs, retransmit count, serial
@@ -146,6 +147,10 @@ export default function SettingsPanel() {
         {tab === "cloud" ? <CloudTab /> : null}
         {tab === "debug" ? <DebugTab /> : null}
         {tab === "show" ? <ShowTab /> : null}
+
+        {/* Always-visible footer: running Host + Dongle versions and update
+            availability, independent of the selected tab. */}
+        <VersionFooter />
       </Section>
     </div>
   );

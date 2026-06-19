@@ -52,13 +52,30 @@ BUILD_DIR="${SKETCH_DIR}/.build"
 
 FQBN="esp32:esp32:lolin_s2_mini:CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,PartitionScheme=default,DebugLevel=none,EraseFlash=none"
 
-# arduino-esp32 ships boot_app0.bin in its tools/partitions/ folder. We
-# copy it next to the rest of the per-version bins so flash_receiver.py
-# doesn't have to dig through ~/Library/Arduino15 at flash time.
-ARDUINO_ESP32_PARTITIONS_GLOB="${HOME}/Library/Arduino15/packages/esp32/hardware/esp32/*/tools/partitions"
-
 err()  { echo "[build_receiver] ERROR: $*" >&2; exit 1; }
 info() { echo "[build_receiver] $*"; }
+
+resolve_arduino_data_dir() {
+  # Where arduino-cli stores cores/tools. We need it to find boot_app0.bin
+  # under packages/esp32/hardware/esp32/<ver>/tools/partitions/. Ask
+  # arduino-cli first (works on macOS, Linux, and CI runners regardless of
+  # the default location), then fall back to the per-OS default.
+  local from_cli
+  from_cli="$(arduino-cli config dump --format json 2>/dev/null \
+    | python3 -c "import json, sys
+try:
+    print(json.load(sys.stdin).get('directories', {}).get('data', ''))
+except Exception:
+    pass" 2>/dev/null || true)"
+  if [[ -n "${from_cli}" && -d "${from_cli}" ]]; then
+    echo "${from_cli}"
+    return
+  fi
+  case "$(uname -s)" in
+    Darwin) echo "${HOME}/Library/Arduino15" ;;
+    *)      echo "${HOME}/.arduino15" ;;
+  esac
+}
 
 [[ -f "${SKETCH_INO}" ]] || err "sketch not found: ${SKETCH_INO}"
 
@@ -94,6 +111,13 @@ If you build via the Arduino IDE today, run:
 EOF
   exit 1
 fi
+
+# arduino-esp32 ships boot_app0.bin in its tools/partitions/ folder. We copy
+# it next to the rest of the per-version bins so flash_receiver.py doesn't have
+# to dig through the arduino data dir at flash time. The data dir differs by
+# platform (macOS ~/Library/Arduino15, Linux/CI ~/.arduino15), so resolve it
+# via arduino-cli instead of hardcoding.
+ARDUINO_ESP32_PARTITIONS_GLOB="$(resolve_arduino_data_dir)/packages/esp32/hardware/esp32/*/tools/partitions"
 
 # Find the freshest boot_app0.bin from the installed arduino-esp32 core.
 # shellcheck disable=SC2086

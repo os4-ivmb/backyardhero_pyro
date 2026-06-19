@@ -553,10 +553,15 @@ detect_dongle_port() {
 }
 
 update_systemcfg() {
-  section "Updating systemcfg.json with dongle port"
-  local cfg="${REPO_DIR}/host/config/systemcfg.json"
-  if [[ ! -f "${cfg}" ]]; then
-    warn "systemcfg.json not found at ${cfg}; skipping"
+  section "Updating systemcfg.user.json with dongle port"
+  local cfg_dir="${REPO_DIR}/host/config"
+  # Operator overrides live in systemcfg.user.json (NOT git-tracked), layered
+  # on top of the git-tracked systemcfg.json at read time. Writing the dongle
+  # port here keeps the base file pristine so `git pull` in update.sh never
+  # conflicts on a locally-mutated config.
+  local user_cfg="${cfg_dir}/systemcfg.user.json"
+  if [[ ! -d "${cfg_dir}" ]]; then
+    warn "config dir not found at ${cfg_dir}; skipping"
     return
   fi
 
@@ -569,21 +574,29 @@ update_systemcfg() {
   if [[ -n "${detected}" ]]; then
     log "detected dongle at ${detected} (will use ${target_port} for stability)"
   else
-    warn "no dongle currently plugged in -- systemcfg.json will still"
+    warn "no dongle currently plugged in -- systemcfg.user.json will still"
     warn "point at ${target_port}; udev creates it on first hot-plug."
   fi
 
-  python3 - "$cfg" "$target_port" <<'PY'
-import json, sys
+  python3 - "$user_cfg" "$target_port" <<'PY'
+import json, os, sys
 path, port = sys.argv[1], sys.argv[2]
-with open(path) as f:
-    cfg = json.load(f)
+# Merge into any existing user overrides rather than clobbering them.
+cfg = {}
+if os.path.exists(path):
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except (ValueError, OSError):
+        cfg = {}
+if not isinstance(cfg, dict):
+    cfg = {}
 cfg.setdefault("system", {})
 cfg["system"]["dongle_port"] = port
 with open(path, "w") as f:
     json.dump(cfg, f, indent=2)
     f.write("\n")
-print(f"[byh-install] systemcfg.json: system.dongle_port = {port}")
+print(f"[byh-install] systemcfg.user.json: system.dongle_port = {port}")
 PY
 }
 

@@ -9,6 +9,7 @@ from datetime import datetime
 import json
 from enum import Enum
 from led_control import *
+from config_loader import load_system_config
 
 from .OtaFlashDriver import OtaFlashDriver
 from .DongleFlashDriver import DongleFlashDriver
@@ -224,16 +225,12 @@ class BYHProtocolHandler:
         # Protocols / types / system block still come from systemcfg.json.
         self.receivers = self._load_receivers_from_db()
         try:
-            with open(cfg_filepath, 'r') as file:
-                data = json.load(file)
+            # Merged base systemcfg.json + operator systemcfg.user.json.
+            data = load_system_config()
             self.types = data.get('types', {})
             self.config = data.get('protocols', {}).get(self.protocol, {}).get('config', {}) or {}
-        except FileNotFoundError:
-            print(f"Error: The file '{cfg_filepath}' does not exist.")
-            self.types = {}
-            self.config = {}
-        except json.JSONDecodeError as e:
-            print(f"Error decoding JSON: {e}")
+        except Exception as e:
+            print(f"Error loading BYH config: {e}")
             self.parent.write_error(f"Error parsing BYH config file at {cfg_filepath}")
             self.types = {}
             self.config = {}
@@ -395,8 +392,8 @@ class BYHProtocolHandler:
             self.parent.mark_state_dirty()
         return ok, msg
 
-    def continue_dongle_flash(self):
-        ok, msg = self.dongle_flash_driver.continue_job()
+    def continue_dongle_flash(self, port=None):
+        ok, msg = self.dongle_flash_driver.continue_job(port=port)
         if ok:
             self.parent.mark_state_dirty()
         return ok, msg
@@ -1591,12 +1588,12 @@ class BYHProtocolHandler:
         """
         errors = []
 
-        # Reload config to get latest settings from file (in case UI updated them)
+        # Reload config to get latest settings (in case UI updated them).
+        # Reads the merged base + systemcfg.user.json overrides.
         try:
-            with open(cfg_filepath, 'r') as file:
-                data = json.load(file)
-            self.config = data.get('protocols',{}).get(self.protocol).get('config', {})
-        except (FileNotFoundError, json.JSONDecodeError, AttributeError) as e:
+            data = load_system_config()
+            self.config = data.get('protocols', {}).get(self.protocol).get('config', {})
+        except Exception as e:
             print(f"Warning: Could not reload config in run_precheck: {e}")
             # Continue with existing self.config if reload fails
 

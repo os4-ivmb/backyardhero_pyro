@@ -1,17 +1,94 @@
 import os
 import serial
 import socket
+import sys
 import threading
 import time
 import json
+from pathlib import Path
 
-# Default configuration. The port can be seeded from the environment so the
-# desktop supervisor can pass an auto-detected COM/tty path; the daemon still
-# reconfigures it at runtime via a config_serial command.
-SERIAL_CONFIG = {
-    'port': os.environ.get('SERIAL_PORT', '/dev/tty.usbmodem01'),
-    'baud': int(os.environ.get('SERIAL_BAUD', '115200'))
-}
+# The shared esptool/port helpers live in devices/utils (next to
+# flash_dongle.py). Add it to sys.path so we can reuse resolve_dongle_port
+# for VID-based auto-reconnect. Import stays lazy (inside the helper) so a
+# missing dep degrades to "no auto-redetect" rather than failing startup.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_DEVICES_UTILS = _REPO_ROOT / "devices" / "utils"
+if str(_DEVICES_UTILS) not in sys.path:
+    sys.path.insert(0, str(_DEVICES_UTILS))
+
+# Default configuration.
+#
+# Startup precedence for the port: the operator's configured dongle port
+# (systemcfg.json overlaid with systemcfg.user.json) wins, then an env-supplied
+# value (desktop auto-detect / docker-compose), then the hardcoded fallback.
+#
+# Why read the config here at all: the daemon connects shortly after startup
+# and issues a config_serial with exactly this configured port. If the bridge
+# instead opened its own default first, it would make a doomed connection
+# attempt against the wrong device (the classic "tries /dev/tty.usbmodem01
+# before choosing the right one" symptom) until the daemon's reconfigure
+# landed. Seeding from the same config the daemon reads makes the bridge's
+# very first open target the right port.
+#
+# Config-dir resolution mirrors the rest of the stack (BYH_CONFIG_DIR, default
+# /config under Docker/desktop) but also falls back to the repo-relative
+# host/config -- the macOS host-native bridge (run/osx/start.sh) launches with
+# cwd=host/ and no BYH_CONFIG_DIR, so /config doesn't exist there.
+def _resolve_config_dir():
+    env_dir = os.environ.get('BYH_CONFIG_DIR')
+    candidates = []
+    if env_dir:
+        candidates.append(env_dir)
+    candidates.append('/config')
+    candidates.append(str(_REPO_ROOT / 'host' / 'config'))
+    for d in candidates:
+        if os.path.exists(os.path.join(d, 'systemcfg.json')):
+            return d
+    return candidates[0]
+
+
+_CONFIG_DIR = _resolve_config_dir()
+
+
+def _deep_merge(base, override):
+    if not isinstance(base, dict) or not isinstance(override, dict):
+        return override
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(out.get(k), dict) and isinstance(v, dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def _load_system_block():
+    """Best-effort read of the merged `system` block. Returns {} on any
+    failure so a missing/garbled config never keeps the bridge from starting."""
+    def read(name):
+        try:
+            with open(os.path.join(_CONFIG_DIR, name)) as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+    merged = _deep_merge(read('systemcfg.json'), read('systemcfg.user.json'))
+    system = merged.get('system')
+    return system if isinstance(system, dict) else {}
+
+
+def _initial_serial_config():
+    system = _load_system_block()
+    port = system.get('dongle_port') or os.environ.get('SERIAL_PORT') or '/dev/tty.usbmodem01'
+    baud = system.get('dongle_baud') or os.environ.get('SERIAL_BAUD') or 115200
+    try:
+        baud = int(baud)
+    except (TypeError, ValueError):
+        baud = 115200
+    return {'port': port, 'baud': baud}
+
+
+SERIAL_CONFIG = _initial_serial_config()
 # Bind address for the serial-injection TCP port. This port lets any
 # client write raw serial straight to the dongle ("fire <ident> <cue>"),
 # so it must NOT be exposed on the LAN / Wi-Fi AP interface (C4.1).
@@ -47,6 +124,24 @@ RECONNECT_BACKOFF_S      = 1.0   # initial delay between reconnect attempts
 RECONNECT_BACKOFF_MAX_S  = 5.0   # cap so we keep retrying briskly
 _last_reconnect_attempt  = 0.0   # monotonic timestamp of last attempt
 _consecutive_failures    = 0
+# After this many consecutive failures to open the configured port, try
+# re-resolving the dongle by USB vendor id -- it may have re-enumerated
+# onto a different COM/tty (ESP32-S2 native USB-CDC does this on reboot
+# or replug, and always on Windows where COM numbers aren't stable).
+PORT_REDETECT_AFTER_FAILURES = 3
+
+
+def _resolve_dongle_port_safe(prefer=None, before=None):
+    """Best-effort VID-based dongle port resolution. Returns None on any
+    failure (missing pyserial, import error) so callers stay robust."""
+    try:
+        from dongle_flasher import resolve_dongle_port
+    except Exception:
+        return None
+    try:
+        return resolve_dongle_port(prefer=prefer, before=before)
+    except Exception:
+        return None
 
 def _try_auto_reopen():
     """Attempt to re-open the serial port using the last-known config.
@@ -80,6 +175,16 @@ def _try_auto_reopen():
             except Exception:
                 pass
             serial_conn = None
+        # If the configured port keeps failing, the dongle has probably
+        # re-enumerated onto a different COM/tty. Re-resolve by USB vendor
+        # id and follow it. Threshold-guarded so a momentary blip doesn't
+        # make us thrash ports.
+        if _consecutive_failures >= PORT_REDETECT_AFTER_FAILURES:
+            new_port = _resolve_dongle_port_safe(prefer=SERIAL_CONFIG['port'])
+            if new_port and new_port != SERIAL_CONFIG['port']:
+                print(f"Serial: configured port {SERIAL_CONFIG['port']} "
+                      f"unavailable; following dongle to {new_port}")
+                SERIAL_CONFIG['port'] = new_port
         try:
             serial_conn = serial.Serial(
                 SERIAL_CONFIG['port'],
@@ -425,6 +530,20 @@ def flash_current_port() -> str:
     return SERIAL_CONFIG.get('port') or ''
 
 
+def flash_set_port(port: str) -> None:
+    """Update the bridge's target serial port.
+
+    The flasher calls this when it follows the dongle to a re-enumerated
+    port so the post-flash auto-reconnect targets the right device. We
+    only update the config; the forwarder threads' _try_auto_reopen loop
+    picks it up on its next iteration.
+    """
+    global SERIAL_CONFIG
+    if port and port != SERIAL_CONFIG.get('port'):
+        print(f"[bridge] flasher set serial port to {port}")
+        SERIAL_CONFIG['port'] = port
+
+
 if __name__ == '__main__':
     # Establish initial serial connection
     reconnect_serial(False)
@@ -439,6 +558,7 @@ if __name__ == '__main__':
             pause_serial=flash_pause_serial,
             resume_serial=flash_resume_serial,
             current_port=flash_current_port,
+            set_port=flash_set_port,
         )
         start_flash_server(bridge_io)
     except Exception as e:

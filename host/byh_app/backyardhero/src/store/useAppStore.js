@@ -473,6 +473,46 @@ const useAppStore = create(persist((set, get) => ({
       throw error;
     }
   },
+
+  // ---------------------------------------------------------------------------
+  // Latest published firmware (from the static site via
+  // /api/system/firmware_latest, which fetches + caches server-side). Used to
+  // surface "out of date" warnings and the "Flash latest" buttons. Stays null
+  // until the first successful fetch; offline / cloud profile just leaves it
+  // null so no warnings ever appear and nothing errors.
+  //   { receiver: { available, version, link, stale } | null, dongle: {...} }
+  // ---------------------------------------------------------------------------
+  latestFirmware: { receiver: null, dongle: null },
+  latestFirmwareLoading: false,
+
+  /**
+   * Fetch the latest firmware metadata. Pass force=true (the "Check for
+   * updates" button) to bypass the server-side TTL cache. Never throws --
+   * failures (offline, 501 in cloud profile) leave the previous value intact.
+   */
+  fetchLatestFirmware: async (force = false) => {
+    try {
+      set({ latestFirmwareLoading: true });
+      const { data } = await axios.get('/api/system/firmware_latest', {
+        params: force ? { refresh: 1 } : undefined,
+      });
+      set({
+        latestFirmware: {
+          receiver: data?.receiver ?? null,
+          dongle: data?.dongle ?? null,
+        },
+      });
+      return data;
+    } catch (error) {
+      console.warn(
+        'fetchLatestFirmware failed (offline?):',
+        error?.response?.status || error?.message,
+      );
+      return null;
+    } finally {
+      set({ latestFirmwareLoading: false });
+    }
+  },
 }), {
   name: 'byh-app-store',
   storage: createJSONStorage(() => (typeof window !== 'undefined' ? window.localStorage : undefined)),

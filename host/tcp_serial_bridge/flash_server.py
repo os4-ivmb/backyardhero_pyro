@@ -94,8 +94,11 @@ from dongle_flasher import (  # noqa: E402
     OFFSET_APP,
     APP_ONLY_OFFSETS,
     FULL_FLASH_OFFSETS,
+    ESPRESSIF_VID,
     find_esptool,
     build_esptool_cmd,
+    list_dongle_ports,
+    resolve_dongle_port,
 )
 
 
@@ -128,6 +131,14 @@ LOG_TAIL_LINES = 4000
 # BOOT+RESET, click the button" but short enough that a forgotten job
 # doesn't keep the serial port hostage forever.
 NEEDS_MANUAL_RESET_TIMEOUT_S = 300.0
+
+# After a failed auto-reset, the ESP32-S2 ROM bootloader takes a moment
+# to re-enumerate on the USB bus as a new serial device. Poll for it for
+# up to this long before concluding the chip didn't hop ports. ~3s is
+# comfortably longer than the observed re-enumeration latency (typically
+# <1s on Windows) without making a genuinely-stuck flash feel sluggish.
+PORT_REDETECT_TIMEOUT_S = 3.0
+PORT_REDETECT_POLL_S = 0.25
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +229,25 @@ class FlashJob:
 
         self.phase = "preparing"
         self.error: Optional[str] = None
+        # The serial device esptool is currently targeting. Starts as the
+        # bridge's configured port; updated if we follow the dongle to a
+        # re-enumerated bootloader port.
+        self.port: Optional[str] = None
+        # Set when auto-detection found the dongle on a *different* port
+        # than where it started (the COM3 -> COM4 hop). Surfaced in the UI
+        # as "followed dongle from X to Y".
+        self.detected_port: Optional[str] = None
+        # Operator-chosen port from /flash_dongle/continue {port}. Takes
+        # precedence over auto-detection on the post-continue retry.
+        self.chosen_port: Optional[str] = None
+        # Candidate serial ports as of the last time we got stuck, so the
+        # UI can offer an inline picker. List of {device, vid, pid, desc}.
+        self.available_ports: list[dict] = []
+        # Why we parked in needs_manual_reset, so the UI can show the
+        # right guidance: "reset_failed" (chip likely needs a real
+        # BOOT+RESET) vs "port_changed_unresolved" (it re-enumerated but
+        # we couldn't confidently pick the new port).
+        self.stuck_reason: Optional[str] = None
         self.started_ms = int(time.time() * 1000)
         self.last_event_ms = self.started_ms
         self.ended_ms: Optional[int] = None
@@ -261,6 +291,10 @@ class FlashJob:
                 "mode": self.mode,
                 "phase": self.phase,
                 "error": self.error,
+                "port": self.port,
+                "detected_port": self.detected_port,
+                "available_ports": list(self.available_ports),
+                "stuck_reason": self.stuck_reason,
                 "started_ms": self.started_ms,
                 "last_event_ms": self.last_event_ms,
                 "ended_ms": self.ended_ms,
@@ -397,10 +431,16 @@ class BridgeIO:
         pause_serial: Callable[[], None],
         resume_serial: Callable[[], None],
         current_port: Callable[[], str],
+        set_port: Optional[Callable[[str], None]] = None,
     ):
         self.pause_serial = pause_serial
         self.resume_serial = resume_serial
         self.current_port = current_port
+        # Optional: lets the flasher tell the bridge "the dongle now lives
+        # on this port" so the post-flash auto-reconnect targets the right
+        # device after a re-enumeration. No-op if the bridge didn't wire
+        # one up (older bridge, CLI test harness, etc.).
+        self.set_port = set_port
 
 
 # ---------------------------------------------------------------------------
@@ -493,15 +533,72 @@ def _handle_line(job: FlashJob, line: str) -> None:
         job._update_progress(extras["current_offset"], extras["current_offset_pct"])
 
 
+def _wait_for_redetected_port(
+    job: FlashJob, original_port: str, ports_before: set[str]
+) -> Optional[str]:
+    """Poll for the dongle hopping to a new serial device after a reset.
+
+    ESP32-S2 native USB-CDC re-enumerates when it drops into the ROM
+    bootloader, so the port esptool was holding (e.g. COM3) vanishes and
+    a new one (e.g. COM4) appears. Wait up to PORT_REDETECT_TIMEOUT_S for
+    a confident candidate and return it, or None if nothing better than
+    the original showed up. Returns a port only when it differs from
+    `original_port` (no point "following" to where we already were).
+    """
+    deadline = time.monotonic() + PORT_REDETECT_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if job._abort_event.is_set():
+            return None
+        candidate = resolve_dongle_port(prefer=original_port, before=ports_before)
+        if candidate and candidate != original_port:
+            return candidate
+        time.sleep(PORT_REDETECT_POLL_S)
+    # One last try with no `before` constraint -- handles the rare case
+    # where the bootloader port was already present in the before-set
+    # (e.g. a leftover from a prior aborted flash).
+    candidate = resolve_dongle_port(prefer=original_port)
+    if candidate and candidate != original_port:
+        return candidate
+    return None
+
+
+def _classify_stuck(original_port: str, ports_before: set[str]) -> str:
+    """Decide why a flash is stuck, for UI guidance.
+
+    "port_changed_unresolved": the Espressif serial devices on the bus
+    changed since we started (so the dongle almost certainly hopped
+    ports) but we couldn't confidently pick the new one -- show the port
+    picker. "reset_failed": nothing changed on the bus, so the chip
+    probably needs a genuine BOOT+RESET.
+    """
+    now_ports = list_dongle_ports()
+    now_devices = {p["device"] for p in now_ports if p.get("vid") == ESPRESSIF_VID}
+    before_espressif = ports_before  # already filtered to Espressif by caller
+    if now_devices != before_espressif:
+        return "port_changed_unresolved"
+    return "reset_failed"
+
+
 def _run_job(job: FlashJob, state: FlashServerState) -> None:
-    """Worker thread body: pause serial, run esptool (with manual-reset
-    fallback), resume serial, stash final snapshot.
+    """Worker thread body: pause serial, run esptool (auto-following the
+    dongle across a USB re-enumeration, with a manual-reset fallback),
+    resume serial, stash final snapshot.
     """
     try:
         port = state.bridge_io.current_port()
         if not port:
             job._set_phase("error", error="bridge has no serial port configured")
             return
+        with job._lock:
+            job.port = port
+
+        # Snapshot the Espressif serial devices present *before* we touch
+        # the chip, so we can spot the one that appears when the dongle
+        # re-enumerates into its bootloader.
+        ports_before = {
+            p["device"] for p in list_dongle_ports()
+            if p.get("vid") == ESPRESSIF_VID
+        }
 
         # Hand the port over to esptool.
         try:
@@ -511,9 +608,10 @@ def _run_job(job: FlashJob, state: FlashServerState) -> None:
             return
 
         try:
-            # Phase 1: try with auto-reset. This works on most lolin_s2_mini
-            # boards if the operator's USB cable carries data lines and the
-            # driver in the kernel speaks USB-CDC properly.
+            # Phase 1: try with auto-reset on the configured port. This
+            # works on most lolin_s2_mini boards if the operator's USB
+            # cable carries data lines and the kernel driver speaks
+            # USB-CDC properly.
             job._set_phase("connecting")
             job._process = _spawn_esptool(job, port, before="default_reset")
             rc = _drive_subprocess(job)
@@ -524,16 +622,38 @@ def _run_job(job: FlashJob, state: FlashServerState) -> None:
                 return
 
             if rc != 0:
-                # Phase 1.5: before bothering the operator, try a silent
-                # retry with --before no_reset. On lolin_s2_mini USB-CDC
-                # the chip is often already sitting in a download-ready
-                # state after a "failed" default_reset, and this silent
-                # retry succeeds outright a large fraction of the time.
-                # It saves a manual BOOT+RESET dance the operator
-                # otherwise has to click through every flash.
+                # Phase 1.5: the default_reset almost certainly bounced the
+                # chip into the ROM bootloader, which means it just
+                # re-enumerated onto a *different* serial device. Follow it
+                # there and retry with no_reset before bothering the
+                # operator -- this is the COM3 -> COM4 case and resolving
+                # it automatically is the whole point of this path.
+                followed = _wait_for_redetected_port(job, port, ports_before)
+                if followed and not job._abort_event.is_set():
+                    job._append_log(
+                        f"auto-reset failed; dongle re-enumerated -- following "
+                        f"{port} -> {followed} and retrying with no_reset..."
+                    )
+                    with job._lock:
+                        job.detected_port = followed
+                        job.port = followed
+                    port = followed
+                    job._set_phase("connecting")
+                    job._process = _spawn_esptool(job, port, before="no_reset")
+                    rc = _drive_subprocess(job)
+                    job.exit_code = rc
+                    if job._abort_event.is_set():
+                        job._set_phase("aborted", error="aborted by operator")
+                        return
+
+            if rc != 0:
+                # Phase 1.6: still failing. Try one silent no_reset on the
+                # current best port -- on lolin_s2_mini USB-CDC the chip is
+                # often already sitting download-ready, so this succeeds
+                # outright a large fraction of the time.
                 job._append_log(
-                    "auto-reset failed -- retrying once with no_reset before "
-                    "asking for manual BOOT+RESET..."
+                    "retrying once with no_reset before asking for manual "
+                    "BOOT+RESET..."
                 )
                 time.sleep(1.0)
                 job._set_phase("connecting")
@@ -545,22 +665,35 @@ def _run_job(job: FlashJob, state: FlashServerState) -> None:
                     return
 
             if rc != 0:
-                # Silent retry also failed. Now we actually do need the
-                # operator to BOOT+RESET the dongle. Park in
-                # needs_manual_reset and wait for them to click
-                # Continue, or for the timeout to expire.
-                job._append_log(
-                    "silent no_reset retry also failed -- BOOT+RESET the "
-                    "dongle, then click Continue."
-                )
-                job._set_phase(
-                    "needs_manual_reset",
-                    error=(
+                # Every automatic path failed. Park in needs_manual_reset
+                # and tell the UI *why* so it can show the right guidance:
+                # a real BOOT+RESET, or a port picker if the device moved
+                # but we couldn't pin the new port.
+                stuck_reason = _classify_stuck(port, ports_before)
+                with job._lock:
+                    job.stuck_reason = stuck_reason
+                    job.available_ports = list_dongle_ports()
+                if stuck_reason == "port_changed_unresolved":
+                    err = (
+                        "The dongle re-enumerated to a different serial port "
+                        "but I couldn't tell which one. Pick the dongle's port "
+                        "below and click Continue."
+                    )
+                    job._append_log(
+                        "dongle appears to have changed ports -- waiting for "
+                        "the operator to pick the right one."
+                    )
+                else:
+                    err = (
                         "esptool couldn't talk to the dongle on its own "
                         "(common on lolin_s2_mini USB-CDC). Hold BOOT, "
                         "tap RESET, release BOOT, then click Continue."
-                    ),
-                )
+                    )
+                    job._append_log(
+                        "auto-detect found no port change -- BOOT+RESET the "
+                        "dongle, then click Continue."
+                    )
+                job._set_phase("needs_manual_reset", error=err)
                 got_continue = job._continue_event.wait(timeout=NEEDS_MANUAL_RESET_TIMEOUT_S)
                 if job._abort_event.is_set():
                     job._set_phase("aborted", error="aborted by operator")
@@ -575,12 +708,27 @@ def _run_job(job: FlashJob, state: FlashServerState) -> None:
                     )
                     return
 
-                # Phase 2: retry with --before no_reset. The operator has
-                # now put the chip into the ROM bootloader manually.
-                # Clear the previous error so the UI badge flips back to
-                # "in progress" while the retry runs.
+                # Phase 2: retry. Target, in order of preference: the
+                # operator-chosen port (from /flash_dongle/continue {port}),
+                # a freshly auto-detected port (in case they BOOT+RESET'd
+                # and it hopped again), or the current best port.
+                retry_port = job.chosen_port
+                if not retry_port:
+                    retry_port = (
+                        resolve_dongle_port(prefer=port, before=ports_before) or port
+                    )
+                if retry_port != port:
+                    job._append_log(f"retrying on {retry_port} after Continue...")
+                    with job._lock:
+                        if retry_port != job.detected_port:
+                            job.detected_port = retry_port
+                        job.port = retry_port
+                    port = retry_port
+                # Clear the previous error / stuck reason so the UI badge
+                # flips back to "in progress" while the retry runs.
                 with job._lock:
                     job.error = None
+                    job.stuck_reason = None
                 job._set_phase("connecting")
                 job._process = _spawn_esptool(job, port, before="no_reset")
                 rc = _drive_subprocess(job)
@@ -688,6 +836,13 @@ class _FlashHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path.rstrip("/") == "/flash_dongle/status":
             self._respond(200, self._state().status_snapshot())
+            return
+        if self.path.rstrip("/") == "/flash_dongle/ports":
+            # Native-side serial enumeration. The daemon runs in a
+            # container and can't see the host's COM ports, so the UI's
+            # port picker is fed from here (via the daemon's status
+            # passthrough).
+            self._respond(200, {"ports": list_dongle_ports()})
             return
         if self.path.rstrip("/") in ("/", "/healthz"):
             self._respond(200, {"ok": True, "service": "byh-flash-server"})
@@ -830,6 +985,11 @@ class _FlashHandler(BaseHTTPRequestHandler):
         self._respond(202, {"accepted": True, "job_id": job.job_id})
 
     def _handle_continue(self) -> None:
+        try:
+            body = self._read_body()
+        except ValueError as e:
+            self._respond(400, {"error": str(e)})
+            return
         st = self._state()
         with st._lock:
             job = st.current_job
@@ -839,6 +999,16 @@ class _FlashHandler(BaseHTTPRequestHandler):
         if job.phase != "needs_manual_reset":
             self._respond(409, {"error": f"job is in phase {job.phase}, can't continue"})
             return
+        # Optional operator-chosen port. Used verbatim on the retry; we
+        # don't validate against list_ports here because the operator may
+        # legitimately know better than our auto-detect (and the retry
+        # will surface a clear esptool error if it's wrong anyway).
+        chosen = body.get("port")
+        if chosen is not None:
+            if not isinstance(chosen, str) or not chosen.strip():
+                self._respond(400, {"error": "port must be a non-empty string"})
+                return
+            job.chosen_port = chosen.strip()
         job._continue_event.set()
         self._respond(202, {"accepted": True})
 

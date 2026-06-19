@@ -5,6 +5,8 @@ import {
   MdWarning,
   MdCheckCircle,
   MdStop,
+  MdRefresh,
+  MdCloudDownload,
 } from "react-icons/md";
 import useStateAppStore from "@/store/useStateAppStore";
 import useAppStore from "@/store/useAppStore";
@@ -16,6 +18,7 @@ import {
   selectClass,
   cn,
 } from "@/design";
+import { fwOutOfDate } from "@/util/firmwareVersion";
 
 // FW_VERSION: OTA flash panel
 // v1.0.0: Initial version - lets the operator pick an online receiver and
@@ -96,6 +99,7 @@ function useFlashableReceivers() {
         label: def.label || id,
         online,
         battery: liveRow?.status?.battery ?? null,
+        fw_version: def.fw_version ?? null,
       });
     }
     out.sort((a, b) => {
@@ -110,7 +114,23 @@ function useFlashableReceivers() {
 
 export default function OtaFlashPanel() {
   const { stateData } = useStateAppStore();
+  const { latestFirmware, fetchLatestFirmware } = useAppStore();
   const [open, setOpen] = useState(false);
+  const [checking, setChecking] = useState(false);
+
+  const latestReceiver = latestFirmware?.receiver?.available
+    ? latestFirmware.receiver
+    : null;
+  const latestReceiverVersion = latestReceiver?.version ?? null;
+
+  const handleCheck = useCallback(async () => {
+    setChecking(true);
+    try {
+      await fetchLatestFirmware(true);
+    } finally {
+      setChecking(false);
+    }
+  }, [fetchLatestFirmware]);
 
   const ota = stateData?.fw_state?.ota || null;
   const isShowLoaded = !!stateData?.fw_state?.show_loaded;
@@ -156,16 +176,34 @@ export default function OtaFlashPanel() {
             <span className="text-fg-muted text-xs">{summary}</span>
           </span>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setOpen(true)}
-          leading={<MdSystemUpdateAlt />}
-          className="ml-auto"
-        >
-          Open flasher
-        </Button>
+        <div className="ml-auto flex items-center gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleCheck}
+            leading={<MdRefresh className={checking ? "animate-spin" : ""} />}
+            disabled={checking}
+          >
+            Check for updates
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setOpen(true)}
+            leading={<MdSystemUpdateAlt />}
+          >
+            Open flasher
+          </Button>
+        </div>
       </div>
+
+      {latestReceiverVersion != null && (
+        <p className="text-xs text-fg-muted">
+          Latest receiver firmware: v{latestReceiverVersion}.
+          {latestReceiver?.stale ? " (cached — couldn't reach the server)" : ""}
+          {" "}Open the flasher to push it to a receiver.
+        </p>
+      )}
 
       <FlashModal
         isOpen={open}
@@ -174,17 +212,27 @@ export default function OtaFlashPanel() {
         phase={phase}
         isActive={isActive}
         blockedReason={blockedReason}
+        latestReceiverVersion={latestReceiverVersion}
       />
     </div>
   );
 }
 
-function FlashModal({ isOpen, onClose, ota, phase, isActive, blockedReason }) {
+function FlashModal({
+  isOpen,
+  onClose,
+  ota,
+  phase,
+  isActive,
+  blockedReason,
+  latestReceiverVersion = null,
+}) {
   const flashable = useFlashableReceivers();
   const [selectedIdent, setSelectedIdent] = useState("");
   const [file, setFile] = useState(null);
   const [rate, setRate] = useState(2);
   const [submitting, setSubmitting] = useState(false);
+  const [latestBusy, setLatestBusy] = useState(false);
   const [submitError, setSubmitError] = useState(null);
   const fileInputRef = useRef(null);
 
@@ -260,6 +308,32 @@ function FlashModal({ isOpen, onClose, ota, phase, isActive, blockedReason }) {
     }
   }, [selectedIdent, file, rate, blockedReason]);
 
+  // Flash the latest published receiver firmware to the selected receiver --
+  // the host downloads the .bin from the static site, no manual file pick.
+  const handleFlashLatest = useCallback(async () => {
+    setSubmitError(null);
+    if (!selectedIdent) {
+      setSubmitError("Pick a receiver.");
+      return;
+    }
+    if (blockedReason) {
+      setSubmitError(blockedReason);
+      return;
+    }
+    setLatestBusy(true);
+    try {
+      await axios.post("/api/system/flash_latest", {
+        device: "receiver",
+        ident: selectedIdent,
+        rate,
+      });
+    } catch (e) {
+      setSubmitError(e?.response?.data?.error || e.message);
+    } finally {
+      setLatestBusy(false);
+    }
+  }, [selectedIdent, rate, blockedReason]);
+
   const handleAbort = useCallback(async () => {
     try {
       await axios.delete("/api/system/ota_flash");
@@ -289,15 +363,29 @@ function FlashModal({ isOpen, onClose, ota, phase, isActive, blockedReason }) {
               Abort flash
             </Button>
           ) : (
-            <Button
-              variant="primary"
-              leading={<MdSystemUpdateAlt />}
-              onClick={handleStart}
-              disabled={submitting || !!blockedReason || !selectedIdent || !file}
-              loading={submitting}
-            >
-              {submitting ? "Submitting…" : "Start flash"}
-            </Button>
+            <>
+              {latestReceiverVersion != null && (
+                <Button
+                  variant="subtle"
+                  leading={<MdCloudDownload />}
+                  onClick={handleFlashLatest}
+                  disabled={latestBusy || submitting || !!blockedReason || !selectedIdent}
+                  loading={latestBusy}
+                  title={`Download os4_receiver_v${latestReceiverVersion}.bin and OTA it to the selected receiver`}
+                >
+                  Flash latest (v{latestReceiverVersion})
+                </Button>
+              )}
+              <Button
+                variant="primary"
+                leading={<MdSystemUpdateAlt />}
+                onClick={handleStart}
+                disabled={submitting || latestBusy || !!blockedReason || !selectedIdent || !file}
+                loading={submitting}
+              >
+                {submitting ? "Submitting…" : "Start flash"}
+              </Button>
+            </>
           )}
         </>
       }
@@ -325,16 +413,23 @@ function FlashModal({ isOpen, onClose, ota, phase, isActive, blockedReason }) {
               disabled={isActive}
             >
               <option value="">— pick one —</option>
-              {flashable.map((r) => (
-                <option key={r.id} value={r.id} disabled={!r.online}>
-                  {r.label}
-                  {r.label !== r.id ? ` (${r.id})` : ""}
-                  {r.online ? "" : " · offline"}
-                </option>
-              ))}
+              {flashable.map((r) => {
+                const upd = fwOutOfDate(r.fw_version, latestReceiverVersion);
+                return (
+                  <option key={r.id} value={r.id} disabled={!r.online}>
+                    {r.label}
+                    {r.label !== r.id ? ` (${r.id})` : ""}
+                    {r.online ? "" : " · offline"}
+                    {upd ? ` · update → v${latestReceiverVersion}` : ""}
+                  </option>
+                );
+              })}
             </select>
             <span className="text-xs text-fg-muted">
               Only online, NRF-capable receivers are listed.
+              {latestReceiverVersion != null
+                ? " “update” marks receivers older than the latest firmware."
+                : ""}
             </span>
           </label>
 

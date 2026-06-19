@@ -220,21 +220,33 @@ const Timeline = memo((props) => {
       : `${seconds}`;
   };
 
+  // Coerce timeline numerics defensively. Show payloads coming from
+  // different DBs / host versions sometimes carry startTime/duration as
+  // strings (or omit duration entirely). The overlap math below relies on
+  // real numbers: with a string, `startTime + duration` concatenates; with
+  // undefined it yields NaN, and EVERY comparison against NaN is false --
+  // so the overlap test silently reports "no overlap" and collapses every
+  // item onto lane 0 (the "items won't vertically stack" bug). num() makes
+  // stacking depend on the values, not the data's JS types.
+  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+
   const calculatePosition = (startTime) => {
-    return (startTime / maxTime) * 100; // Scaled as a percentage of the timeline width
+    return (num(startTime) / maxTime) * 100; // Scaled as a percentage of the timeline width
   };
 
   const calculateStack = () => {
     const stacks = [];
     items.forEach((item) => {
+      const start = num(item.startTime);
+      const dur = num(item.duration);
       let overlapIndex = 0;
       for (let i = 0; i < stacks.length; i++) {
         if (
-          !stacks[i].some(
-            (other) =>
-              item.startTime < other.startTime + other.duration &&
-              item.startTime + item.duration > other.startTime
-          )
+          !stacks[i].some((other) => {
+            const oStart = num(other.startTime);
+            const oDur = num(other.duration);
+            return start < oStart + oDur && start + dur > oStart;
+          })
         ) {
           overlapIndex = i;
           break;
@@ -753,14 +765,15 @@ const Timeline = memo((props) => {
 
           {/* Items */}
           {stackedItems.flat().map((item) => {
+            const itemDuration = num(item.duration);
             const start = calculatePosition(item.startTime);
-            const width = (item.duration / maxTime) * 100;
+            const width = (itemDuration / maxTime) * 100;
             const top = stackedItems.findIndex((stack) =>
               stack.includes(item)
             );
             // If the bar is too narrow to hold text, float the label just
             // outside the bar so short shell/rack cues remain identifiable.
-            const isShortDurationItem = item.duration * zoom < 80;
+            const isShortDurationItem = itemDuration * zoom < 80;
 
             // Check if item is selected
             const selectedItems = props.selectedItems || [];

@@ -262,9 +262,12 @@ class DongleFlashDriver:
             pass
         return True, f"queued ({job_id})"
 
-    def continue_job(self) -> tuple[bool, str]:
+    def continue_job(self, port: Optional[str] = None) -> tuple[bool, str]:
+        # Optionally tell the bridge which port to retry on -- the operator
+        # may have picked one in the UI when auto-detection was ambiguous.
+        body = {"port": port} if port else {}
         try:
-            self._http_post("/flash_dongle/continue", {})
+            self._http_post("/flash_dongle/continue", body)
         except DongleFlashHTTPError as e:
             self._set_driver_error(str(e))
             return False, str(e)

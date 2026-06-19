@@ -29,6 +29,7 @@ import {
   BILUSOCN_RANGE_LEN,
 } from "@/util/showReceivers";
 import useShowReceiverVerification from "@/util/useShowReceiverVerification";
+import { fwOutOfDate } from "@/util/firmwareVersion";
 
 // FW_VERSION: Frontend version tracking for ReceiverDisplay component
 // v1.0.0: Initial version - Basic receiver display with battery, connectivity, and cue status
@@ -186,6 +187,9 @@ function SingleReceiver({
   // Fire ms). Off by default to keep the live status grid scannable;
   // toggled from the Receivers page header by the operator.
   debugDisplay = false,
+  // Latest published receiver firmware version (from latest.json). Null when
+  // unknown (offline / not fetched). Drives the "update available" badge.
+  latestReceiverVersion = null,
 }) {
   const [popup, setPopup] = useState(null);
   const receiverRef = useRef(null);
@@ -315,6 +319,11 @@ function SingleReceiver({
   // only way to recover a pruned receiver without restarting the daemon.
   const showRetry = isEnabled && typeof onRetry === 'function';
 
+  // Firmware freshness. receiver.fw_version is null until a CONFIG_QUERY
+  // ("Fetch cfg") lands, so this stays false (no badge) for receivers we
+  // haven't queried -- and never shows when we have no latest info (offline).
+  const fwUpdateAvailable = fwOutOfDate(receiver.fw_version, latestReceiverVersion);
+
   return (
     <div
       ref={receiverRef}
@@ -349,6 +358,14 @@ function SingleReceiver({
             </>
           ) : (
             <span>{rcv_name}</span>
+          )}
+          {fwUpdateAvailable && (
+            <span
+              className="inline-flex items-center rounded-sm border border-warn/40 bg-warn-bg/60 px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wider text-warn-fg"
+              title={`Firmware v${latestReceiverVersion} available (running v${receiver.fw_version}). Update via OTA in Settings → Debug.`}
+            >
+              Update v{latestReceiverVersion}
+            </span>
           )}
         </h2>
 
@@ -867,8 +884,14 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       reloadReceiversOnDaemon,
       retryReceiver,
       fetchReceiverConfig,
+      latestFirmware,
     } = useAppStore();
     const { stateData } = useStateAppStore()
+    // Latest published receiver firmware, surfaced per-card as an "update
+    // available" badge. Null when offline / not yet fetched (no badge).
+    const latestReceiverVersion = latestFirmware?.receiver?.available
+      ? latestFirmware.receiver.version
+      : null;
     const [ targetRcvMap, setTargetRcvMap ] = useState({});
     const [showUnusedReceivers, setShowUnusedReceivers] = useState(false);
     const [showDisabledReceivers, setShowDisabledReceivers] = useState(false);
@@ -1729,6 +1752,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                               onFetchConfig={handleFetchConfig}
                               fetchConfigBusy={!!fetchConfigBusy[id]}
                               debugDisplay={debugDisplay}
+                              latestReceiverVersion={latestReceiverVersion}
                             />
                         );
                         if (!isInsufficient) return tile;
@@ -1781,6 +1805,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                                       onFetchConfig={handleFetchConfig}
                                       fetchConfigBusy={!!fetchConfigBusy[rcv_key]}
                                       debugDisplay={debugDisplay}
+                                      latestReceiverVersion={latestReceiverVersion}
                                     />
                                 ))}
                             </div>
@@ -1808,6 +1833,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                           onFetchConfig={handleFetchConfig}
                           fetchConfigBusy={!!fetchConfigBusy[rcv_key]}
                           debugDisplay={debugDisplay}
+                          latestReceiverVersion={latestReceiverVersion}
                         />
                     ))}
                 </div>
@@ -1842,6 +1868,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                                   onFetchConfig={handleFetchConfig}
                                   fetchConfigBusy={!!fetchConfigBusy[rcv_key]}
                                   debugDisplay={debugDisplay}
+                                  latestReceiverVersion={latestReceiverVersion}
                                 />
                             ))}
                         </div>

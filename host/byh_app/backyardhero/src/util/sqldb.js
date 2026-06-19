@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import { DB_PATH as RESOLVED_DB_PATH, SYSTEM_CFG_PATH } from '@/util/paths';
+import { readMergedSystemConfigSync } from '@/util/systemcfg';
 const fs = require('fs');
 
 // DB_PATH / SYSTEM_CFG_PATH now come from the central, env-driven resolver
@@ -353,8 +354,10 @@ function seedReceiversFromSystemCfgIfEmpty(db) {
       return;
     }
 
-    const raw = fs.readFileSync(SYSTEM_CFG_PATH, 'utf-8');
-    const cfg = JSON.parse(raw);
+    // Merged read (base + systemcfg.user.json) for consistency with every
+    // other config reader. The legacy `receivers` block only ever lived in
+    // the base file, so in practice this resolves the same value as before.
+    const cfg = readMergedSystemConfigSync();
     const legacy = cfg && cfg.receivers ? cfg.receivers : {};
     const idents = Object.keys(legacy);
     if (idents.length === 0) {

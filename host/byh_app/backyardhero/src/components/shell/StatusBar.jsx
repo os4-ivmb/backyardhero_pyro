@@ -9,6 +9,7 @@ import Toast from "../common/Toast";
 import GpioOverrideBar from "./GpioOverrideBar";
 import { isPollableReceiver } from "@/util/receivers";
 import { HARDWARE } from "@/util/clientEnv";
+import { fwOutOfDate } from "@/util/firmwareVersion";
 
 const DONGLE_DEFAULTS = {
   addr: "/dev/tty.usbmodem01",
@@ -106,7 +107,7 @@ export default function StatusBar() {
     fwCursor,
     activeProtocol,
   } = useAppMode();
-  const { systemConfig } = useAppStore();
+  const { systemConfig, latestFirmware } = useAppStore();
 
   const [isConnected, setIsConnected] = useState(false);
   const socketRef = useRef(null);
@@ -268,6 +269,16 @@ export default function StatusBar() {
       dongleLabel = activeProtocol;
     }
   }
+
+  // Dongle firmware freshness. The dongle reports its running FW_VERSION in
+  // its per-second heartbeat (fw_state.dongle_fw_version); compare against the
+  // latest published on the static site. Only meaningful while the dongle is
+  // actually reporting, and stays silent when we have no latest info (offline).
+  const dongleFwVersion = stateData.fw_state?.dongle_fw_version ?? null;
+  const latestDongleVersion = latestFirmware?.dongle?.available
+    ? latestFirmware.dongle.version
+    : null;
+  const dongleFwStale = fwOutOfDate(dongleFwVersion, latestDongleVersion);
 
   // Force-restart the dongle's serial connection on the daemon. This is
   // the same path TxConfig.jsx's "Apply" button takes -- re-issuing
@@ -452,6 +463,15 @@ export default function StatusBar() {
                   />
                   {restartingDongle ? "Restarting…" : "Restart"}
                 </button>
+              ) : null}
+              {dongleTone === "ok" && dongleFwStale ? (
+                <Badge
+                  tone="warn"
+                  size="xs"
+                  title={`Dongle firmware v${latestDongleVersion} available (running v${dongleFwVersion}). Update in Settings → Debug → Dongle firmware update.`}
+                >
+                  Update v{latestDongleVersion}
+                </Badge>
               ) : null}
             </div>
           </div>

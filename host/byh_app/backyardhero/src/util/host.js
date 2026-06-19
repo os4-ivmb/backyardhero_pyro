@@ -40,6 +40,13 @@ export function getHostInfo() {
   cached = {
     is_raspberry_pi: isRaspberryPi,
     model,
+    // Running host/app version + whether we're inside the Electron desktop
+    // bundle. Both are injected by the desktop supervisor (main.js buildEnv);
+    // unset under Docker/Pi, where "host version" is managed by the system
+    // update flow instead. Surfaced so the Settings footer can show
+    // "Host vX" and gate the desktop auto-update controls.
+    app_version: process.env.BYH_HOST_VERSION || null,
+    is_desktop: process.env.BYH_DESKTOP === '1',
   };
   return cached;
 }

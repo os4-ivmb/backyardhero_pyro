@@ -6,6 +6,7 @@ import { MdAssignment, MdHome } from "react-icons/md";
 import useAppStore from "@/store/useAppStore";
 import useAppMode from "@/design/useAppMode";
 import useShowReceiverVerification from "@/util/useShowReceiverVerification";
+import { HARDWARE } from "@/util/clientEnv";
 
 import MobileShell from "./MobileShell";
 import MobileTopBar from "./MobileTopBar";
@@ -43,7 +44,7 @@ const TABS = [
 
 export default function MobileMainNav() {
   const {
-    fetchInventory, fetchShows, fetchSystemConfig,
+    fetchInventory, fetchShows, fetchSystemConfig, fetchLatestFirmware,
     stagedShow, shows, inventoryById, hydrateStagedShowFromId,
   } = useAppStore();
   const [currTab, setCurrTab] = useState("main");
@@ -58,6 +59,9 @@ export default function MobileMainNav() {
   useEffect(() => { fetchInventory(); }, [fetchInventory]);
   useEffect(() => { fetchShows(); }, [fetchShows]);
   useEffect(() => { fetchSystemConfig(); }, [fetchSystemConfig]);
+  useEffect(() => {
+    if (HARDWARE) fetchLatestFirmware();
+  }, [fetchLatestFirmware]);
 
   useEffect(() => {
     hydrateStagedShowFromId();

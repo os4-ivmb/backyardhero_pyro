@@ -8,6 +8,7 @@ import useAppStore from "@/store/useAppStore";
 import useAppMode from "@/design/useAppMode";
 import useIsMobile from "@/design/useIsMobile";
 import useShowReceiverVerification from "@/util/useShowReceiverVerification";
+import { HARDWARE } from "@/util/clientEnv";
 import AppShell from "./shell/AppShell";
 import TopBar from "./shell/TopBar";
 import StatusBar from "./shell/StatusBar";
@@ -63,7 +64,7 @@ const TABS = [
 
 function DesktopMainNav() {
   const {
-    fetchInventory, fetchShows, fetchSystemConfig,
+    fetchInventory, fetchShows, fetchSystemConfig, fetchLatestFirmware,
     stagedShow, shows, inventoryById, hydrateStagedShowFromId, systemConfig,
   } = useAppStore();
   const [currTab, setCurrTab] = useState("main");
@@ -97,6 +98,12 @@ function DesktopMainNav() {
   useEffect(() => { fetchInventory(); }, [fetchInventory]);
   useEffect(() => { fetchShows(); }, [fetchShows]);
   useEffect(() => { fetchSystemConfig(); }, [fetchSystemConfig]);
+  // Check the static site for the latest firmware once on mount (hardware
+  // profile only). Server-side cached + offline-safe, so this is cheap and
+  // never blocks the UI; the "Check for updates" buttons force a refresh.
+  useEffect(() => {
+    if (HARDWARE) fetchLatestFirmware();
+  }, [fetchLatestFirmware]);
 
   // Re-stage the previously-staged show from localStorage once both
   // shows and inventory have populated. Idempotent: the action no-ops if
