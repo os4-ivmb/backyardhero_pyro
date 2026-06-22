@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import axios from "axios";
+import { asyncConfirm, asyncAlert } from "../common/AsyncPrompt";
 import {
   MdEdit,
   MdAdd,
@@ -109,11 +110,11 @@ export default function RacksTab({
 
   const handleAddRack = async () => {
     if (!newRack.name.trim()) {
-      alert("Please enter a rack name");
+      await asyncAlert("Please enter a rack name");
       return;
     }
     if (!showId) {
-      alert("Please save the show first before adding racks");
+      await asyncAlert("Please save the show first before adding racks");
       return;
     }
 
@@ -133,7 +134,7 @@ export default function RacksTab({
       setShowAddModal(false);
     } catch (error) {
       console.error("Failed to create rack:", error);
-      alert("Failed to create rack");
+      await asyncAlert("Failed to create rack");
     }
   };
 
@@ -149,7 +150,7 @@ export default function RacksTab({
     } catch (error) {
       console.error("Failed to update rack:", error);
       await fetchRacks();
-      alert("Failed to update rack");
+      await asyncAlert("Failed to update rack");
     }
   };
 
@@ -179,13 +180,13 @@ export default function RacksTab({
     } catch (error) {
       console.error("Failed to resize rack:", error);
       await fetchRacks();
-      alert("Failed to resize rack");
+      await asyncAlert("Failed to resize rack");
     }
     setResizingRack(null);
   };
 
   const handleDeleteRack = async (rackId) => {
-    if (!confirm("Are you sure you want to delete this rack?")) return;
+    if (!(await asyncConfirm({ message: "Are you sure you want to delete this rack?", destructive: true }))) return;
     // Pre-pick a fallback active id so the tab doesn't blink to "none"
     // for a frame after delete.
     if (rackId === activeRackId) {
@@ -199,18 +200,18 @@ export default function RacksTab({
       await fetchRacks();
     } catch (error) {
       console.error("Failed to delete rack:", error);
-      alert("Failed to delete rack");
+      await asyncAlert("Failed to delete rack");
     }
   };
 
   const handleCloneRack = async (rackId) => {
     if (!showId) {
-      alert("Please save the show first before cloning racks");
+      await asyncAlert("Please save the show first before cloning racks");
       return;
     }
     const rackToClone = racks.find((r) => r.id === rackId);
     if (!rackToClone) {
-      alert("Rack not found");
+      await asyncAlert("Rack not found");
       return;
     }
     try {
@@ -230,7 +231,7 @@ export default function RacksTab({
       await fetchRacks();
     } catch (error) {
       console.error("Failed to clone rack:", error);
-      alert("Failed to clone rack");
+      await asyncAlert("Failed to clone rack");
     }
   };
 
@@ -241,7 +242,7 @@ export default function RacksTab({
 
   const handleSaveName = async (rackId) => {
     if (!editingRackName.trim()) {
-      alert("Rack name cannot be empty");
+      await asyncAlert("Rack name cannot be empty");
       return;
     }
     const rack = racks.find((r) => r.id === rackId);
@@ -256,7 +257,7 @@ export default function RacksTab({
       await fetchRacks();
     } catch (error) {
       console.error("Failed to update rack name:", error);
-      alert("Failed to update rack name");
+      await asyncAlert("Failed to update rack name");
     }
   };
 

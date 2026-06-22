@@ -12,7 +12,7 @@ import { Card, Button, Badge, Stat, IconButton, cn } from "@/design";
 import { protoStatusBadge, protoStatusLabel } from "@/util/protoStatus";
 import { audioFieldFromShow } from "@/utils/audioTracks";
 import useShowReceiverVerification from "@/util/useShowReceiverVerification";
-import { asyncPrompt } from "@/components/common/AsyncPrompt";
+import { asyncPrompt, asyncAlert } from "@/components/common/AsyncPrompt";
 
 // Per-press magnitude of the live audio sync scrubber.
 const SYNC_NUDGE_MS = 50;
@@ -416,7 +416,7 @@ export default function ShowControl({
     });
     if (code === null) return; // cancelled
     if (code !== stagedShow.authorization_code) {
-      window.alert("Auth code is incorrect.");
+      await asyncAlert("Auth code is incorrect.");
       return;
     }
     await callDaemon("load_show", { id: stagedShow.id });

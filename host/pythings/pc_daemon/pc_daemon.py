@@ -809,7 +809,6 @@ class FireworkDaemon:
                             else:
                                 self.write_error(f"Tried to start show but no show loaded and manual fire is off.")
 
-                        self.start_sw_active=True
                     elif self.last_switch_state == LOW and switch_state == HIGH:
                         print("Start/stop switch transitioned from LOW to HIGH. Stopping schedule...")
                         if not self.protocol_handler:
@@ -827,10 +826,18 @@ class FireworkDaemon:
                                 else:
                                     self.stop_schedule(False)
                                     self.led_handler.update("show_run_state", RUN_STATE.ARMED.value)
-
-                        self.start_sw_active=False
                 elif self.last_switch_state is not switch_state:
                     self.write_error("Start/Stop switch changed while system was not armed. This is not allowed.")
+
+                # `start_sw_active` gates show loading and is read by the UI
+                # to render "Start switch is ON". It must mirror the actual
+                # (effective, post-override) switch level on every poll, not
+                # just edges seen while armed. Previously it was only set on
+                # armed edges, so toggling the start switch off while disarmed
+                # (e.g. the post-show unstage flow) left it stuck True, and the
+                # operator had to cycle the switch on/off again before a reload
+                # was allowed. Derive it from the live reading instead.
+                self.start_sw_active = (switch_state == LOW)
 
                 self.last_switch_state = switch_state
                 self.last_arming_state = arming_state

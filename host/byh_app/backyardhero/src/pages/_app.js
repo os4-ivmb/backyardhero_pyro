@@ -26,8 +26,11 @@ const mono = JetBrains_Mono({
 });
 
 export default function App({ Component, pageProps }) {
-  // Desktop (Electron) only: repair keyboard focus after native dialogs so
-  // typing keeps working after a confirm/alert (e.g. deleting a receiver).
+  // Desktop (Electron) only: repair keyboard focus after any native dialog
+  // that slips through. App code uses the in-app asyncAlert/asyncConfirm/
+  // asyncPrompt modals (see AsyncPrompt.jsx) instead of window.alert/confirm/
+  // prompt, since on macOS the native ones tear down and recreate the whole
+  // window on dismiss, and on Windows they break keyboard focus.
   useEffect(() => {
     installDesktopDialogFocusFix();
   }, []);

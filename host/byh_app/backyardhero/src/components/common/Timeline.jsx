@@ -1,4 +1,5 @@
 import { INV_COLOR_CODE } from "@/constants";
+import { asyncConfirm } from "@/components/common/AsyncPrompt";
 import React, { useState, useRef, memo, useEffect, useMemo } from "react";
 import { FaTrash } from "react-icons/fa6";
 import { FiZoomIn, FiZoomOut } from "react-icons/fi";
@@ -177,9 +178,9 @@ const Timeline = memo((props) => {
     }
   };
 
-  const handleRemoveEl = (e) => {
+  const handleRemoveEl = async (e) => {
     const id = e.dataTransfer.getData("id");
-    if(confirm(`Remove this item from the show?`)){
+    if (await asyncConfirm({ message: `Remove this item from the show?`, destructive: true })) {
       setItems((prevItems) =>
         prevItems.filter((item) =>
           item.id != parseInt(id)

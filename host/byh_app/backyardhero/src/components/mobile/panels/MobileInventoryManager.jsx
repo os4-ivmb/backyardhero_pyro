@@ -7,6 +7,7 @@ import { Section, Button, IconButton, Card, Badge, cn } from "@/design";
 import { INV_TYPES, getTypeLabel } from "@/constants";
 import { normalizeYouTubeUrl } from "@/util/youtube";
 import { parseOptionalUnitCost } from "@/util/inventoryUnitCost";
+import { asyncConfirm, asyncAlert } from "@/components/common/AsyncPrompt";
 
 import {
   CakeFields,
@@ -343,18 +344,18 @@ export default function MobileInventoryManager() {
       }
       dismissEditor();
     } catch (err) {
-      window.alert(err?.response?.data?.error || err?.message || "Failed to save item.");
+      await asyncAlert(err?.response?.data?.error || err?.message || "Failed to save item.");
     }
   };
 
   const handleDelete = async (item) => {
     if (!item.id) return;
-    if (!window.confirm(`Delete "${item.name}"? This cannot be undone.`)) return;
+    if (!(await asyncConfirm({ message: `Delete "${item.name}"? This cannot be undone.`, destructive: true }))) return;
     try {
       await deleteInventoryItem(item.id);
       dismissEditor();
     } catch (e) {
-      window.alert(e?.response?.data?.error || "Failed to delete item.");
+      await asyncAlert(e?.response?.data?.error || "Failed to delete item.");
     }
   };
 

@@ -3,6 +3,7 @@ import axios from "axios";
 import { INV_TYPES } from "@/constants";
 import useAppStore from '@/store/useAppStore';
 import { apiUrl } from '@/util/clientEnv';
+import { asyncAlert } from '@/components/common/AsyncPrompt';
 
 // Note: Type mapping is now done in gather.py, so we just use the type directly from records
 
@@ -301,7 +302,7 @@ export default function ImportCatalogModal({ isOpen, onClose, onImportComplete }
 
   const handleImport = async () => {
     if (selectedItems.size === 0) {
-      alert('Please select at least one item to import');
+      await asyncAlert('Please select at least one item to import');
       return;
     }
 
@@ -359,7 +360,7 @@ export default function ImportCatalogModal({ isOpen, onClose, onImportComplete }
       // Refresh inventory
       await fetchInventory();
       
-      alert(`Import complete! ${successCount} items imported successfully${errorCount > 0 ? `, ${errorCount} failed` : ''}`);
+      await asyncAlert(`Import complete! ${successCount} items imported successfully${errorCount > 0 ? `, ${errorCount} failed` : ''}`);
       
       // Reset and close
       setSelectedItems(new Set());
@@ -367,7 +368,7 @@ export default function ImportCatalogModal({ isOpen, onClose, onImportComplete }
       onClose();
     } catch (err) {
       console.error('Error during import:', err);
-      alert('Error during import. Please check the console for details.');
+      await asyncAlert('Error during import. Please check the console for details.');
     } finally {
       setImporting(false);
     }

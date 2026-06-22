@@ -7,6 +7,7 @@ import useAppStore from "@/store/useAppStore";
 import { Section, Card, Button, IconButton, Badge } from "@/design";
 import { computeShowStats, formatShowCreatedAt } from "@/util/showStats";
 import { parseAudioField } from "@/utils/audioTracks";
+import { asyncConfirm } from "@/components/common/AsyncPrompt";
 
 // Empty-state surface for the console: a clean picker for staging shows.
 // Replaces:
@@ -60,7 +61,7 @@ export default function ShowPicker({
 
   const handleDelete = async (e, show) => {
     e.stopPropagation();
-    if (!window.confirm(`Delete show "${show.name}"?`)) return;
+    if (!(await asyncConfirm({ message: `Delete show "${show.name}"?`, destructive: true }))) return;
     deleteShow(show.id);
   };
 

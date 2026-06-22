@@ -186,7 +186,17 @@
 //   the H8 RF address entropy mask (RF_ADDR_ENTROPY_MASK = 0xA3C5E1B400ULL).
 //   Normal build -- flash after the v27 rescue dongle has OTA'd stranded v23
 //   units forward, to resume standard masked addressing (v24+ receivers).
-#define FW_VERSION 28
+// v29: 2026-06-XX - Auto config re-query on reconnect:
+//   * The v16 auto-query only re-fired on (re-)registration, i.e. initial
+//     connect or post-prune re-discovery -- and pruning only happens after
+//     receiverInactivityTimeoutMs (default 1h). A receiver that dropped and
+//     came back inside that window kept its table entry, so a board/fire-
+//     duration change made while it was powered off never reached the host.
+//   * ingestStatusFrame now re-arms configQueryPending when a status frame
+//     arrives after the receiver has been silent longer than ~4 poll cycles
+//     (8s floor) -- the point at which the host already treats it as offline.
+//     The next poll slot then issues a CONFIG_QUERY, same as a cold connect.
+#define FW_VERSION 29
 
 #define BOARD_VERSION 2
 
@@ -1166,6 +1176,24 @@ ReceiverInfo* ingestStatusFrame(const uint8_t* buf, uint8_t len, uint64_t now) {
   if (!r) {
     Serial.print(F("ERR: Status from unknown ident/node ")); Serial.println(status->nodeID);
     return NULL;
+  }
+
+  // Reconnect re-query (FW v29): a receiver that drops and comes back *within*
+  // receiverInactivityTimeoutMs (default 1h) keeps its table entry, so the
+  // autocreate-path auto-query above never re-fires -- the host would miss a
+  // board/fire-duration change made while it was powered off. If the receiver
+  // has been silent long enough that the host considers it offline, treat this
+  // fresh status frame as a reconnect and re-arm a CONFIG_QUERY (same rationale
+  // as the initial-connect/post-prune auto-query). The threshold tracks the
+  // poll cadence (4 missed cycles) with an 8s floor so a single dropped poll
+  // can't trip it and it still holds if clockSyncIntervalMs is retuned. The
+  // configQueryPending guard skips freshly-registered receivers (flag already
+  // set, lastMessageTime just seeded) and avoids redundant re-arms.
+  uint32_t reconnectGapMs = clockSyncIntervalMs * 4UL;
+  if (reconnectGapMs < 8000UL) reconnectGapMs = 8000UL;
+  if (!r->configQueryPending && now > r->lastMessageTime &&
+      (now - r->lastMessageTime) > reconnectGapMs) {
+    r->configQueryPending = true;
   }
 
   r->nodeID = status->nodeID;

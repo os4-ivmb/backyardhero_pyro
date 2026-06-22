@@ -52,6 +52,13 @@ let statusPath = null;
 let cmdPath = null;
 let cmdTimer = null;
 let lastStatus = { phase: 'idle' };
+// Set by main.js: gracefully stops the supervised services before we hand off
+// to Squirrel/NSIS. Without this the app's before-quit cleanup races the
+// updater's quit-and-relaunch.
+let beforeInstallHook = null;
+// Guards against re-entrant installs (the prompt + a UI "install" command could
+// both fire).
+let installing = false;
 
 function writeStatus(patch) {
   lastStatus = {
@@ -130,12 +137,28 @@ function promptInstall(version) {
     .catch(() => {});
 }
 
-function quitAndInstall() {
+async function quitAndInstall() {
+  if (!autoUpdater) return;
+  if (installing) return;
+  installing = true;
+
+  // Stop the supervised services first. This both frees the ports the
+  // relaunched (updated) app needs to rebind, and -- crucially -- means the
+  // app's before-quit handler sees an already-shutting-down supervisor and
+  // lets the quit proceed instead of calling app.exit(0), which would
+  // hard-kill the process and skip Squirrel's install + relaunch entirely.
+  try {
+    if (typeof beforeInstallHook === 'function') await beforeInstallHook();
+  } catch (err) {
+    console.error('updater: pre-install cleanup failed:', err.message);
+  }
+
   try {
     // isSilent=false (show the installer UI on Windows), isForceRunAfter=true
     // (relaunch the app once the update lands).
     autoUpdater.quitAndInstall(false, true);
   } catch (err) {
+    installing = false;
     writeStatus({ phase: 'error', error: `install failed: ${err.message}` });
   }
 }
@@ -174,9 +197,10 @@ function pollCommands() {
  * ({ dataDir, runDir, ... }) so the status/command files land where the Next
  * server (same BYH_DATA_DIR / BYH_RUN_DIR) can read/write them.
  */
-function initAutoUpdates(dirs) {
+function initAutoUpdates(dirs, opts = {}) {
   statusPath = path.join(dirs.dataDir, 'host_update.json');
   cmdPath = path.join(dirs.runDir, 'host_update_cmd.json');
+  beforeInstallHook = typeof opts.beforeInstall === 'function' ? opts.beforeInstall : null;
 
   // Command polling works even when the updater itself can't run (so the UI
   // button gives feedback rather than hanging), but the actual check is gated

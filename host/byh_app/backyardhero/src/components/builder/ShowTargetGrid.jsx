@@ -10,6 +10,7 @@ import { MdEdit, MdSwapHoriz, MdAdd, MdDeleteOutline } from "react-icons/md";
 import { FaX, FaTriangleExclamation, FaCircleQuestion } from "react-icons/fa6";
 import { INV_COLOR_CODE } from "@/constants";
 import { SHOW_RECEIVER_STATUS, isBilusocnEntry } from "@/util/showReceivers";
+import { asyncAlert } from "@/components/common/AsyncPrompt";
 
 // Target Grid surface.
 //
@@ -108,7 +109,7 @@ export default function ShowTargetGrid({
     );
 
     if (isOccupato) {
-      alert("Seat's Taken!");
+      asyncAlert("Seat's Taken!");
       setActiveItem(null);
       return;
     }

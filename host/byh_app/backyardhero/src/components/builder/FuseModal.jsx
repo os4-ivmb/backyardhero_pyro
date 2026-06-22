@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Modal, Button, Field, inputClass, selectClass } from "@/design";
+import { asyncAlert } from "@/components/common/AsyncPrompt";
 
 // Modal for creating *or editing* a fuse.
 //
@@ -42,7 +43,7 @@ export default function FuseModal({
 
   const handleConfirm = () => {
     if (!fuseType) {
-      alert("Please select a fuse type");
+      asyncAlert("Please select a fuse type");
       return;
     }
     onConfirm?.({ fuseType, leadIn });

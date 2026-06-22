@@ -149,6 +149,16 @@ _consecutive_failures    = 0
 # onto a different COM/tty (ESP32-S2 native USB-CDC does this on reboot
 # or replug, and always on Windows where COM numbers aren't stable).
 PORT_REDETECT_AFTER_FAILURES = 3
+# Stale-handle watchdog. The dongle emits a ~1Hz status frame the whole
+# time it's connected, so a serial handle that reports "open" yet delivers
+# no bytes for this long is almost certainly a zombie. This is the classic
+# Windows sleep/resume failure: the USB-CDC file handle survives suspend,
+# but after resume it never delivers data again AND never raises on read,
+# so the normal disconnect-detection path (read error -> reopen) never
+# fires and the dongle stays "Silent" until a physical replug. When we hit
+# this threshold we force a close + reopen (which re-resolves the port by
+# VID) so the link self-heals without operator intervention.
+SERIAL_SILENCE_TIMEOUT_S = 10.0
 
 
 def _resolve_dongle_port_safe(prefer=None, before=None):
@@ -226,9 +236,31 @@ def _try_auto_reopen():
             return False
 
 def reconnect_serial(client_socket):
-    """Reconnect to the serial port with current settings"""
-    global serial_conn
-    
+    """Reconnect to the serial port with current settings.
+
+    Tries the configured port first, then -- if that can't be opened --
+    falls back to re-resolving the dongle by USB vendor id and following
+    it to wherever it now lives. This mirrors the auto-reconnect path
+    (_try_auto_reopen) so the OPERATOR-triggered reconnect is just as
+    robust: after a host sleep/resume the ESP32-S2's USB-CDC port commonly
+    re-enumerates onto a different COM number (always on Windows, where COM
+    numbers aren't stable), and a reconnect that only ever retried the
+    stale configured port would silently fail. This is the path the
+    StatusBar "Restart" affordance takes (select_serial -> config_serial),
+    so without the VID fallback that button could never recover a dongle
+    that moved ports.
+    """
+    global serial_conn, _consecutive_failures
+
+    # Resolve a VID-based fallback BEFORE taking the lock (port enumeration
+    # can be slow and we don't want to stall the forwarders). Only used if
+    # the configured port fails to open.
+    configured = SERIAL_CONFIG['port']
+    redetected = _resolve_dongle_port_safe(prefer=configured)
+    candidates = [configured]
+    if redetected and redetected != configured:
+        candidates.append(redetected)
+
     with serial_lock:
         # Close existing connection if open
         if serial_conn:
@@ -236,25 +268,38 @@ def reconnect_serial(client_socket):
                 serial_conn.close()
             except:
                 pass
-                
-        # Try to open new connection
-        try:
-            serial_conn = serial.Serial(
-                SERIAL_CONFIG['port'], 
-                SERIAL_CONFIG['baud'], 
-                timeout=1
-            )
-            print(f"Serial connected: {SERIAL_CONFIG['port']} at {SERIAL_CONFIG['baud']} baud")
-            return True
-        except Exception as e:
-            print(f"Serial connection error: {e}")
-            if(client_socket):
-                response = {
-                    'type': 'config_response',
-                    'error': str(e)
-                }
+            serial_conn = None
+
+        last_err = None
+        for port in candidates:
+            try:
+                serial_conn = serial.Serial(
+                    port,
+                    SERIAL_CONFIG['baud'],
+                    timeout=1
+                )
+                if port != SERIAL_CONFIG['port']:
+                    print(f"Serial: configured port {SERIAL_CONFIG['port']} "
+                          f"unavailable; following dongle to {port}")
+                    SERIAL_CONFIG['port'] = port
+                print(f"Serial connected: {SERIAL_CONFIG['port']} at {SERIAL_CONFIG['baud']} baud")
+                _consecutive_failures = 0
+                return True
+            except Exception as e:
+                last_err = e
+                serial_conn = None
+
+        print(f"Serial connection error: {last_err}")
+        if(client_socket):
+            response = {
+                'type': 'config_response',
+                'error': str(last_err)
+            }
+            try:
                 client_socket.sendall((json.dumps(response) + '\n').encode('utf-8'))
-            return False
+            except Exception:
+                pass
+        return False
 
 def process_command(command_data, client_socket):
     """Process configuration commands from the client"""

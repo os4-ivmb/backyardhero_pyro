@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import useAppStore from '@/store/useAppStore';
 import axios from 'axios';
+import { asyncAlert } from '@/components/common/AsyncPrompt';
 
 const EFFECT_OPTIONS = [
   'PEONY',
@@ -605,11 +606,11 @@ export default function ShellPackEditor({ isOpen, onClose, item }) {
         setQuickAddText('');
         setShowQuickAdd(false);
       } else {
-        alert('No shells could be parsed from the input. Please check the format.');
+        await asyncAlert('No shells could be parsed from the input. Please check the format.');
       }
     } catch (error) {
       console.error('Failed to parse shells:', error);
-      alert('Failed to parse shells. Please try again or use the local parser.');
+      await asyncAlert('Failed to parse shells. Please try again or use the local parser.');
     } finally {
       setIsParsing(false);
     }
@@ -652,7 +653,7 @@ export default function ShellPackEditor({ isOpen, onClose, item }) {
       onClose();
     } catch (error) {
       console.error('Failed to save shell pack data:', error);
-      alert('Failed to save shell pack data. Please try again.');
+      await asyncAlert('Failed to save shell pack data. Please try again.');
     }
   };
 

@@ -165,6 +165,126 @@ function waitForUI(timeoutMs = 60000) {
   });
 }
 
+// Builds a horizontal sprite sheet of spiky "burning ember" frames as an inline
+// SVG data URI. Each frame jitters the spike lengths/rotation so cycling through
+// them with a CSS steps() animation reads as a flickering, crackling fuse end.
+function buildSparkSprite() {
+  const frames = 5;
+  const fw = 64;
+  const fh = 64;
+  const cx = fw / 2;
+  const cy = fh / 2;
+  const spikes = 11;
+
+  // Deterministic LCG so the sprite is identical every run (no flashing diff).
+  let seed = 1337;
+  const rnd = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+
+  let body = '';
+  for (let f = 0; f < frames; f++) {
+    const ox = f * fw;
+    const pts = [];
+    const phase = rnd() * Math.PI; // rotate the whole burst per frame
+    for (let i = 0; i < spikes * 2; i++) {
+      const ang = (i * Math.PI) / spikes - Math.PI / 2 + phase;
+      const outer = i % 2 === 0;
+      const r = outer ? 18 + rnd() * 12 : 7 + rnd() * 4;
+      const x = cx + Math.cos(ang) * r;
+      const y = cy + Math.sin(ang) * r;
+      pts.push(`${(ox + x).toFixed(1)},${y.toFixed(1)}`);
+    }
+    body += `<polygon points="${pts.join(' ')}" fill="url(#g)"/>`;
+    body += `<circle cx="${ox + cx}" cy="${cy}" r="${(6 + rnd() * 2).toFixed(1)}" fill="#fff7d6"/>`;
+  }
+
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${frames * fw}" height="${fh}" ` +
+    `viewBox="0 0 ${frames * fw} ${fh}">` +
+    `<defs><radialGradient id="g" cx="50%" cy="50%" r="50%">` +
+    `<stop offset="0%" stop-color="#fff3b0"/>` +
+    `<stop offset="38%" stop-color="#ffb013"/>` +
+    `<stop offset="72%" stop-color="#ff5a00"/>` +
+    `<stop offset="100%" stop-color="#c81e00"/>` +
+    `</radialGradient></defs>${body}</svg>`;
+
+  return { uri: `data:image/svg+xml,${encodeURIComponent(svg)}`, frames, fw, fh };
+}
+
+function buildLoadingHTML() {
+  // Embed the logo as a base64 data URI so it renders without a file:// load
+  // (the loading screen itself is a data: URL with no asset base). The CSS
+  // filter recolors the artwork to solid white regardless of its source colors.
+  let logoTag = '';
+  let hasLogo = false;
+  try {
+    const logoPath = path.join(__dirname, 'assets', 'BYHv2Logo.png');
+    const logoData = fs.readFileSync(logoPath).toString('base64');
+    logoTag = `<img src="data:image/png;base64,${logoData}" alt="Backyard Hero" style="display:block;width:280px;max-width:62vw;height:auto;filter:brightness(0) invert(1)" />`;
+    hasLogo = true;
+  } catch {
+    logoTag = '<h2>Backyard Hero</h2>';
+  }
+
+  let version = '';
+  try {
+    version = app.getVersion();
+  } catch {
+    version = '';
+  }
+
+  const spark = buildSparkSprite();
+  const em = 30; // on-screen ember size (px); sprite frames are scaled to this
+
+  // The fuse cord sits "inside" the logo, starting right off the star after
+  // HERO. It burns left->right away from the star: the lit ember rides the
+  // burn front and the consumed (left) section is clipped away to transparent,
+  // so it reads as gone/burned. Both the clip and the ember share one
+  // timing/loop, so it re-lights and burns down forever.
+  const burnMs = 3200;
+  const flickerMs = 360; // full cycle through all 5 ember frames
+
+  // Geometry as % of the logo box (800x400) so it tracks the logo at any size:
+  //   star tip ends ~40% across; star vertical center ~52% down.
+  const fuseInner = '<div class="track"></div><div class="ember"></div>';
+  const stage = hasLogo
+    ? `<div class="logo">${logoTag}<div class="fuse">${fuseInner}</div></div>`
+    : `${logoTag}<div class="fuse fuse--below">${fuseInner}</div>`;
+
+  return `data:text/html,${encodeURIComponent(
+    `<!doctype html><html><head><meta charset="utf-8"><style>
+      html,body{height:100%;margin:0}
+      body{background:#0b0b0f;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center}
+      .wrap{text-align:center}
+      .logo{position:relative;display:inline-block;line-height:0}
+      .status{margin-top:24px;font-size:18px;letter-spacing:0.5px}
+      .ver{margin-top:8px;font-size:13px;color:#888}
+      .fuse{position:absolute;left:40%;top:52%;width:57%;height:${em}px;transform:translateY(-50%)}
+      .fuse--below{position:relative;left:auto;top:auto;transform:none;width:380px;max-width:72vw;margin:18px auto 0}
+      .track{position:absolute;left:0;right:0;top:50%;height:7px;transform:translateY(-50%);
+        border-radius:4px;overflow:hidden;
+        background:repeating-linear-gradient(-45deg,#2e8b40 0 6px,#0b3d18 6px 12px);
+        box-shadow:inset 0 0 0 1px rgba(0,0,0,0.3);
+        animation:burn ${burnMs}ms linear infinite}
+      .ember{position:absolute;top:50%;left:0;width:${em}px;height:${em}px;
+        margin-left:-${em / 2}px;margin-top:-${em / 2}px;
+        background-image:url('${spark.uri}');background-repeat:no-repeat;
+        background-size:${spark.frames * em}px ${em}px;
+        filter:drop-shadow(0 0 4px #ff7a18) drop-shadow(0 0 10px #ff3b00);
+        animation:travel ${burnMs}ms linear infinite, flicker ${flickerMs}ms steps(${spark.frames}) infinite}
+      @keyframes burn{from{clip-path:inset(0 0 0 0)}to{clip-path:inset(0 0 0 100%)}}
+      @keyframes travel{from{left:0}to{left:100%}}
+      @keyframes flicker{from{background-position-x:0}to{background-position-x:-${spark.frames * em}px}}
+    </style></head><body><div class="wrap">
+      ${stage}
+      <p class="status">Starting up System</p>
+      ${version ? `<p class="ver">v${version}</p>` : ''}
+    </div></body></html>`
+  )}`;
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -178,10 +298,7 @@ function createWindow() {
     },
   });
 
-  const loading = `data:text/html,${encodeURIComponent(
-    '<body style="background:#0b0b0f;color:#eee;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h2>Backyard Hero</h2><p>Starting services</p></div></body>'
-  )}`;
-  mainWindow.loadURL(loading);
+  mainWindow.loadURL(buildLoadingHTML());
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
   mainWindow.on('closed', () => {
@@ -269,7 +386,9 @@ async function main() {
   // update state and trigger an install. Best-effort; only active in a
   // packaged build.
   try {
-    initAutoUpdates(dirs);
+    // beforeInstall lets the updater stop our services before it hands off to
+    // Squirrel/NSIS, so the quit proceeds cleanly (see before-quit below).
+    initAutoUpdates(dirs, { beforeInstall: () => supervisor.stopAll() });
   } catch (err) {
     console.error('Auto-update init failed:', err.message);
   }
@@ -299,10 +418,17 @@ app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) focusOrCreate();
 });
 
-app.on('before-quit', async (event) => {
-  if (supervisor && !supervisor.shuttingDown) {
-    event.preventDefault();
-    await supervisor.stopAll();
-    app.exit(0);
-  }
+app.on('before-quit', (event) => {
+  // If the services are already (being) torn down, let the quit run its normal
+  // course. This is the second pass after our own cleanup, and it's also the
+  // path the auto-updater takes (it stops the services first): we must NOT
+  // hard-exit here, or electron-updater can't apply a pending update on quit
+  // and Squirrel/NSIS can't relaunch into the new version -- which is exactly
+  // why "Restart to update" appeared to do nothing.
+  if (!supervisor || supervisor.shuttingDown) return;
+
+  // First pass on a plain quit: stop the services, then re-issue the quit so
+  // the normal will-quit/quit sequence (and any pending update install) runs.
+  event.preventDefault();
+  supervisor.stopAll().finally(() => app.quit());
 });

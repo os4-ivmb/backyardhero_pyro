@@ -20,6 +20,101 @@ const receiverRowToStoreEntry = (row) => ({
   config_data: row.config_data || {},
 });
 
+// Derive the camelCase, parsed fields (audioTracks/audioFile/audioOffsetMs,
+// receiverLocations, receiverLabels, showReceivers) from a raw show row's
+// snake_case JSON columns. Mutates and returns `show`.
+//
+// Every reader of a show — the ShowPicker "Audio" badge, `handleStage`,
+// `hydrateStagedShowFromId`, the console — keys off these derived fields and
+// the `audio_file` column. This is the SINGLE place that knows how to go
+// from the persisted columns to that in-memory shape, so create/update can
+// reuse it and stay byte-for-byte consistent with a fresh `fetchShows`.
+const normalizeShowRow = (show) => {
+  // Parse audio_file JSON string if it exists. Normalises both the legacy
+  // single-track shape and the new {tracks:[]} shape into a canonical
+  // `audioTracks` array, with `audioFile` kept as a back-compat alias for
+  // the first track.
+  if (show.audio_file) {
+    try {
+      const parsed = JSON.parse(show.audio_file);
+      const { tracks, audioOffsetMs } = parseAudioField(parsed);
+      show.audioTracks = tracks;
+      show.audioOffsetMs = audioOffsetMs;
+      show.audioFile = tracks[0] || null;
+    } catch (e) {
+      console.error('Failed to parse audio_file for show:', show.id, e);
+      show.audioTracks = [];
+      show.audioOffsetMs = 0;
+      show.audioFile = null;
+    }
+  } else {
+    show.audioTracks = [];
+    show.audioOffsetMs = 0;
+    show.audioFile = null;
+  }
+
+  // Parse receiver_locations JSON string if it exists
+  if (show.receiver_locations) {
+    try {
+      show.receiverLocations = JSON.parse(show.receiver_locations);
+    } catch (e) {
+      console.error('Failed to parse receiver_locations for show:', show.id, e);
+      show.receiverLocations = null;
+    }
+  } else {
+    show.receiverLocations = null;
+  }
+
+  // Parse receiver_labels JSON string if it exists
+  if (show.receiver_labels) {
+    try {
+      show.receiverLabels = JSON.parse(show.receiver_labels);
+    } catch (e) {
+      console.error('Failed to parse receiver_labels for show:', show.id, e);
+      show.receiverLabels = null;
+    }
+  } else {
+    show.receiverLabels = null;
+  }
+
+  // Parse show_receivers JSON if present. This is the per-show canonical
+  // list of receivers / cue counts, owned by the show itself rather than
+  // derived from the global Receivers table. Pre-migration shows have it
+  // as null and the builder back-fills on first edit.
+  if (show.show_receivers) {
+    try {
+      const parsed = JSON.parse(show.show_receivers);
+      show.showReceivers = Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+      console.error('Failed to parse show_receivers for show:', show.id, e);
+      show.showReceivers = [];
+    }
+  } else {
+    show.showReceivers = [];
+  }
+
+  return show;
+};
+
+// Build the canonical cached show object after a create/update. The API
+// persists the show's audio as the snake_case `audio_file` JSON column,
+// derived from the camelCase `audioFile` blob in the request body (see
+// pages/api/shows/[id].js + index.js). The store, however, used to merge
+// the request body verbatim — which set `audioFile` but left the stale
+// `audio_file` string untouched. Because readers key off `audio_file`, a
+// freshly-saved song looked gone on unstage/reload and only came back after
+// a full app restart (when fetchShows re-read the column). Re-stamp
+// `audio_file` from exactly what the server persisted, then normalise, so
+// the cache matches SQLite without a round-trip.
+const cacheRowFromSave = (base, payload, id) => {
+  const merged = { ...base, ...payload, id };
+  merged.audio_file = payload.audioFile ? JSON.stringify(payload.audioFile) : null;
+  // `audioFile` in the payload is the multi-track blob; normalizeShowRow
+  // re-derives the single-track alias from `audio_file`, so drop the blob.
+  delete merged.audioFile;
+  return normalizeShowRow(merged);
+};
+
 // We persist only a tiny subset (the staged show ID) to localStorage. The
 // rich `stagedShow` object — items merged with inventory metadata, parsed
 // audioFile, etc. — is *re-derived* from the canonical shows/inventory
@@ -35,69 +130,7 @@ const useAppStore = create(persist((set, get) => ({
     try {
       const { data } = await axios.get('/api/shows');
       const showById = data.reduce((acc, show) => {
-        // Parse audio_file JSON string if it exists. Normalises both the
-        // legacy single-track shape and the new {tracks:[]} shape into a
-        // canonical `audioTracks` array, with `audioFile` kept as a back-
-        // compat alias for the first track.
-        if (show.audio_file) {
-          try {
-            const parsed = JSON.parse(show.audio_file);
-            const { tracks, audioOffsetMs } = parseAudioField(parsed);
-            show.audioTracks = tracks;
-            show.audioOffsetMs = audioOffsetMs;
-            show.audioFile = tracks[0] || null;
-          } catch (e) {
-            console.error('Failed to parse audio_file for show:', show.id, e);
-            show.audioTracks = [];
-            show.audioOffsetMs = 0;
-            show.audioFile = null;
-          }
-        } else {
-          show.audioTracks = [];
-          show.audioOffsetMs = 0;
-          show.audioFile = null;
-        }
-        
-        // Parse receiver_locations JSON string if it exists
-        if (show.receiver_locations) {
-          try {
-            show.receiverLocations = JSON.parse(show.receiver_locations);
-          } catch (e) {
-            console.error('Failed to parse receiver_locations for show:', show.id, e);
-            show.receiverLocations = null;
-          }
-        } else {
-          show.receiverLocations = null;
-        }
-        
-        // Parse receiver_labels JSON string if it exists
-        if (show.receiver_labels) {
-          try {
-            show.receiverLabels = JSON.parse(show.receiver_labels);
-          } catch (e) {
-            console.error('Failed to parse receiver_labels for show:', show.id, e);
-            show.receiverLabels = null;
-          }
-        } else {
-          show.receiverLabels = null;
-        }
-
-        // Parse show_receivers JSON if present. This is the per-show canonical
-        // list of receivers / cue counts, owned by the show itself rather than
-        // derived from the global Receivers table. Pre-migration shows have it
-        // as null and the builder back-fills on first edit.
-        if (show.show_receivers) {
-          try {
-            const parsed = JSON.parse(show.show_receivers);
-            show.showReceivers = Array.isArray(parsed) ? parsed : [];
-          } catch (e) {
-            console.error('Failed to parse show_receivers for show:', show.id, e);
-            show.showReceivers = [];
-          }
-        } else {
-          show.showReceivers = [];
-        }
-
+        normalizeShowRow(show);
         acc[show.id] = show;
         return acc;
       }, {});
@@ -109,7 +142,7 @@ const useAppStore = create(persist((set, get) => ({
   createShow: async (showData) => {
     try {
       const { data } = await axios.post('/api/shows', showData);
-      const newShow = { ...showData, id: data.id };
+      const newShow = cacheRowFromSave({}, showData, data.id);
       set((state) => ({
         shows: [...state.shows, newShow],
         showById: { ...state.showById, [data.id]: newShow },
@@ -145,13 +178,16 @@ const useAppStore = create(persist((set, get) => ({
   updateShow: async (id, updatedData) => {
     try {
       await axios.patch(`/api/shows/${id}`, updatedData);
-      set((state) => ({
-        shows: state.shows.map((show) => (show.id === id ? { ...show, ...updatedData } : show)),
-        showById: {
-          ...state.showById,
-          [id]: { ...state.showById[id], ...updatedData },
-        },
-      }));
+      set((state) => {
+        const base = state.showById[id]
+          || state.shows.find((s) => s.id === id)
+          || {};
+        const updatedShow = cacheRowFromSave(base, updatedData, id);
+        return {
+          shows: state.shows.map((show) => (show.id === id ? updatedShow : show)),
+          showById: { ...state.showById, [id]: updatedShow },
+        };
+      });
       return { ok: true };
     } catch (error) {
       console.error('Failed to update show:', error);

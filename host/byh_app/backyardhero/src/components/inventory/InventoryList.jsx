@@ -10,6 +10,7 @@ import {
   Card, Button, IconButton, Badge, Section,
   Table, THead, TH, TBody, TR, TD, cn,
 } from "@/design";
+import { asyncAlert } from "@/components/common/AsyncPrompt";
 
 import ShotProfileModal from "./ShotProfileModal";
 import ShellPackEditor from "./ShellPackEditor";
@@ -176,10 +177,10 @@ export default function InventoryList({ inventory, setActiveItem, refreshInvento
         mergeThresholdMs: 500,
         overrideDuration: false,
       });
-      window.alert("Shot profile generation started. Reload soon to see it.");
       setTimeout(refreshProfiles, 3000);
+      await asyncAlert("Shot profile generation started. Reload soon to see it.");
     } catch (e) {
-      window.alert(e.response?.data?.error || "Failed to start profile generation.");
+      await asyncAlert(e.response?.data?.error || "Failed to start profile generation.");
     }
   };
 

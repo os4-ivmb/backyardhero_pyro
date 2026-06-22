@@ -845,17 +845,28 @@ void handleGeneric(GenericMessage* msg) {
 // H7: this math assumes a 13-bit ADC (raw 0..8191). setup() now pins that
 // with analogReadResolution(13) so it no longer silently depends on the
 // arduino-esp32 core default (12-bit on most cores -> raw maxes at 4095,
-// which would clamp every reading below the 2350 floor and report a flat
+// which would clamp every reading below the empty floor and report a flat
 // minimum battery). `bval` is the raw reading halved in software; the
-// 2320/3700 thresholds correspond to the empty/full pack voltages through
-// the on-board resistor divider (tune against a multimeter if the divider
-// changes). The old float math (`((bval-2320)/15.38)*2.5`) is replaced
-// with the exact integer equivalent: 2.5/15.38 == 125/769.
+// BATT_EMPTY_BVAL/BATT_FULL_BVAL thresholds correspond to the empty/full pack
+// voltages through the on-board resistor divider (tune against a multimeter if
+// the divider changes).
+//
+// H9: empty point recalibrated. The old empty reference (~2320/2350) sat below
+// the pack's real cutoff, so a dead pack still read ~raw 60 -- which the host
+// (floor(raw/256*100)) showed as ~23% instead of empty. Field-measuring a flat
+// pack put the true empty at bval ~= 2685, so empty is moved there and the
+// linear region [BATT_EMPTY_BVAL, BATT_FULL_BVAL] is remapped onto the same
+// [5, 253] output byte (raw 5 -> host ~0%, raw 253 -> host ~99%). 5 stays the
+// floor because getBatteryColorRGB() does `batteryLevel - 5` and would
+// underflow below it.
 uint8_t calculateBatteryLevel() {
+  const int BATT_EMPTY_BVAL = 2685;
+  const int BATT_FULL_BVAL  = 3700;
   int bval = analogRead(BATT_VOLTAGE_PIN) / 2;
-  if (bval > 3700)      return 253;
-  else if (bval < 2350) return 5;
-  else                  return (uint8_t)(((uint32_t)(bval - 2320) * 125) / 769);
+  if (bval > BATT_FULL_BVAL)       return 253;
+  else if (bval < BATT_EMPTY_BVAL) return 5;
+  else return (uint8_t)(5 + ((uint32_t)(bval - BATT_EMPTY_BVAL) * 248) /
+                            (BATT_FULL_BVAL - BATT_EMPTY_BVAL));
 }
 
 void getBatteryColorRGB(uint8_t batteryLevel, uint8_t *r, uint8_t *g, uint8_t *b) {

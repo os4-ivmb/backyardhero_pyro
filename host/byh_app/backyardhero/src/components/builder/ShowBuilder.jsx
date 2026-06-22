@@ -8,7 +8,7 @@ import ShowTargetGrid from "./ShowTargetGrid";
 import ShowReceiverModal from "./ShowReceiverModal";
 import ShowStateHeader from "./ShowStateHeader";
 import VideoPreviewPopup from "../common/VideoPreviewPopup";
-import { asyncPrompt } from "../common/AsyncPrompt";
+import { asyncPrompt, asyncConfirm, asyncAlert } from "../common/AsyncPrompt";
 import SpatialLayoutMap from "./SpatialLayoutMap";
 import RacksTab from "./RacksTab";
 import RackShellsSelector from "./RackShellsSelector";
@@ -951,7 +951,7 @@ const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex,
 
   const handleGenerate = () => {
     if (selectedReceivers.length === 0) {
-      alert("Please select at least one receiver");
+      asyncAlert("Please select at least one receiver");
       return;
     }
 
@@ -974,7 +974,7 @@ const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex,
     const maxCues = cueLengths.length > 0 ? Math.max(...cueLengths) : 0;
 
     if (maxCues === 0) {
-      alert("Selected receivers have no cues available");
+      asyncAlert("Selected receivers have no cues available");
       return;
     }
 
@@ -1057,7 +1057,7 @@ const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex,
 
   const handleTestAllCakes = () => {
     if (!inventory || !availableDevices || Object.keys(availableDevices).length === 0) {
-      alert("No inventory or available devices found");
+      asyncAlert("No inventory or available devices found");
       return;
     }
 
@@ -1070,7 +1070,7 @@ const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex,
     );
 
     if (cakeItems.length === 0) {
-      alert("No 200g, 350g, 500g, or compound cakes found in inventory");
+      asyncAlert("No 200g, 350g, 500g, or compound cakes found in inventory");
       return;
     }
 
@@ -1083,7 +1083,7 @@ const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex,
     });
 
     if (availableSlots.length === 0) {
-      alert("No available device slots found");
+      asyncAlert("No available device slots found");
       return;
     }
 
@@ -3025,7 +3025,7 @@ const ShowBuilder = (props) => {
         });
     } catch (error) {
       console.error("Failed to upload audio file:", error);
-      alert("Failed to upload audio file. See console for details.");
+      await asyncAlert("Failed to upload audio file. See console for details.");
     } finally {
       setUploadingForTrackId(null);
     }
@@ -3068,10 +3068,10 @@ const ShowBuilder = (props) => {
     // Don't move the cursor; let the user manually scrub or hit play.
   };
 
-  const handleRemoveTrack = (trackId) => {
+  const handleRemoveTrack = async (trackId) => {
     const idx = audioTracks.findIndex((t) => t.id === trackId);
     if (idx === -1) return;
-    if (!window.confirm("Delete this track?")) return;
+    if (!(await asyncConfirm({ message: "Delete this track?", destructive: true }))) return;
     setIsAudioPlaying(false);
     const isActive = trackId === activeTrackId;
     const localTimeBefore = activeLocalTime;
@@ -3288,12 +3288,12 @@ const ShowBuilder = (props) => {
       dirtyRef.current = false;
       setSaveStatus("saved");
       setLastSavedAt(Date.now());
-      if (!silent) alert("Updated Successfully!");
+      if (!silent) await asyncAlert("Updated Successfully!");
       return savedId;
     } catch (error) {
       console.error("Failed to save show:", error);
       setSaveStatus("error");
-      if (!silent) alert("Failed to save show. See console for details.");
+      if (!silent) await asyncAlert("Failed to save show. See console for details.");
       return null;
     } finally {
       isSavingRef.current = false;
@@ -3385,21 +3385,32 @@ const ShowBuilder = (props) => {
   // Save receiver locations to show data
   const saveReceiverLocations = async () => {
     if (!stagedShow.id) {
-      alert("Please save the show first before saving receiver locations.");
+      await asyncAlert("Please save the show first before saving receiver locations.");
       return;
     }
 
     try {
+      // Rebuild the full audio blob from the staged tracks so this partial
+      // save doesn't clobber a multi-track show down to its first track --
+      // the API persists whatever `audioFile` we send as the show's entire
+      // `audio_file` column.
+      const audioBlob = Array.isArray(stagedShow.audioTracks) && stagedShow.audioTracks.length
+        ? audioFieldFromShow({
+            tracks: stagedShow.audioTracks,
+            audioOffsetMs: stagedShow.audioOffsetMs,
+          })
+        : (stagedShow.audioFile || null);
       const updatedShowData = {
         ...stagedShow,
+        audioFile: audioBlob,
         receiver_locations: JSON.stringify(receiverLocations)
       };
       
       await updateShow(stagedShow.id, updatedShowData);
-      alert("Receiver locations saved successfully!");
+      await asyncAlert("Receiver locations saved successfully!");
     } catch (error) {
       console.error('Failed to save receiver locations:', error);
-      alert("Failed to save receiver locations. Please try again.");
+      await asyncAlert("Failed to save receiver locations. Please try again.");
     }
   };
 
@@ -3447,18 +3458,18 @@ const ShowBuilder = (props) => {
 
   // Remove a receiver/zone from the show. Blocked when items still target
   // it; the operator must delete those items first to avoid orphaning.
-  const handleRemoveReceiver = (receiverId) => {
+  const handleRemoveReceiver = async (receiverId) => {
     const count = itemsCountForReceiver(items, receiverId);
     if (count > 0) {
       const highest = highestUsedCueForReceiver(items, receiverId);
-      alert(
+      await asyncAlert(
         `${count} item${count === 1 ? '' : 's'} on this show still target ` +
           `${receiverId} (highest cue: ${highest}). Delete or move those ` +
           `items first.`
       );
       return;
     }
-    if (!window.confirm(`Remove ${receiverId} from this show?`)) return;
+    if (!(await asyncConfirm({ message: `Remove ${receiverId} from this show?`, destructive: true }))) return;
     setShowReceivers((prev) => prev.filter((e) => !e || e.id !== receiverId));
   };
 

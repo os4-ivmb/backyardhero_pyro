@@ -10,6 +10,7 @@ import { INV_TYPES } from "@/constants";
 import { normalizeYouTubeUrl } from "@/util/youtube";
 import { parseOptionalUnitCost } from "@/util/inventoryUnitCost";
 import { apiUrl, PROFILE } from "@/util/clientEnv";
+import { asyncConfirm, asyncAlert } from "@/components/common/AsyncPrompt";
 
 const DEFAULT_DATA = {
   id: "", name: "", type: "FUSE",
@@ -225,7 +226,7 @@ const AddInventoryForm = (props) => {
     try { await props.addItemFnc(formObject); }
     catch (err) {
       console.error(err);
-      window.alert(err.response?.data?.error || err.message || "Failed to save item.");
+      await asyncAlert(err.response?.data?.error || err.message || "Failed to save item.");
     }
   };
 
@@ -233,14 +234,14 @@ const AddInventoryForm = (props) => {
 
   const handleDeleteItem = async () => {
     if (!formObject.id || !props.deleteInventoryItem) return;
-    if (!window.confirm(`Delete "${formObject.name}"? This cannot be undone.`)) return;
+    if (!(await asyncConfirm({ message: `Delete "${formObject.name}"? This cannot be undone.`, destructive: true }))) return;
     try {
       await props.deleteInventoryItem(formObject.id);
       props.onItemDeleted?.(formObject.id);
       props.onDismiss?.();
       setFormObject(DEFAULT_DATA);
     } catch (e) {
-      window.alert(e.response?.data?.error || "Failed to delete item.");
+      await asyncAlert(e.response?.data?.error || "Failed to delete item.");
     }
   };
 

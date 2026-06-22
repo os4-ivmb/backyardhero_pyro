@@ -1,5 +1,6 @@
 import useAppStore from "@/store/useAppStore"
 import useStateAppStore, { serverElapsedMs } from "@/store/useStateAppStore";
+import { asyncConfirm } from "@/components/common/AsyncPrompt";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { 
   MdBatteryFull, 
@@ -1125,6 +1126,59 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       }
     }, [retryReceiver]);
 
+    // Clock skew between this host and the daemon's broadcast timestamps.
+    // Mirrors the per-card calc in SingleReceiver so "offline" here agrees
+    // with the WiFi-icon tone the operator sees on each card.
+    const clockOffsetMs = stateData?._clockOffsetMs ?? 0;
+
+    // A receiver is "connected" if the dongle heard from it within the last
+    // 10s; otherwise we treat it as dead/offline (same rule as the card).
+    const isReceiverConnected = useCallback((receiver) => {
+      if (receiver?.status?.lmt) {
+        return (Date.now() - clockOffsetMs - receiver.status.lmt) <= 10000;
+      }
+      return receiver?.connectionStatus === "good";
+    }, [clockOffsetMs]);
+
+    // Enabled, two-way receivers that are currently dead/offline. TX-only
+    // modules are excluded (they can never report status, so they'd always
+    // look "offline" and Retry is a no-op for them).
+    const offlineReceiverIds = useMemo(() => {
+      return Object.keys(receivers).filter((id) => {
+        const r = receivers[id];
+        if (!isPollableReceiver(r)) return false;
+        return !isReceiverConnected(r);
+      });
+    }, [receivers, isReceiverConnected]);
+
+    // Bulk "retry connection" for every offline receiver in one click. Each
+    // retry just enqueues a re-registration on the daemon, so we fire them
+    // together and let the dongle work the queue.
+    const [bulkRetryBusy, setBulkRetryBusy] = useState(false);
+    const handleRefreshOffline = useCallback(async () => {
+      const ids = offlineReceiverIds;
+      if (ids.length === 0 || bulkRetryBusy) return;
+      setBulkRetryBusy(true);
+      setRetryBusy((prev) => {
+        const next = { ...prev };
+        ids.forEach((id) => { next[id] = true; });
+        return next;
+      });
+      try {
+        await Promise.allSettled(ids.map((id) => retryReceiver(id)));
+      } finally {
+        // Brief debounce so the spinning icons stay visible on a fast queue.
+        setTimeout(() => {
+          setRetryBusy((prev) => {
+            const next = { ...prev };
+            ids.forEach((id) => { delete next[id]; });
+            return next;
+          });
+          setBulkRetryBusy(false);
+        }, 800);
+      }
+    }, [offlineReceiverIds, bulkRetryBusy, retryReceiver]);
+
     // Delete a receiver outright (edit-mode only). Confirms first, drops
     // any staged edits for the now-gone row, then reloads the daemon's
     // poll list so the dongle stops polling it immediately.
@@ -1132,10 +1186,10 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       const def = dbReceivers?.[id];
       const label = def?.label || id;
       if (
-        typeof window !== 'undefined' &&
-        !window.confirm(
-          `Delete receiver "${label}" (${id})?\n\nThis permanently removes it from the system.`,
-        )
+        !(await asyncConfirm({
+          message: `Delete receiver "${label}" (${id})?\n\nThis permanently removes it from the system.`,
+          destructive: true,
+        }))
       ) {
         return;
       }
@@ -1619,6 +1673,27 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                         >
                             <MdAssignment />
                             View Show Loadout
+                        </button>
+                    )}
+                    {/* Refresh offline — re-registers every enabled receiver
+                        the dongle has dropped (dead/offline). Appears only
+                        when at least one is offline so it's an obvious,
+                        actionable nudge rather than permanent clutter. */}
+                    {offlineReceiverIds.length > 0 && (
+                        <button
+                            onClick={handleRefreshOffline}
+                            disabled={bulkRetryBusy}
+                            title={`Retry connection for ${offlineReceiverIds.length} offline receiver${offlineReceiverIds.length === 1 ? '' : 's'}`}
+                            className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-colors text-white ${
+                              bulkRetryBusy
+                                ? 'bg-amber-700 cursor-wait'
+                                : 'bg-amber-600 hover:bg-amber-700'
+                            }`}
+                        >
+                            <MdRefresh className={`text-xl ${bulkRetryBusy ? 'animate-spin' : ''}`} />
+                            <span className="text-sm">
+                              {bulkRetryBusy ? 'Refreshing…' : `Refresh Offline (${offlineReceiverIds.length})`}
+                            </span>
                         </button>
                     )}
                     {/* Add receiver — only available in edit mode. Toggles an

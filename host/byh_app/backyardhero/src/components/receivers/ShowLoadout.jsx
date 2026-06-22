@@ -5,6 +5,8 @@ import {
   parseShellPackShellKey,
 } from "@/utils/shellUsageCounts";
 import { getTypeLabel } from "@/constants";
+import { audioFieldFromShow } from "@/utils/audioTracks";
+import { asyncAlert } from "@/components/common/AsyncPrompt";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MdDownload, MdPrint, MdArrowBack, MdSave } from 'react-icons/md';
 import html2canvas from 'html2canvas';
@@ -356,13 +358,24 @@ function ShowLoadout({ setCurrentTab }) {
   // consumers (the builder, ShowControl) already expect.
   const saveReceiverLocations = async () => {
     if (!stagedShow.id) {
-      alert("Please save the show first before saving receiver locations.");
+      await asyncAlert("Please save the show first before saving receiver locations.");
       return;
     }
 
     try {
+      // Rebuild the full audio blob from the staged tracks so this partial
+      // save doesn't clobber a multi-track show down to its first track --
+      // the API persists whatever `audioFile` we send as the show's entire
+      // `audio_file` column.
+      const audioBlob = Array.isArray(stagedShow.audioTracks) && stagedShow.audioTracks.length
+        ? audioFieldFromShow({
+            tracks: stagedShow.audioTracks,
+            audioOffsetMs: stagedShow.audioOffsetMs,
+          })
+        : (stagedShow.audioFile || null);
       const updatedShowData = {
         ...stagedShow,
+        audioFile: audioBlob,
         receiver_locations:
           receiverLocations && Object.keys(receiverLocations).length > 0
             ? JSON.stringify(receiverLocations)
@@ -370,10 +383,10 @@ function ShowLoadout({ setCurrentTab }) {
       };
 
       await updateShow(stagedShow.id, updatedShowData);
-      alert("Receiver locations saved successfully!");
+      await asyncAlert("Receiver locations saved successfully!");
     } catch (error) {
       console.error('Failed to save receiver locations:', error);
-      alert("Failed to save receiver locations. Please try again.");
+      await asyncAlert("Failed to save receiver locations. Please try again.");
     }
   };
 
@@ -714,7 +727,7 @@ function ShowLoadout({ setCurrentTab }) {
       pdf.save(`${showName.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_loadout.pdf`);
     } catch (error) {
       console.error('Error generating PDF:', error);
-      alert('Error generating PDF. Please try again.');
+      await asyncAlert('Error generating PDF. Please try again.');
     }
   };
 

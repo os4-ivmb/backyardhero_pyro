@@ -3,6 +3,7 @@ import axios from "axios";
 import { MdRefresh, MdAdd, MdDelete, MdSave } from "react-icons/md";
 import useAppStore from '@/store/useAppStore';
 import { extractYouTubeVideoId } from "@/util/youtube";
+import { asyncAlert } from "@/components/common/AsyncPrompt";
 
 // ---------------------------------------------------------------------------
 // YouTube IFrame Player API loader.
@@ -171,7 +172,7 @@ export default function ShotProfileModal({ isVisible, item, firingProfile, onClo
       // snaps to 0 ms (= start of shot sequence).
     } catch (err) {
       console.error("Failed to update start time:", err);
-      alert("Failed to update start time. Please try again.");
+      await asyncAlert("Failed to update start time. Please try again.");
     } finally {
       setIsUpdatingStart(false);
     }
@@ -505,7 +506,7 @@ export default function ShotProfileModal({ isVisible, item, firingProfile, onClo
       }
     } catch (error) {
       console.error('Error saving profile:', error);
-      alert('Failed to save profile. Please try again.');
+      await asyncAlert('Failed to save profile. Please try again.');
     } finally {
       setIsSaving(false);
     }
