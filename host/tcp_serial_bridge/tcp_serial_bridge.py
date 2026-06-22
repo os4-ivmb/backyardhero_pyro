@@ -369,6 +369,11 @@ def serial_to_tcp(client):
     global serial_conn
     POLL_INTERVAL_S = 0.001   # 1ms idle poll -- plenty fast for full-speed USB CDC
     last_disconnect_log = 0.0
+    # Monotonic timestamp of the last byte we actually read from serial.
+    # Drives the stale-handle watchdog (see SERIAL_SILENCE_TIMEOUT_S). Reset
+    # whenever we (re)open the port or park for flashing so a fresh handle
+    # gets a full silence window before we suspect it.
+    last_rx = time.monotonic()
     try:
         while True:
             if flashing:
@@ -376,6 +381,7 @@ def serial_to_tcp(client):
                 # no auto-reopen attempts, no reads. We come back to
                 # life once `flashing` clears.
                 time.sleep(0.1)
+                last_rx = time.monotonic()
                 continue
             if not (serial_conn and serial_conn.is_open):
                 # Try to auto-reopen instead of just waiting passively
@@ -383,6 +389,7 @@ def serial_to_tcp(client):
                 # may have rebooted (WDT, panic, operator replug) and
                 # we want to be back online as soon as it re-enumerates.
                 _try_auto_reopen()
+                last_rx = time.monotonic()
                 time.sleep(0.05)
                 continue
 
@@ -412,16 +419,38 @@ def serial_to_tcp(client):
                             pass
                         serial_conn = None
                 _try_auto_reopen()
+                last_rx = time.monotonic()
                 time.sleep(0.05)
                 continue
 
             if data:
+                last_rx = time.monotonic()
                 try:
                     client.sendall(data)
                 except OSError as e:
                     print(f"serial_to_tcp: client gone: {e}")
                     return
             else:
+                # No bytes this poll. A handle that's been open but silent
+                # for too long is a zombie (Windows sleep/resume): force a
+                # close + reopen so we recover without a physical replug.
+                if time.monotonic() - last_rx > SERIAL_SILENCE_TIMEOUT_S:
+                    now = time.monotonic()
+                    if now - last_disconnect_log > 2.0:
+                        print(f"serial_to_tcp: no serial traffic for "
+                              f"{SERIAL_SILENCE_TIMEOUT_S:.0f}s though the port "
+                              f"reports open; forcing reconnect (stale handle?)")
+                        last_disconnect_log = now
+                    with serial_lock:
+                        if serial_conn:
+                            try:
+                                serial_conn.close()
+                            except Exception:
+                                pass
+                            serial_conn = None
+                    _try_auto_reopen()
+                    last_rx = time.monotonic()
+                    continue
                 time.sleep(POLL_INTERVAL_S)
     except Exception as e:
         print(f"Error in serial_to_tcp: {e}")

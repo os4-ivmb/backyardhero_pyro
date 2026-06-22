@@ -989,13 +989,25 @@ class FireworkDaemon:
             elif command['type'] == 'select_serial':
                 self.switch_serial(command.get('device'), int(command.get('baud')))
             elif command['type'] == 'reboot_dongle':
-                # Host-requested soft reboot of the ESP32-S2 itself. We just
+                # Host-requested soft reboot of the ESP32-S2 itself. First
                 # send the `reboot` serial command; the firmware acks (C+
-                # reboot), flushes, and calls esp_restart(). The USB-CDC port
-                # then drops and re-enumerates within ~2s, and the bridge's
-                # auto-reconnect + our normal post-reconnect re-sync brings
-                # the link back -- no host-side teardown needed here.
+                # reboot), flushes, and calls esp_restart(), after which the
+                # USB-CDC port drops and re-enumerates within ~2s.
+                #
+                # Then force the serial link to re-establish via setup_serial
+                # (re-issues config_serial to the bridge). This matters when
+                # the dongle has gone "Silent" after a host sleep/resume: the
+                # bridge can be holding a stale USB-CDC handle that reports
+                # "open" but neither delivers the dongle's status frames nor
+                # actually carries our `reboot` bytes to the firmware. In that
+                # state the firmware never sees the reboot and the old comment's
+                # "auto-reconnect brings it back" never triggers (the dead
+                # handle raises no read error). Re-issuing config_serial makes
+                # the bridge close the stale fd and re-resolve the dongle (by
+                # VID if it moved COM ports), which is what actually recovers
+                # the link -- the same path the StatusBar "Restart" takes.
                 self.send_serial_command("reboot")
+                self.setup_serial()
             elif command['type'] == 'set_brightness':
                 brightness = int(command.get('brightness', 100))
                 if(int(brightness)==0):
