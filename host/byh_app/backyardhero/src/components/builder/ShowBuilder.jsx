@@ -102,7 +102,12 @@ const MULTIPLE_FIRE_TYPES = new Set([
   "AERIAL_SHELL",
 ]);
 
-const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, availableDevices, receiverLabels, showMetadata }) => {
+const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, availableDevices, receiverLabels, showMetadata, editItem }) => {
+  // editItem present => the modal is editing an already-placed cue rather than
+  // adding a new one. Same UI, but it pre-populates from the cue, keeps the
+  // existing start time, excludes the cue itself from occupancy checks, and on
+  // submit re-emits with the original id so the parent replaces in place.
+  const isEdit = !!editItem;
   const [selectedType, setSelectedType] = useState("CAKE_FOUNTAIN");
   const [selectedItem, setSelectedItem] = useState(null);
   const [fusedLine, setFusedLine] = useState(null); // Store the completed fused line
@@ -121,7 +126,41 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
 
   const supportsMultiple = MULTIPLE_FIRE_TYPES.has(selectedType) && !!selectedItem;
 
+  // Seed the form from the cue being edited each time the modal opens (or the
+  // target cue changes). Composite types (fused line, fused item line, rack
+  // shells) carry their structure on the item itself, so we stash the whole
+  // item back into the relevant builder slot and show its preview card.
   useEffect(() => {
+    if (!isOpen || !editItem) return;
+    const type = editItem.type || "CAKE_FOUNTAIN";
+    setSelectedType(type);
+    setFusedLine(type === "FUSED_SHELL_LINE" ? editItem : null);
+    setFusedItemLine(type === "FUSED_LINE" ? editItem : null);
+    setRackShells(type === "RACK_SHELLS" ? editItem : null);
+    if (
+      type === "FUSED_SHELL_LINE" ||
+      type === "FUSED_LINE" ||
+      type === "RACK_SHELLS" ||
+      type === "GENERIC"
+    ) {
+      setSelectedItem(null);
+    } else {
+      setSelectedItem(inventory.find((i) => i.id === editItem.itemId) || null);
+    }
+    setZone(editItem.zone ?? null);
+    setTarget(editItem.target ?? null);
+    setMetaLabel(editItem.name ?? "");
+    setMetaDelaySec(Number(editItem.metaDelaySec) || 0);
+    const m = Number(editItem.multiple) || 1;
+    setFireMultiple(m > 1);
+    setMultipleCount(m > 1 ? m : 2);
+    setError(null);
+  }, [isOpen, editItem, inventory]);
+
+  useEffect(() => {
+    // Don't auto-pick a default zone/target while editing -- the cue already
+    // has its routing, and the edit prefill sets it explicitly.
+    if (isEdit) return;
     if (availableDevices) {
       if (!zone) {
         const zones = Object.keys(availableDevices);
@@ -131,11 +170,12 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
         }
       }
     }
-  }, [availableDevices, zone]);
+  }, [availableDevices, zone, isEdit]);
 
-  // Helper function to check if a zone+target combination is occupied
+  // Helper function to check if a zone+target combination is occupied. The cue
+  // currently being edited never counts as occupying its own slot.
   const isOccupied = (zoneName, targetValue) => {
-    return items.some(item => item.zone === zoneName && item.target === targetValue);
+    return items.some(item => item.id !== editItem?.id && item.zone === zoneName && item.target === targetValue);
   };
 
   // Check if all targets in a zone are occupied
@@ -148,33 +188,36 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
   // Update target if current selection becomes occupied
   useEffect(() => {
     if (zone && target !== null && availableDevices[zone]) {
-      const isCurrentlyOccupied = items.some(item => item.zone === zone && item.target === target);
+      const isCurrentlyOccupied = items.some(item => item.id !== editItem?.id && item.zone === zone && item.target === target);
       if (isCurrentlyOccupied) {
         // Current target is occupied, find first available target in this zone
         const availableTarget = availableDevices[zone].find(
-          t => !items.some(item => item.zone === zone && item.target === t)
+          t => !items.some(item => item.id !== editItem?.id && item.zone === zone && item.target === t)
         );
         if (availableTarget !== undefined) {
           setTarget(availableTarget);
         }
       }
     }
-  }, [items, zone, target, availableDevices]);
+  }, [items, zone, target, availableDevices, editItem]);
 
   const filteredInventory = inventory.filter((item) => item.type === selectedType).sort((a, b) => a.name.localeCompare(b.name));
 
   const handleItemSelected = (item) => {
-    console.log("HAS")
-    if(metaLabel === ""){
-      setMetaLabel(item.name)
-    }
+    // Keep the label in sync with the chosen item as the user changes their
+    // pick. We only auto-update when the label is empty or still equals the
+    // previously selected item's name (i.e. it was auto-filled). If the user
+    // typed a custom label, we leave it alone.
+    setMetaLabel((prev) =>
+      !prev || prev === selectedItem?.name ? item.name : prev
+    );
 
     setSelectedItem(item)
   }
 
   const handleAdd = () => {
     const occupied = items.find(
-      (item) => item.zone === zone && item.target === target
+      (item) => item.id !== editItem?.id && item.zone === zone && item.target === target
     );
 
     if (occupied) {
@@ -182,6 +225,10 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
       return;
     }
     setError('');
+
+    // In edit mode, re-stamp the original id so the parent replaces the cue in
+    // place instead of appending a new one.
+    const emit = (obj) => onAdd(isEdit ? { ...obj, id: editItem.id } : obj);
 
 
     if (selectedItem) {
@@ -196,7 +243,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
         ? Math.max(2, Math.floor(multipleCount) || 2)
         : 1;
 
-      onAdd({ 
+      emit({ 
         ...selectedItem, 
         startTime, 
         zone, 
@@ -225,7 +272,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
         + (firstShell?.fuse_delay || 0)  // Time for first shell's fuse to burn
         + (firstShell?.lift_delay || 0);  // Time for first shell to lift
       
-      onAdd({ 
+      emit({ 
         ...fusedLine, 
         startTime, 
         zone, 
@@ -242,7 +289,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
       const firstStepFuseDelay = fusedItemLine.firstStepFuseDelay || 0;
       const delay = (metaDelaySec || 0) + firstStepFuseDelay;
 
-      onAdd({
+      emit({
         ...fusedItemLine,
         startTime,
         zone,
@@ -319,7 +366,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
         }
       }
       
-      onAdd({
+      emit({
         ...rackShells,
         startTime,
         zone,
@@ -332,7 +379,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
       onClose();
     } else if (selectedType === "GENERIC") {
       console.log("GENERIC ADD")
-      onAdd({ 
+      emit({ 
         name: "GENERIC",
         type: "GENERIC", 
         duration: 5,
@@ -429,8 +476,12 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
       <Modal
         isOpen={isOpen}
         onClose={onClose}
-        title="Add item to timeline"
-        eyebrow={`Cue · t = ${Number(startTime || 0).toFixed(2)}s`}
+        title={isEdit ? "Edit cue" : "Add item to timeline"}
+        eyebrow={
+          isEdit
+            ? `Cue · effect @ ${formatShowClock(startTime)}`
+            : `Cue · t = ${Number(startTime || 0).toFixed(2)}s`
+        }
         size="lg"
         footer={
           <>
@@ -442,7 +493,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
               onClick={handleAdd}
               disabled={!canAdd}
             >
-              Add to timeline
+              {isEdit ? "Save changes" : "Add to timeline"}
             </Button>
           </>
         }
@@ -798,6 +849,20 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
       )}
     </>
   );
+};
+
+// Format an absolute show time (seconds) as m:ss.SS. Negative times are kept
+// (a cue can fire "before" its effect time only conceptually; in practice fire
+// time = startTime - delay should be >= 0, but we don't clamp so operators can
+// see when a delay pushes a cue before the show start).
+export const formatShowClock = (sec) => {
+  if (!Number.isFinite(Number(sec))) return "—";
+  const v = Number(sec);
+  const sign = v < 0 ? "-" : "";
+  const a = Math.abs(v);
+  const m = Math.floor(a / 60);
+  const s = a - m * 60;
+  return `${sign}${m}:${s.toFixed(2).padStart(5, "0")}`;
 };
 
 const ChainTimingModal = ({ isOpen, onClose, onApply, selectedItems }) => {
@@ -2441,10 +2506,21 @@ const SAVEABLE_ITEM_ATTRIBUTES = [
   "fireableItemId", "fuse", "spacing", "leadInInches", "shells", "multiple",
   "steps", "firstStepFuseDelay",
 ];
+// Item fields that MUST persist as real numbers. A few authoring paths
+// (and older imported payloads) can leave these as strings, which then
+// breaks downstream consumers: the editor's Show Density concatenates
+// string durations into a >1e10 garbage value, and the daemon's
+// `startTime - delay` raises a TypeError mid-load so the show never
+// reaches the receivers. Coerce on save so the stored payload is clean.
+const NUMERIC_ITEM_ATTRIBUTES = new Set(["startTime", "duration", "delay"]);
+const coerceNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+
 const compressItemsForSave = (items) =>
   items.map((obj) =>
     SAVEABLE_ITEM_ATTRIBUTES.reduce((acc, key) => {
-      if (key in obj) acc[key] = obj[key];
+      if (key in obj) {
+        acc[key] = NUMERIC_ITEM_ATTRIBUTES.has(key) ? coerceNum(obj[key]) : obj[key];
+      }
       return acc;
     }, {})
   );
@@ -2496,7 +2572,13 @@ const ShowBuilder = (props) => {
   const [selectedItem, setSelectedItem] = useState(false);
   const [selectedItems, setSelectedItems] = useState([]);
   const [isChainTimingModalOpen, setIsChainTimingModalOpen] = useState(false);
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [editingItem, setEditingItem] = useState(null);
   const [isPopupVisible, setPopupVisible] = useState(false);
+  // Set right before a programmatic selection change (e.g. saving an edit) that
+  // should NOT auto-open the YouTube preview popup. The selection effect
+  // consumes and clears it.
+  const suppressVideoPopupRef = useRef(false);
   // Multi-track audio. The canonical list of tracks for the show; each
   // entry has its own URL, BPM, duration, etc. Tracks play sequentially
   // back-to-back with no gap. The "active" track is the one shown in
@@ -2885,6 +2967,12 @@ const ShowBuilder = (props) => {
 
   useEffect(() => {
     if (selectedItem) {
+      // Skip the auto-preview when the selection changed because the user just
+      // saved an edit -- popping the video on every save is jarring.
+      if (suppressVideoPopupRef.current) {
+        suppressVideoPopupRef.current = false;
+        return;
+      }
       if (selectedItem.youtube_link) {
         setPopupVisible(true);
       }
@@ -2925,6 +3013,40 @@ const ShowBuilder = (props) => {
   const clearSelection = () => {
     setSelectedItem(false);
     setSelectedItems([]);
+  };
+
+  // Edit an existing timeline item (opened via double-click on the timeline or
+  // the Edit button on the single-selection panel).
+  const openEditModal = (item) => {
+    if (!item) return;
+    setEditingItem(item);
+    setIsEditModalOpen(true);
+  };
+
+  const closeEditModal = () => {
+    setIsEditModalOpen(false);
+    setEditingItem(null);
+  };
+
+  const handleItemUpdate = (updated) => {
+    setItems((prevItems) =>
+      prevItems.map((it) => (it.id === updated.id ? updated : it))
+    );
+    // Keep the panel in sync with the edited values, but don't let this
+    // programmatic re-selection trigger the YouTube preview popup.
+    suppressVideoPopupRef.current = true;
+    setSelectedItem(updated);
+  };
+
+  const handleItemDelete = async (item) => {
+    if (!item) return;
+    const ok = await asyncConfirm({
+      message: `Remove "${item.name}" from the show?`,
+      destructive: true,
+    });
+    if (!ok) return;
+    setItems((prevItems) => prevItems.filter((it) => it.id !== item.id));
+    clearSelection();
   };
 
   // ---- Multi-track audio orchestration -----------------------------------
@@ -3600,6 +3722,56 @@ const ShowBuilder = (props) => {
             </Card>
           )}
 
+          {/* Single-selection panel: shows the selected cue's exact fire time
+              and exposes Edit / Delete. Hidden while a multi-select is active
+              (that has its own panel) or during a copy flow. */}
+          {selectedItem && selectedItems.length < 2 && !copyMode && (
+            <Card tone="raised" padding="sm" className="mb-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm text-fg-secondary min-w-0 flex items-center gap-x-4 gap-y-1 flex-wrap">
+                  <span className="font-medium text-fg-primary truncate max-w-[16rem]">
+                    {selectedItem.name}
+                  </span>
+                  <span className="text-fg-muted">
+                    {receiverLabels?.[selectedItem.zone] || selectedItem.zone}:
+                    {selectedItem.target}
+                  </span>
+                  <span>
+                    Fires{" "}
+                    <span className="num font-mono text-fg-primary">
+                      {formatShowClock(
+                        (Number(selectedItem.startTime) || 0) -
+                          (Number(selectedItem.delay) || 0)
+                      )}
+                    </span>
+                  </span>
+                  <span className="text-fg-muted">
+                    Effect{" "}
+                    <span className="num font-mono">
+                      {formatShowClock(Number(selectedItem.startTime) || 0)}
+                    </span>
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => openEditModal(selectedItem)}
+                  >
+                    Edit…
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    onClick={() => handleItemDelete(selectedItem)}
+                  >
+                    Delete
+                  </Button>
+                </div>
+              </div>
+            </Card>
+          )}
+
           <div className="mb-2 flex items-center justify-between gap-2 min-h-7">
             <div className="flex items-center gap-2 min-w-0 text-sm">
               {copyMode === "select-source" && (
@@ -3641,6 +3813,7 @@ const ShowBuilder = (props) => {
                 items={items}
                 setItems={setItems}
                 openAddModal={openAddModal}
+                openEditModal={openEditModal}
                 setSelectedItem={(item) => handleItemSelect(item, false)}
                 selectedItems={selectedItems}
                 onItemSelect={handleItemSelect}
@@ -3804,6 +3977,18 @@ const ShowBuilder = (props) => {
             onClose={closeModal}
             onAdd={addItemToTimeline}
             startTime={addItemStartTime}
+            items={items}
+            inventory={inventory}
+            availableDevices={availableDevices}
+            receiverLabels={receiverLabels}
+            showMetadata={showMetadata}
+          />
+          <AddItemModal
+            isOpen={isEditModalOpen}
+            onClose={closeEditModal}
+            onAdd={handleItemUpdate}
+            startTime={editingItem?.startTime || 0}
+            editItem={editingItem}
             items={items}
             inventory={inventory}
             availableDevices={availableDevices}

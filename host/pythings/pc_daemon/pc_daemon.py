@@ -1405,14 +1405,23 @@ class FireworkDaemon:
                 skipped.append((item_id, "missing startTime"))
                 continue
             try:
+                # startTime / delay can arrive as strings from older or
+                # externally-authored payloads. Coerce to float so the
+                # subtraction can't raise a TypeError and abort the whole
+                # load (which left the show unable to reach the receivers).
+                start_time = float(item['startTime'])
+                delay = float(item.get('delay', 0) or 0)
                 firing_array.append({
-                    'startTime': item['startTime'] - item['delay'],
+                    'startTime': start_time - delay,
                     'zone': item['zone'],
                     'target': item['target'],
                     'id': item['id'],
                 })
             except KeyError as ke:
                 skipped.append((item_id, f"missing key {ke}"))
+                continue
+            except (TypeError, ValueError) as ve:
+                skipped.append((item_id, f"non-numeric timing ({ve})"))
                 continue
 
         if skipped:

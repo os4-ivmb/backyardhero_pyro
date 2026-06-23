@@ -25,11 +25,20 @@ const Timeline = memo((props) => {
   // dblclick from the same gesture doesn't also pop the AddItemModal.
   const recentCopyPlaceRef = useRef(0);
 
-  const handleWheel = (e) => {
-    //e.preventDefault();
-    e.stopPropagation();
-    setZoom((prevZoom) => Math.max(0.1, prevZoom - e.deltaY * (prevZoom*0.001))); // Zoom with mouse wheel
-  };
+  // Wheel-to-zoom is registered as a native, non-passive listener (see effect
+  // below) because React attaches `onWheel` passively at the root, which makes
+  // `preventDefault()` a no-op and lets the page scroll while zooming.
+  useEffect(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setZoom((prevZoom) => Math.max(0.1, prevZoom - e.deltaY * (prevZoom * 0.001)));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
 
   const handleZoomIn = () => {
     setZoom((prevZoom) => Math.min(200, prevZoom * 1.2));
@@ -52,8 +61,34 @@ const Timeline = memo((props) => {
   const handleDragStart = (e, id) => {
     e.dataTransfer.setData("id", id);
     e.dataTransfer.setData("clx", e.clientX);
-    e.dataTransfer.setData("xEvtOffset", (e.clientX - e.target.getBoundingClientRect().left));
+    // currentTarget (not target) so the grab offset is measured against the
+    // draggable element itself even when the press lands on a child (e.g. the
+    // floating label of a short-duration cue), keeping drops accurate.
+    e.dataTransfer.setData("xEvtOffset", (e.clientX - e.currentTarget.getBoundingClientRect().left));
     e.dataTransfer.effectAllowed = "move";
+  };
+
+  // Fire time = when the daemon ignites the cue, which is the visual effect
+  // time minus the item's fuse/lift/lead-in delay. Surfaced in the bar tooltip
+  // (and the selection panel) so operators can poll the exact cue time.
+  const fireTimeOf = (item) => num(item.startTime) - num(item.delay);
+  const formatClock = (sec) => {
+    if (!Number.isFinite(sec)) return "—";
+    const sign = sec < 0 ? "-" : "";
+    const a = Math.abs(sec);
+    const m = Math.floor(a / 60);
+    const s = a - m * 60;
+    return `${sign}${m}:${s.toFixed(2).padStart(5, "0")}`;
+  };
+
+  const handleItemDoubleClick = (e, item) => {
+    if (isReadOnly) return;
+    if (props.copyMode) return;
+    // Stop the timeline-level dblclick (which opens the Add modal) from also
+    // firing, and open the edit flow for this item instead.
+    e.preventDefault();
+    e.stopPropagation();
+    props.openEditModal?.(item);
   };
 
   const handleDragOver = (e) => {
@@ -691,7 +726,6 @@ const Timeline = memo((props) => {
               ? "copy"
               : undefined,
         }}
-        onWheel={handleWheel}
         onDragOver={isReadOnly ? () => {} : handleDragOver}
         onDrop={isReadOnly ? () => {} : handleDrop}
         onScroll={handleScroll}
@@ -952,6 +986,11 @@ const Timeline = memo((props) => {
                   style={{
                     left: `${start}%`,
                     width: `${width}%`,
+                    // Short cues (shells, single rack shots) can compute to a
+                    // sub-pixel width, leaving only the 2px coloured border as a
+                    // grab target. Enforce a minimum so the whole bar stays
+                    // clickable/draggable.
+                    minWidth: "14px",
                     top: `${top * 40 + 20}px`,
                     backgroundColor: (INV_COLOR_CODE[item.type] || "#5a6470") + "B3",
                     borderLeft: `2px solid ${INV_COLOR_CODE[item.type] || "#5a6470"}`,
@@ -959,16 +998,21 @@ const Timeline = memo((props) => {
                   draggable
                   onDragStart={(e) => (isReadOnly ? (() => {}) : handleDragStart(e, item.id))}
                   onClick={(e) => handleItemClick(e, item)}
-                  title={`${item.name} @ ${props.receiverLabels?.[item.zone] || item.zone}:${item.target}`}
+                  onDoubleClick={(e) => handleItemDoubleClick(e, item)}
+                  title={`${item.name} @ ${props.receiverLabels?.[item.zone] || item.zone}:${item.target} · fires @ ${formatClock(fireTimeOf(item))}`}
                 />
 
-                {/* Label layer sits above shot overlays so cue metadata stays readable. */}
+                {/* Label layer. For wide bars it sits above the (grabbable) bar
+                    with pointer-events disabled. For short cues the label floats
+                    just outside the tiny bar, so we make the label itself the
+                    grab/select/edit handle -- otherwise the only target is the
+                    sliver of bar. */}
                 <div
                   className={cn(
-                    "absolute pointer-events-none flex items-center gap-1.5 text-xs",
+                    "absolute flex items-center gap-1.5 text-xs",
                     isShortDurationItem
-                      ? "px-2 rounded-sm bg-surface-base/90 border border-border-subtle shadow-e2"
-                      : "px-2 overflow-hidden"
+                      ? "px-2 rounded-sm bg-surface-base/90 border border-border-subtle shadow-e2 cursor-move"
+                      : "px-2 overflow-hidden pointer-events-none"
                   )}
                   style={{
                     left: isShortDurationItem
@@ -980,6 +1024,25 @@ const Timeline = memo((props) => {
                     height: "24px",
                     zIndex: 4,
                   }}
+                  draggable={isShortDurationItem && !isReadOnly ? true : undefined}
+                  onDragStart={
+                    isShortDurationItem && !isReadOnly
+                      ? (e) => handleDragStart(e, item.id)
+                      : undefined
+                  }
+                  onClick={
+                    isShortDurationItem ? (e) => handleItemClick(e, item) : undefined
+                  }
+                  onDoubleClick={
+                    isShortDurationItem
+                      ? (e) => handleItemDoubleClick(e, item)
+                      : undefined
+                  }
+                  title={
+                    isShortDurationItem
+                      ? `${item.name} @ ${props.receiverLabels?.[item.zone] || item.zone}:${item.target} · fires @ ${formatClock(fireTimeOf(item))}`
+                      : undefined
+                  }
                 >
                   <span
                     className="truncate text-white"

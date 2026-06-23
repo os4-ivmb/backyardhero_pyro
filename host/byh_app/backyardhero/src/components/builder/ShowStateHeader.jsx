@@ -125,6 +125,14 @@ function SaveStatusBadge({ status, lastSavedAt, hasShowId }) {
   );
 }
 
+// Coerce a timeline numeric (startTime / duration) to a real number.
+// Show payloads coming from different DBs / host versions sometimes carry
+// these as strings; without this the stats below silently break -- the
+// worst offender being `sum + item.duration`, which CONCATENATES strings
+// ("0" + "5" + "5" ...) and then divides, blowing Show Density up to a
+// >1e10 garbage value. Mirrors the same guard in Timeline.jsx.
+const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+
 export default function ShowStateHeader({
   items,
   showMetadata,
@@ -164,7 +172,7 @@ export default function ShowStateHeader({
     const usedTargets = new Set(items.map((item) => item.target)).size;
     // Calculate total duration of the show
     const latestEndTime = Math.max(
-      ...items.map((item) => item.startTime + item.duration)
+      ...items.map((item) => num(item.startTime) + num(item.duration))
     );
     const totalDurationSeconds = latestEndTime;
     const totalDuration = new Date(totalDurationSeconds * 1000)
@@ -172,7 +180,7 @@ export default function ShowStateHeader({
       .substr(14, 5);
 
     // Calculate closest fire (minimum time between any two startTimes)
-    const sortedStartTimes = items.map((item) => item.startTime).sort((a, b) => a - b);
+    const sortedStartTimes = items.map((item) => num(item.startTime)).sort((a, b) => a - b);
     let closestFire = Infinity;
     for (let i = 1; i < sortedStartTimes.length; i++) {
       const diff = sortedStartTimes[i] - sortedStartTimes[i - 1];
@@ -183,8 +191,8 @@ export default function ShowStateHeader({
     // Calculate max concurrency
     const timeline = [];
     items.forEach((item) => {
-      timeline.push({ time: item.startTime, type: "start" });
-      timeline.push({ time: item.startTime + item.duration, type: "end" });
+      timeline.push({ time: num(item.startTime), type: "start" });
+      timeline.push({ time: num(item.startTime) + num(item.duration), type: "end" });
     });
     timeline.sort((a, b) => a.time - b.time);
 
@@ -200,7 +208,7 @@ export default function ShowStateHeader({
     });
 
     // Calculate show density
-    const totalItemDurations = items.reduce((sum, item) => sum + item.duration, 0);
+    const totalItemDurations = items.reduce((sum, item) => sum + num(item.duration), 0);
     const showDensity =
       totalDurationSeconds > 0
         ? (totalItemDurations / totalDurationSeconds).toFixed(2)
