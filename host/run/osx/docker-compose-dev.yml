@@ -28,12 +28,17 @@ services:
       # staging dir directly.
       - ../../pythings:/app/pythings
       - ../../byh_app/backyardhero:/app/byh_app/
-      # Anonymous volumes shadow the host bind mount so the container
-      # keeps its own Linux-built node_modules + .next -- otherwise the
-      # macOS-built better_sqlite3.node leaks in and require() blows up
-      # with "invalid ELF header".
-      - /app/byh_app/node_modules
-      - /app/byh_app/.next
+      # NAMED volumes shadow the host bind mount so the container keeps its
+      # own Linux-built node_modules + .next -- otherwise the macOS-built
+      # better_sqlite3.node leaks in and require() blows up with "invalid
+      # ELF header". They're named (not anonymous) on purpose: anonymous
+      # volumes are orphaned on every `compose down` and a fresh pair is
+      # created on the next `up`, so each dev cycle stranded a ~1-2 GB
+      # node_modules volume (plus .next) inside Docker.raw, which only ever
+      # grows. Named volumes are reused across runs -- no accumulation, and
+      # startup is faster since node_modules persists.
+      - byh_node_modules:/app/byh_app/node_modules
+      - byh_next:/app/byh_app/.next
       - ../../supervisord.dev.conf:/etc/supervisor/conf.d/supervisord.conf
     ports:
       - "1776:1776"  # Next.js app
@@ -44,3 +49,10 @@ services:
       - LED_STATE_FILE=/data/ledstate
       - NODE_ENV=development
     privileged: true
+
+# Reused across dev runs so node_modules / .next aren't re-created (and
+# orphaned) on every up/down cycle. Reset them with:
+#   docker compose -f run/osx/docker-compose-dev.yml down --volumes
+volumes:
+  byh_node_modules:
+  byh_next:

@@ -110,11 +110,11 @@ export default function SupportTicketModal({ isOpen, onClose }) {
               <span className="font-mono font-semibold text-fg-primary">
                 {result.readable_id}
               </span>
-              . Hang on to it — the team can look it up directly.
+              . Hang on to it — we can look it up directly.
             </p>
           ) : (
             <p className="text-sm text-fg-secondary">
-              Thanks! Your report and diagnostics were sent to the team.
+              Thanks! Your report and diagnostics were sent to us.
             </p>
           )}
         </div>
@@ -123,7 +123,7 @@ export default function SupportTicketModal({ isOpen, onClose }) {
           <p className="rounded-sm border border-border bg-surface-inset px-3 py-2 text-xs text-fg-secondary">
             Submitting attaches a diagnostics snapshot — app + dongle versions,
             receiver states, daemon/state files, your staged show, and recent log
-            lines — so the team can debug without a back-and-forth.
+            lines — so we can debug without a back-and-forth.
           </p>
 
           <Field label="Title" htmlFor="st-title">
@@ -198,7 +198,7 @@ export default function SupportTicketModal({ isOpen, onClose }) {
           <Field
             label="Contact email"
             htmlFor="st-email"
-            hint="Optional — so the team can follow up with you."
+            hint="Optional — so we can follow up with you."
           >
             <input
               id="st-email"
