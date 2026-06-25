@@ -186,7 +186,13 @@ export async function collectDiagnostics({ stagedShowId = null, req } = {}) {
   const showList = Array.isArray(shows) ? shows : [];
   const findShow = (id) => {
     if (id == null) return null;
-    return showList.find((s) => String(s.id) === String(id)) || null;
+    const row = showList.find((s) => String(s.id) === String(id)) || null;
+    if (!row) return null;
+    // authorization_code is the show's launch code -- a plaintext password.
+    // Never ship it in a diagnostics dump.
+    return row.authorization_code !== undefined
+      ? { ...row, authorization_code: 'REDACTED' }
+      : row;
   };
   const stagedShow = findShow(stagedShowId);
   const loadedShowId = daemonState?.loaded_show_id ?? null;
