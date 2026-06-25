@@ -67,6 +67,15 @@ jobs:
         run: npm run build:resources
         env:
           BYH_INCLUDE_AUDIO: "1"
+          # In-app support ticket signing. Baked into resources/runtime-config.json
+          # (never committed) so the packaged app can sign + forward diagnostic bug
+          # reports to the cloud gateway's /api/app-reports. Must match
+          # APP_REPORT_SIGNING_SECRET on the gateway. When the secret is unset the
+          # build still succeeds; in-app reporting is just disabled in that build.
+          BYH_BUGREPORT_SECRET: ${{ secrets.BYH_BUGREPORT_SECRET }}
+          # Optional override of the cloud gateway base URL (defaults to
+          # https://cloud.backyard-hero.com in the app).
+          BYH_BUGREPORT_URL: ${{ vars.BYH_BUGREPORT_URL }}
 
       # Only export signing/notarization vars when the secret is actually
       # present. A bare `env: CSC_LINK: ${{ secrets.X }}` injects an EMPTY

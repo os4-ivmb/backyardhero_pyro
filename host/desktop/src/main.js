@@ -58,7 +58,21 @@ function seedConfigIfMissing(configDir) {
   }
 }
 
+// Read the build-time runtime config (resources/runtime-config.json). Baked by
+// scripts/build-resources.mjs from CI secrets/vars; absent in dev or when the
+// secret isn't configured, in which case the in-app support ticket falls back
+// to a "not configured" message. Best-effort: never throw on a missing/garbled
+// file.
+function loadRuntimeConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(resources.runtimeConfig, 'utf8')) || {};
+  } catch {
+    return {};
+  }
+}
+
 function buildEnv(dirs, serialPort) {
+  const runtimeCfg = loadRuntimeConfig();
   const ffmpegDir = path.dirname(resources.ffmpeg);
   const pathSep = isWin ? ';' : ':';
   const augmentedPath = fs.existsSync(ffmpegDir)
@@ -91,6 +105,12 @@ function buildEnv(dirs, serialPort) {
     // actual self-update is handled by electron-updater in this process.
     BYH_HOST_VERSION: app.getVersion(),
     BYH_DESKTOP: '1',
+    // In-app support ticket signing secret + cloud gateway URL. Baked at build
+    // time (CI) into resources/runtime-config.json; the Next /api/support route
+    // uses these to sign + forward diagnostic bug reports. Env wins over the
+    // baked file so a dev can override locally without rebuilding resources.
+    BYH_BUGREPORT_SECRET: process.env.BYH_BUGREPORT_SECRET || runtimeCfg.bugReportSecret || '',
+    BYH_BUGREPORT_URL: process.env.BYH_BUGREPORT_URL || runtimeCfg.bugReportUrl || '',
   };
 }
 

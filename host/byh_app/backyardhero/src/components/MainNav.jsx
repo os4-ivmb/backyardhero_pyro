@@ -2,11 +2,12 @@ import React, { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import { FaExplosion, FaGear, FaList } from "react-icons/fa6";
 import { FiTarget, FiEdit, FiRadio, FiFilm } from "react-icons/fi";
-import { MdAssignment, MdHome } from "react-icons/md";
+import { MdAssignment, MdHome, MdOutlineBugReport } from "react-icons/md";
 
 import useAppStore from "@/store/useAppStore";
 import useAppMode from "@/design/useAppMode";
 import useIsMobile from "@/design/useIsMobile";
+import { Button } from "@/design";
 import useShowReceiverVerification from "@/util/useShowReceiverVerification";
 import { HARDWARE } from "@/util/clientEnv";
 import AppShell from "./shell/AppShell";
@@ -36,6 +37,7 @@ const ShowLoadout = dynamic(() => import("./receivers/ShowLoadout"), { ssr: fals
 // shows (ShowPicker); the cloud profile hides Console, so we surface the same
 // picker as a dedicated "Shows" tab there.
 const ShowPicker = dynamic(() => import("./console/ShowPicker"), { ssr: false, loading });
+const SupportTicketModal = dynamic(() => import("./support/SupportTicketModal"), { ssr: false });
 
 import MobileMainNav from "./mobile/MobileMainNav";
 
@@ -68,6 +70,7 @@ function DesktopMainNav() {
     stagedShow, shows, inventoryById, hydrateStagedShowFromId, systemConfig,
   } = useAppStore();
   const [currTab, setCurrTab] = useState("main");
+  const [supportOpen, setSupportOpen] = useState(false);
   const hasStagedShow = Boolean(stagedShow?.id);
   const { mode } = useAppMode();
   // Deployment capabilities (from /api/system/config). Default to a hardware
@@ -139,6 +142,17 @@ function DesktopMainNav() {
           currentTab={currTab}
           onTabChange={setCurrTab}
           mode={mode}
+          rightSlot={
+            <Button
+              variant="ghost"
+              size="sm"
+              leading={<MdOutlineBugReport />}
+              onClick={() => setSupportOpen(true)}
+              title="Report a problem"
+            >
+              <span className="hidden lg:inline">Report a problem</span>
+            </Button>
+          }
         />
       }
       statusBar={<StatusBar />}
@@ -159,6 +173,7 @@ function DesktopMainNav() {
       {currTab === "loadout"   && <ShowLoadout setCurrentTab={setCurrTab} />}
       {currTab === "manual"    && <ManualFiring />}
       {currTab === "setting"   && <SettingsPanel />}
+      <SupportTicketModal isOpen={supportOpen} onClose={() => setSupportOpen(false)} />
     </AppShell>
   );
 }

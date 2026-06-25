@@ -178,6 +178,32 @@ class BYHProtocolHandler:
         print("Syncing tx host clock:", sync_message.strip())
         self.parent.send_serial_command(sync_message)
 
+    def on_dongle_reconnected(self):
+        """Self-heal after the dongle's USB serial was (re)opened by the bridge
+        -- hot-replug, sleep/resume, or a WDT soft-reset. A rebooted dongle
+        comes back with tsOffset=0 (boot-relative clock) and an EMPTY receiver
+        poll table, while the receivers themselves keep their loaded cues. That
+        combination is exactly the "show still shows loaded but fires zero
+        cues" failure: showloadn used relative offsets so the load looks fine,
+        but showstart ships absolute epoch ms against a boot-relative clock and
+        the dongle isn't even polling the receivers anymore.
+
+        Re-establish both halves the dongle lost on reboot: re-msync the host
+        wall clock so receiver clock-sync goes back to the epoch domain, and
+        re-register every receiver so the dongle's TDMA poller starts pinging
+        them again. The loaded-show state on this handler is intentionally
+        preserved -- the receivers still hold the cues, so once the dongle is
+        re-synced and re-polling, firing works without a reload."""
+        print("Dongle reconnect detected: re-syncing clock + re-registering receivers")
+        try:
+            self.sync_tx_clock()
+        except Exception as e:
+            print(f"WARN: msync after dongle reconnect failed: {e}")
+        try:
+            self._register_all_receivers_with_dongle()
+        except Exception as e:
+            print(f"WARN: receiver re-registration after dongle reconnect failed: {e}")
+
     def _load_receivers_from_db(self):
         """Read the Receivers table and project it into the legacy
         `{ ident: { label, type, cues, enabled, metadata, configuration_version } }`
@@ -609,6 +635,23 @@ class BYHProtocolHandler:
                 print(f"Show {self.show_id} not correct for {device_id}({status.get('showId')})")
                 false_device_ids.append(device_id)
         return false_device_ids
+
+    def invalidate_cached_start_ready(self):
+        """Clear any cached `startReady` flag for this show's async targets.
+
+        The start gate (get_async_load_targets_not_with_status('startReady'))
+        trusts the last per-receiver status frame. A receiver that signalled
+        startReady on a PRIOR start attempt for the same show id leaves that
+        flag latched True in our cache, so a fresh start would sail straight
+        past the wait loop without ever confirming THIS run's showstart
+        actually landed -- e.g. if showstart was dropped over a flaky link
+        right after a replug. Forcing the flag back to False makes the gate
+        wait for a fresh startReady reported in response to the showstart we're
+        about to send."""
+        for device_id in self.async_load_targets:
+            status = self.receivers.get(device_id, {}).get('status')
+            if status and 'startReady' in status:
+                status['startReady'] = False
 
 
     # Mapping from the dongle's abbreviated keys to the full-name dict
@@ -1679,6 +1722,28 @@ class BYHProtocolHandler:
             self.parent.write_error("Precheck failed. Aborting show.")
             return
 
+        # Re-sync the host->dongle wall clock immediately before every show
+        # start. This is the recovery path for the case where the dongle has
+        # rebooted WITHOUT the daemon noticing -- most commonly a USB hot-replug
+        # after the PC sleeps (BHWB-17 and the more-severe follow-up). On boot
+        # the dongle's tsOffset resets to 0, so its clock -- and every receiver's
+        # clock, which the dongle drives via CLOCK_SYNC -- is boot-relative.
+        # LOADING still works because `showloadn` carries *relative* cue offsets,
+        # so cue LEDs light correctly and the show reads as "loaded". But
+        # `showstart` below ships an *absolute* epoch-ms start time; against a
+        # boot-relative clock getSynchronizedTime() never reaches showStartTime,
+        # so receivers arm but NEVER fire -- the show "runs" on the host with
+        # zero cues on the field. The dongle firmware explicitly expects the
+        # daemon to re-msync after a replug (os4_dongle.ino handleReboot notes),
+        # but a silent bridge-only USB reopen never recreates the handler that
+        # would otherwise do it. Re-msyncing here makes the fire path
+        # self-healing: we re-align the dongle to epoch before computing/sending
+        # show_start_time, and the SHOW_START_TIME_SECONDS countdown gives the
+        # dongle's CLOCK_SYNC frames time to propagate the new offset to every
+        # receiver well before T-0.
+        self.sync_tx_clock()
+        time.sleep(0.2)  # let the dongle apply tsOffset before we sample time()
+
         # `show_start_time` is sent to receivers over the wire, so it
         # has to be in the wall-clock (epoch ms) domain that msync set
         # up. `show_start_monotonic` is the same instant expressed on
@@ -1691,6 +1756,11 @@ class BYHProtocolHandler:
         self.show_start_time = round(time.time()*1000)+(SHOW_START_TIME_SECONDS*1000)
         show_start_monotonic = time.monotonic() + SHOW_START_TIME_SECONDS
         print("Signaling connected async nodes to start")
+        # Drop any latched startReady from a prior start attempt so the wait
+        # loop below confirms THIS showstart was actually accepted, instead of
+        # trusting stale status (e.g. a showstart dropped over a flaky post-
+        # replug link).
+        self.invalidate_cached_start_ready()
         self.send_to_active_nodes("showstart",f" {self.show_start_time} 0 {self.show_id}", 6, self.async_load_targets)
 
         print("Waiting on start accept")

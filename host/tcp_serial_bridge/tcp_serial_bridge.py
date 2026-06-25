@@ -348,6 +348,32 @@ def process_command(command_data, client_socket):
         print(f"Error processing command: {e}")
         return False
 
+def _notify_serial_reopened(client):
+    """Tell the connected daemon that we just (re)opened the USB serial port.
+
+    This is the missing link behind the "show loads but never fires after a
+    hot-replug / sleep-resume" bug: when the dongle reboots (physical replug,
+    WDT soft-reset, or the zombie-handle watchdog below) we transparently
+    reopen the serial handle here WITHOUT the daemon's TCP session ever
+    dropping. The daemon therefore never re-runs `msync` / receiver
+    registration, so the rebooted dongle's clock stays boot-relative and
+    autonomous receiver firing silently never triggers.
+
+    Emitting an explicit event lets the daemon self-heal (re-msync + re-poll
+    receivers) on every reopen, not just on a full TCP reconnect. The leading
+    newline guards against splicing onto a partial dongle line left in the
+    daemon's receive buffer when the old handle died mid-frame.
+    """
+    if not client:
+        return
+    try:
+        msg = {'type': 'serial_event', 'event': 'reopened',
+               'port': SERIAL_CONFIG.get('port')}
+        client.sendall(('\n' + json.dumps(msg) + '\n').encode('utf-8'))
+    except Exception as e:
+        print(f"_notify_serial_reopened: could not notify client: {e}")
+
+
 def serial_to_tcp(client):
     """Forward data from serial to TCP client.
 
@@ -388,7 +414,8 @@ def serial_to_tcp(client):
                 # for a config_serial command to revive us. The dongle
                 # may have rebooted (WDT, panic, operator replug) and
                 # we want to be back online as soon as it re-enumerates.
-                _try_auto_reopen()
+                if _try_auto_reopen():
+                    _notify_serial_reopened(client)
                 last_rx = time.monotonic()
                 time.sleep(0.05)
                 continue
@@ -411,17 +438,18 @@ def serial_to_tcp(client):
                     print(f"serial_to_tcp: read error ({e}); "
                           f"will auto-reconnect")
                     last_disconnect_log = now
-                with serial_lock:
-                    if serial_conn:
-                        try:
-                            serial_conn.close()
-                        except Exception:
-                            pass
-                        serial_conn = None
-                _try_auto_reopen()
-                last_rx = time.monotonic()
-                time.sleep(0.05)
-                continue
+                    with serial_lock:
+                        if serial_conn:
+                            try:
+                                serial_conn.close()
+                            except Exception:
+                                pass
+                            serial_conn = None
+                    if _try_auto_reopen():
+                        _notify_serial_reopened(client)
+                    last_rx = time.monotonic()
+                    time.sleep(0.05)
+                    continue
 
             if data:
                 last_rx = time.monotonic()
@@ -448,7 +476,8 @@ def serial_to_tcp(client):
                             except Exception:
                                 pass
                             serial_conn = None
-                    _try_auto_reopen()
+                    if _try_auto_reopen():
+                        _notify_serial_reopened(client)
                     last_rx = time.monotonic()
                     continue
                 time.sleep(POLL_INTERVAL_S)

@@ -32,6 +32,10 @@ COMMAND_POLL_INTERVAL_S = 0.05
 CURSOR_FILE = os.path.join(_RUN_DIR, "fw_cursor")
 SERIAL_PORT = os.environ.get("SERIAL_PORT", "/dev/ttyACM0")
 BAUD_RATE = int(os.environ.get("SERIAL_BAUD", "115200"))
+# Collapse bursts of bridge "serial reopened" events (a flapping USB link can
+# fire several in a row) into a single dongle resync so we don't spam msync /
+# receiver-registration traffic at the dongle.
+DONGLE_RESYNC_DEBOUNCE_S = 2.0
 # Where the tcp_serial_bridge is reachable. Inside Docker the daemon dials
 # the host loopback via host.docker.internal (Docker Desktop on mac/Win
 # resolves this natively; on Linux/Pi it's wired up via extra_hosts). On a
@@ -599,6 +603,58 @@ class FireworkDaemon:
             backoff = min(backoff * 2, 5.0)
         return False
 
+    def _halt_show_for_handler_swap(self):
+        """Signal a currently-running show to stop before we throw away the
+        protocol handler that owns its stop/pause Events.
+
+        run_show() polls `schedule_stop_event` on its OWN handler instance. If
+        we replace self.protocol_handler while a show thread is alive, that
+        thread keeps watching the now-orphaned old handler's event -- which
+        nobody will ever set -- and keeps "running" (and emitting serial) until
+        the show timeline naturally ends. Set the old handler's stop event so
+        the thread exits promptly. We don't join here: this runs on the read
+        thread and the show thread is daemonized, so a bounded signal is enough
+        and avoids stalling serial RX."""
+        old = getattr(self, 'protocol_handler', None)
+        if old is not None and getattr(old, 'running_show', False):
+            print("Stopping in-flight show before swapping protocol handler.")
+            try:
+                old.schedule_stop_event.set()
+                old.running_show = False
+            except Exception as e:
+                print(f"WARN: could not stop old show on handler swap: {e}")
+            self.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
+
+    def _handle_serial_reopened(self, msg=None):
+        """React to the bridge reporting that it (re)opened the dongle's USB
+        serial port. Debounced, and run off the read thread so the receiver
+        re-registration sleeps in on_dongle_reconnected() don't stall serial
+        RX."""
+        now = time.monotonic()
+        last = getattr(self, '_last_dongle_resync_ts', 0.0)
+        if now - last < DONGLE_RESYNC_DEBOUNCE_S:
+            return
+        self._last_dongle_resync_ts = now
+        port = (msg or {}).get('port')
+        print(f"Bridge reopened dongle serial ({port}); resyncing dongle state.")
+        handler = getattr(self, 'protocol_handler', None)
+        if not handler:
+            # No handler yet -- the normal assign path will build one and its
+            # __init__ already msyncs + registers receivers.
+            return
+        self.led_handler.update("tx_active", TX_ACTIVE_STATE.CONNECTED.value)
+        threading.Thread(
+            target=self._dongle_resync_worker,
+            args=(handler,),
+            daemon=True,
+        ).start()
+
+    def _dongle_resync_worker(self, handler):
+        try:
+            handler.on_dongle_reconnected()
+        except Exception as e:
+            print(f"WARN: dongle resync after serial reopen failed: {e}")
+
     def read_from_tcp(self):
         """Read data from the TCP socket and process it like serial data."""
         while self.running:
@@ -653,7 +709,26 @@ class FireworkDaemon:
                                                     print("Acked serial set")
                                                 self.serial_addr = tcpsrvmsg['serial_config'].get('port')
                                                 self.serial_baud = tcpsrvmsg['serial_config'].get('baud')
+                                                # Replacing the handler abandons
+                                                # the events any in-flight run_show
+                                                # thread is watching. Signal the old
+                                                # one to stop first so a stale show
+                                                # thread can't keep "running" (and
+                                                # writing) against the dead handler.
+                                                self._halt_show_for_handler_swap()
                                                 self.protocol_handler = BYHProtocolHandler(self)
+                                        elif(tcpsrvmsg.get('type') == 'serial_event'):
+                                            # The bridge transparently reopened
+                                            # the dongle's USB serial (hot-replug,
+                                            # sleep-resume, WDT reboot) without our
+                                            # TCP session dropping. A rebooted
+                                            # dongle comes up with a boot-relative
+                                            # clock and an empty receiver poll
+                                            # table, so a loaded show would still
+                                            # appear loaded but never fire. Re-sync
+                                            # + re-register so firing self-heals.
+                                            bypass = True
+                                            self._handle_serial_reopened(tcpsrvmsg)
                                         elif('gpio' in tcpsrvmsg):
                                             if(self.debug_enabled()):
                                                 print("GPIO set")

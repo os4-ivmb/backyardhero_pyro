@@ -23,7 +23,7 @@
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
-import { mkdir, rm, cp, access, readFile } from 'node:fs/promises';
+import { mkdir, rm, cp, access, readFile, writeFile } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
@@ -229,12 +229,37 @@ async function copySources() {
   log('Sources + config seed -> resources/');
 }
 
+// --- 4. Build-time runtime config (secrets) --------------------------------
+// Bakes the in-app support-ticket signing secret + cloud gateway URL into
+// resources/runtime-config.json so the packaged Electron supervisor can inject
+// them into the Next server's env (see desktop/src/main.js). This file is NEVER
+// committed (resources/ is gitignored); CI provides BYH_BUGREPORT_SECRET as a
+// GitHub Actions secret. Absent secret => the in-app reporter shows a
+// "not configured" message instead of failing the build.
+async function writeRuntimeConfig() {
+  const cfg = {
+    bugReportSecret: process.env.BYH_BUGREPORT_SECRET || '',
+    bugReportUrl: process.env.BYH_BUGREPORT_URL || '',
+  };
+  await mkdir(RES, { recursive: true });
+  await writeFile(
+    path.join(RES, 'runtime-config.json'),
+    JSON.stringify(cfg, null, 2),
+  );
+  log(
+    cfg.bugReportSecret
+      ? 'Wrote runtime-config.json (bug-report secret present)'
+      : 'Wrote runtime-config.json (NO BYH_BUGREPORT_SECRET set -- in-app reporting will be disabled in this build)',
+  );
+}
+
 async function main() {
   log(`Platform ${process.platform}/${process.arch}, audio=${INCLUDE_AUDIO}`);
   await mkdir(RES, { recursive: true });
   await buildNext();
   await buildPython();
   await copySources();
+  await writeRuntimeConfig();
   log('Done. Now run: npx electron-builder');
 }
 

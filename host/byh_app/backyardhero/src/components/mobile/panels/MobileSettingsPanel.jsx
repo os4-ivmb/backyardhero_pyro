@@ -4,8 +4,9 @@ import {
   MdOutlineRouter, MdOutlineWifi, MdStorage, MdArrowBack,
 } from "react-icons/md";
 
-import { Section, Card, CardHeader, cn } from "@/design";
+import { Section, Card, CardHeader, Button, cn } from "@/design";
 import useAppStore from "@/store/useAppStore";
+import SupportTicketModal from "../../support/SupportTicketModal";
 
 import BrightnessSlider from "../../settings/BrightnessSlider";
 import TransmitRepetitionCount from "../../settings/TransmitRepetitionCount";
@@ -184,6 +185,7 @@ const SECTION_RENDERERS = {
 export default function MobileSettingsPanel() {
   const host = useAppStore((s) => s.systemConfig?.host);
   const [active, setActive] = useState(null);
+  const [supportOpen, setSupportOpen] = useState(false);
 
   const visibleSections = useMemo(
     () => SECTIONS.filter((s) => s.visible(host)),
@@ -232,6 +234,23 @@ export default function MobileSettingsPanel() {
             ))}
           </ul>
         </Section>
+
+        <div className="mt-4">
+          <Button
+            variant="outline"
+            size="md"
+            leading={<MdOutlineBugReport />}
+            onClick={() => setSupportOpen(true)}
+            className="w-full"
+          >
+            Report a problem
+          </Button>
+        </div>
+
+        <SupportTicketModal
+          isOpen={supportOpen}
+          onClose={() => setSupportOpen(false)}
+        />
       </div>
     );
   }

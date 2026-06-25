@@ -53,6 +53,10 @@ const resources = {
   // bridge as BYH_DEVICES_UTILS_DIR (no repo tree exists in the bundle).
   devicesUtilsDir: path.join(resourcesRoot, 'devices', 'utils'),
   defaultConfig: path.join(resourcesRoot, 'config', 'systemcfg.json'),
+  // Build-time secrets/config baked by scripts/build-resources.mjs (NOT
+  // committed -- resources/ is gitignored). Holds the shared bug-report
+  // signing secret + cloud gateway URL the in-app support ticket uses.
+  runtimeConfig: path.join(resourcesRoot, 'runtime-config.json'),
   // ffmpeg is optional (only the firing-profile audio feature needs it).
   ffmpeg: path.join(resourcesRoot, 'ffmpeg', isWin ? 'ffmpeg.exe' : 'ffmpeg'),
 };
