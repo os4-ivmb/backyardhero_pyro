@@ -120,6 +120,10 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
   const [target, setTarget] = useState(null);
   const [metaLabel, setMetaLabel] = useState("");
   const [metaDelaySec, setMetaDelaySec] = useState(0);
+  // Duration (seconds) for GENERIC / placeholder cues. Other item types
+  // derive duration from their inventory item / composite structure, so
+  // this is only surfaced and used when selectedType === "GENERIC".
+  const [metaDuration, setMetaDuration] = useState(5);
   const [fireMultiple, setFireMultiple] = useState(false);
   const [multipleCount, setMultipleCount] = useState(2);
   const [error, setError] = useState(null);
@@ -151,6 +155,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
     setTarget(editItem.target ?? null);
     setMetaLabel(editItem.name ?? "");
     setMetaDelaySec(Number(editItem.metaDelaySec) || 0);
+    setMetaDuration(type === "GENERIC" ? Number(editItem.duration) || 5 : 5);
     const m = Number(editItem.multiple) || 1;
     setFireMultiple(m > 1);
     setMultipleCount(m > 1 ? m : 2);
@@ -382,7 +387,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
       emit({ 
         name: "GENERIC",
         type: "GENERIC", 
-        duration: 5,
+        duration: Number(metaDuration) || 0,
         startTime, 
         zone, 
         target, 
@@ -403,6 +408,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
     setIsRackShellsOpen(false);
     setMetaLabel("");
     setMetaDelaySec(0);
+    setMetaDuration(5);
     setFireMultiple(false);
     setMultipleCount(2);
   };
@@ -720,6 +726,25 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
               placeholder="Auto-fills from item name"
             />
           </Field>
+
+          {selectedType === "GENERIC" && (
+            <Field
+              label="Duration (sec)"
+              hint="How long this placeholder cue occupies the timeline."
+            >
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                className={inputClass}
+                value={metaDuration}
+                onChange={(e) =>
+                  setMetaDuration(parseFloat(e.target.value) || 0)
+                }
+                placeholder="5"
+              />
+            </Field>
+          )}
 
           <Field
             label="Additional delay (sec)"
@@ -2505,6 +2530,10 @@ const SAVEABLE_ITEM_ATTRIBUTES = [
   "delay", "rackId", "rackCells", "rackName", "rackSpacing", "fireableItem",
   "fireableItemId", "fuse", "spacing", "leadInInches", "shells", "multiple",
   "steps", "firstStepFuseDelay",
+  // Marks a cue that originated from the show-import flow (see
+  // util/showImport). Kept so the "Imported" badge survives a builder
+  // re-save, since there is no dedicated DB column for the marker.
+  "importSource",
 ];
 // Item fields that MUST persist as real numbers. A few authoring paths
 // (and older imported payloads) can leave these as strings, which then

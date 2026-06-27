@@ -1,13 +1,15 @@
 import React, { useState, useMemo } from "react";
 import axios from "axios";
-import { FaMusic, FaTrashAlt } from "react-icons/fa";
-import { FiPlay } from "react-icons/fi";
+import { FaMusic, FaTrashAlt, FaArrowDown } from "react-icons/fa";
+import { FiPlay, FiDownload } from "react-icons/fi";
 
 import useAppStore from "@/store/useAppStore";
 import { Section, Card, Button, IconButton, Badge } from "@/design";
 import { computeShowStats, formatShowCreatedAt } from "@/util/showStats";
 import { parseAudioField } from "@/utils/audioTracks";
 import { asyncConfirm } from "@/components/common/AsyncPrompt";
+import { isImportedShow } from "@/util/showImport/isImportedShow";
+import ImportShowModal from "@/components/console/import/ImportShowModal";
 
 // Empty-state surface for the console: a clean picker for staging shows.
 // Replaces:
@@ -32,6 +34,7 @@ export default function ShowPicker({
 } = {}) {
   const { shows, deleteShow, setStagedShow, inventoryById, loadedShow } = useAppStore();
   const [filter, setFilter] = useState("");
+  const [importOpen, setImportOpen] = useState(false);
 
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -71,13 +74,23 @@ export default function ShowPicker({
         title={title}
         description={description}
         actions={
-          <input
-            type="search"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            placeholder="Search shows…"
-            className="h-9 w-56 px-3 rounded-sm bg-surface-1 border border-border text-sm text-fg-primary placeholder:text-fg-muted focus:border-accent"
-          />
+          <div className="flex items-center gap-2">
+            <input
+              type="search"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Search shows…"
+              className="h-9 w-56 px-3 rounded-sm bg-surface-1 border border-border text-sm text-fg-primary placeholder:text-fg-muted focus:border-accent"
+            />
+            <Button
+              size="md"
+              variant="outline"
+              leading={<FiDownload />}
+              onClick={() => setImportOpen(true)}
+            >
+              Import Show
+            </Button>
+          </div>
         }
       >
         {filtered.length === 0 ? (
@@ -112,6 +125,17 @@ export default function ShowPicker({
                             <span>·</span>
                             <span className="inline-flex items-center gap-1 text-accent">
                               <FaMusic aria-hidden /> Audio
+                            </span>
+                          </>
+                        ) : null}
+                        {isImportedShow(show) ? (
+                          <>
+                            <span>·</span>
+                            <span
+                              className="inline-flex items-center gap-1 text-fg-secondary"
+                              title="Imported show"
+                            >
+                              <FaArrowDown aria-hidden /> Imported
                             </span>
                           </>
                         ) : null}
@@ -151,6 +175,11 @@ export default function ShowPicker({
           </div>
         )}
       </Section>
+
+      <ImportShowModal
+        isOpen={importOpen}
+        onClose={() => setImportOpen(false)}
+      />
     </div>
   );
 }
