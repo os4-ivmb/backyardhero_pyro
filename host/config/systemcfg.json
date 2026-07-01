@@ -1,6 +1,6 @@
 {
   "_README": "Git-tracked BASE config. Operator overrides (dongle port/baud, protocol config, default_location) live in systemcfg.user.json (NOT git-tracked) and are layered on top at read time. Edit settings from the UI, not here.",
-  "host_version": "0.30.14",
+  "host_version": "0.30.15",
   "system": {
     "dongle_port": "/dev/tty.usbmodem01",
     "dongle_baud": 115200,
@@ -11,7 +11,8 @@
       "label": "Backyard Hero v0.1",
       "config": {
         "min_battery_to_fire_pct": 30,
-        "require_continuity": true
+        "require_continuity": true,
+        "show_end_grace_seconds": 5
       }
     }
   },
