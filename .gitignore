@@ -26,6 +26,7 @@ host/byh_app/backyardhero/public/uploads/
 devices/os4_receiver/.build/
 devices/os4_dongle/.build/
 host/data/backyardhero.db.backup*
+host/data/last_scan.json
 
 
 # Next.js

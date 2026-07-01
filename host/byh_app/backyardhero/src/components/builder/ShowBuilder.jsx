@@ -102,7 +102,7 @@ const MULTIPLE_FIRE_TYPES = new Set([
   "AERIAL_SHELL",
 ]);
 
-const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, availableDevices, receiverLabels, showMetadata, editItem }) => {
+const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, items, inventory, availableDevices, receiverLabels, showMetadata, editItem }) => {
   // editItem present => the modal is editing an already-placed cue rather than
   // adding a new one. Same UI, but it pre-populates from the cue, keeps the
   // existing start time, excludes the cue itself from occupancy checks, and on
@@ -505,6 +505,14 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, items, inventory, ava
         }
       >
         <div className="flex flex-col gap-4">
+          {insertMode && !isEdit ? (
+            <div className="rounded-sm border border-accent/40 bg-accent-muted px-3 py-2 text-xs text-accent-fg">
+              Insert mode — cues at or after{" "}
+              <span className="num">{formatShowClock(startTime)}</span> will
+              shift later by this item&apos;s duration to make room.
+            </div>
+          ) : null}
+
           <Field label="Item type">
             <select
               className={selectClass}
@@ -2598,6 +2606,10 @@ const ShowBuilder = (props) => {
   const [showMetadata, setShowMetadata] = useState({});
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [addItemStartTime, setAddItemStartTime] = useState(0);
+  // When true, the pending add came from a Shift + double-click: on commit we
+  // push every existing cue at/after the insertion point back by the new
+  // item's duration so it slots into the middle of the show.
+  const [addItemInsertMode, setAddItemInsertMode] = useState(false);
   const [selectedItem, setSelectedItem] = useState(false);
   const [selectedItems, setSelectedItems] = useState([]);
   const [isChainTimingModalOpen, setIsChainTimingModalOpen] = useState(false);
@@ -2979,19 +2991,41 @@ const ShowBuilder = (props) => {
     setShowMetadata({name:""});
   };
 
-  const openAddModal = (time) => {
+  const openAddModal = (time, opts = {}) => {
     setAddItemStartTime(time);
+    setAddItemInsertMode(!!opts.insert);
     setIsAddModalOpen(true);
   };
 
   const closeModal = () => {
     setIsAddModalOpen(false);
+    // Clear insert mode so a cancelled insert doesn't leak into the next add
+    // (e.g. a copy/place, which calls addItemToTimeline directly).
+    setAddItemInsertMode(false);
   };
 
   const addItemToTimeline = (item) => {
     item.id = currentIndex;
     setCurrentIndex((currentIndex) => currentIndex + 1);
-    setItems((prevItems) => [...prevItems, item]);
+
+    // Insert mode (Shift + double-click): make room for the new cue by
+    // shifting every existing cue at/after the insertion point back by the
+    // new item's duration. A non-positive duration needs no room, so we just
+    // append. `addItemInsertMode` only applies to the add-modal path; the
+    // copy/place path calls this directly with it false.
+    const insert = addItemInsertMode;
+    const insertPoint = Number(item.startTime) || 0;
+    const shiftBy = Number(item.duration) || 0;
+    setItems((prevItems) => {
+      if (!insert || shiftBy <= 0) return [...prevItems, item];
+      const shifted = prevItems.map((it) =>
+        (Number(it.startTime) || 0) >= insertPoint
+          ? { ...it, startTime: (Number(it.startTime) || 0) + shiftBy }
+          : it
+      );
+      return [...shifted, item];
+    });
+    setAddItemInsertMode(false);
   };
 
   useEffect(() => {
@@ -4006,6 +4040,7 @@ const ShowBuilder = (props) => {
             onClose={closeModal}
             onAdd={addItemToTimeline}
             startTime={addItemStartTime}
+            insertMode={addItemInsertMode}
             items={items}
             inventory={inventory}
             availableDevices={availableDevices}

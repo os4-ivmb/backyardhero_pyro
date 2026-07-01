@@ -23,6 +23,9 @@ export default function ProtocolConfig() {
       ? cfg.min_battery_to_fire_pct
       : 30,
     require_continuity: !!cfg.require_continuity,
+    show_end_grace_seconds: Number.isFinite(cfg.show_end_grace_seconds)
+      ? cfg.show_end_grace_seconds
+      : 5,
   };
   const draft = useDraft(upstream);
 
@@ -49,6 +52,10 @@ export default function ProtocolConfig() {
             config: {
               min_battery_to_fire_pct: parseInt(s.min_battery_to_fire_pct, 10),
               require_continuity: !!s.require_continuity,
+              show_end_grace_seconds: Math.max(
+                0,
+                Number.parseFloat(s.show_end_grace_seconds) || 0,
+              ),
             },
           },
         },
@@ -92,6 +99,27 @@ export default function ProtocolConfig() {
         label="Require continuity check"
         description="Only fire cues that report continuity at start time. Off by default."
       />
+
+      <Field
+        label="Show end grace period"
+        htmlFor="show-end-grace"
+        hint="Extra time the show is held as running after the last cue's duration ends. Keeps audio playback and the timeline alive through song tails and finale effects. Receivers still finish on their own. Default 5s."
+      >
+        <div className="relative w-32">
+          <input
+            id="show-end-grace"
+            type="number"
+            min={0}
+            step={0.5}
+            value={draft.state.show_end_grace_seconds ?? ""}
+            onChange={(e) => draft.set("show_end_grace_seconds", e.target.value)}
+            className={inputClass + " num tabular-nums pr-7"}
+          />
+          <span className="pointer-events-none absolute inset-y-0 right-2.5 flex items-center text-2xs text-fg-muted">
+            s
+          </span>
+        </div>
+      </Field>
 
       <SaveBar
         dirty={draft.dirty}

@@ -1872,6 +1872,67 @@ class BYHProtocolHandler:
                 self.fire_item(item)
                 print(f"Executing scheduled command: {item}")
             print("All commands fired.")
+
+            # The last cue FIRING is not the end of the show. Each cue keeps
+            # playing for its `duration` (a shell's rise+break, a cake's run,
+            # etc.), so the real content end is the latest cue end across the
+            # whole array -- not just the last-fired cue, since an earlier cue
+            # with a long duration can outlast it. On top of that the operator
+            # can configure a grace period so the host keeps reporting the show
+            # as running for a few extra seconds (song tails, finale smoke,
+            # etc.). Receivers finishing after their last cue is expected and
+            # fine; this wait only governs how long the HOST considers the show
+            # live so the UI (audio playback, cursor) doesn't stop early.
+            content_end = max(
+                (it['startTime'] + it.get('duration', 0) for it in self.firing_array),
+                default=0,
+            )
+            grace_seconds = 0.0
+            try:
+                grace_seconds = max(0.0, float(self.config.get('show_end_grace_seconds', 0) or 0))
+            except (TypeError, ValueError):
+                grace_seconds = 0.0
+            show_end = content_end + grace_seconds
+            print(
+                f"Last cue fired. Holding show live until content end "
+                f"{content_end:.2f}s + grace {grace_seconds:.2f}s = {show_end:.2f}s"
+            )
+
+            while (time.monotonic() - start_time_monotonic) < (show_end + pause_offset):
+                if self.schedule_stop_event.is_set():
+                    print("Schedule stopped during post-show grace.")
+                    self.running_show = False
+                    self.status = START_SEQUENCE_STEPS.ABORTED
+                    self.parent.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
+                    self.send_to_active_nodes("stop", " 0", 5)
+                    return
+                if self.schedule_pause_event.is_set():
+                    print("Schedule paused during post-show grace.")
+                    pause_start = time.monotonic()
+                    self.send_to_active_nodes("pause", " 0", 5)
+                    while self.schedule_pause_event.is_set():
+                        time.sleep(0.1)
+                        if self.schedule_stop_event.is_set():
+                            print("Schedule stopped.")
+                            self.send_to_active_nodes("stop", " 0", 5)
+                            self.parent.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
+                            self.running_show = False
+                            self.status = START_SEQUENCE_STEPS.ABORTED
+                            return
+                    if pause_start:
+                        pause_offset += (time.monotonic() - pause_start)
+                        pause_start = 0
+                    print("Schedule resumed.")
+                    self.parent.led_handler.update("show_run_state", RUN_STATE.RUNNING.value)
+                    self.send_to_active_nodes("play", " 0", 5)
+
+                time.sleep(0.01)
+                self.time_cursor = round((time.monotonic() - start_time_monotonic + pause_offset), 2)
+                if time.monotonic() - last_write_time >= 1:
+                    self.parent.write_time_cursor(self.time_cursor)
+                    last_write_time = time.monotonic()
+
+            print("Show grace period complete.")
             self.running_show = False
             self.parent.led_handler.update("show_run_state", RUN_STATE.OFF.value)
             self.status = START_SEQUENCE_STEPS.LOADED

@@ -1486,8 +1486,15 @@ class FireworkDaemon:
                 # load (which left the show unable to reach the receivers).
                 start_time = float(item['startTime'])
                 delay = float(item.get('delay', 0) or 0)
+                # `duration` is the cue's on-air length (e.g. a shell's rise +
+                # break, or a cake's run time). It's carried through so the
+                # daemon knows the show's real content end -- the last cue can
+                # FIRE early but still be "playing" for its duration -- which
+                # drives the post-show grace wait in run_show().
+                duration = float(item.get('duration', 0) or 0)
                 firing_array.append({
                     'startTime': start_time - delay,
+                    'duration': duration,
                     'zone': item['zone'],
                     'target': item['target'],
                     'id': item['id'],

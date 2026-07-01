@@ -144,7 +144,9 @@ const Timeline = memo((props) => {
       e.clientX - timelineRef.current.getBoundingClientRect().left + timelineOffset;
     const timelineWidth = timelineRef.current.scrollWidth;
     const startTime = (clickX / timelineWidth) * 3600; // Convert position to time in seconds
-    props.openAddModal(startTime); // Call parent function to open the modal
+    // Hold Shift while double-clicking to INSERT: the parent shifts every cue
+    // at/after this time back by the new item's duration, making room for it.
+    props.openAddModal(startTime, { insert: e.shiftKey });
   };
 
   const handleDrop = (e) => {
@@ -169,6 +171,30 @@ const Timeline = memo((props) => {
       const isMultiSelectDrag = selectedItems.some(item => item.id === parseInt(id));
       // Hold Alt while dropping to bypass snap (DAW-style override).
       const snapActive = useBeatsGrid && snapToBeat && !e.altKey;
+
+      // Shift-drag ripple: move the dragged item AND every cue at/after its
+      // original start by the same amount, so you can open (or close) a gap in
+      // the middle of the show in one gesture. Multi-select drag keeps its own
+      // relative-timing behaviour, so this only applies to a single-item drag.
+      if (e.shiftKey && !(isMultiSelectDrag && selectedItems.length > 1)) {
+        const draggedItem = items.find((item) => item.id === parseInt(id));
+        if (draggedItem) {
+          let timeOffset = xform * 2;
+          if (snapActive) {
+            const targetStart = num(draggedItem.startTime) + timeOffset;
+            timeOffset = snapTimeToBeat(targetStart) - num(draggedItem.startTime);
+          }
+          const anchor = num(draggedItem.startTime);
+          setItems((prevItems) =>
+            prevItems.map((item) =>
+              num(item.startTime) >= anchor
+                ? { ...item, startTime: num(item.startTime) + timeOffset }
+                : item
+            )
+          );
+          return;
+        }
+      }
 
       if (isMultiSelectDrag && selectedItems.length > 1) {
         // Handle multi-item drag - maintain relative timing.
