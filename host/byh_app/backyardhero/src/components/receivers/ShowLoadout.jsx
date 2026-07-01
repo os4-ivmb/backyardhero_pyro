@@ -2,6 +2,7 @@ import useAppStore from "@/store/useAppStore"
 import useStateAppStore from "@/store/useStateAppStore";
 import {
   buildShellUsageCountsFromRackCellAssignments,
+  buildShellUsageCountsFromShowItems,
   parseShellPackShellKey,
 } from "@/utils/shellUsageCounts";
 import { getTypeLabel } from "@/constants";
@@ -308,7 +309,16 @@ function ShowLoadout({ setCurrentTab }) {
   };
 
   const shellsToPackByPack = useMemo(() => {
-    const usage = buildShellUsageCountsFromRackCellAssignments(stagedShow?.items, racks);
+    // Prefer counting the physical rack cells the show's RACK_SHELLS cues point
+    // at. If those racks aren't available (rack grid no longer holds shell data,
+    // or /api/racks didn't resolve for this show), fall back to the shell
+    // snapshot each cue persists in fireableItem.cellData so the packing counts
+    // still render. RackShellsSelector prevents reusing a physical cell across
+    // cues, so both sources yield the same per-shell counts.
+    let usage = buildShellUsageCountsFromRackCellAssignments(stagedShow?.items, racks);
+    if (!usage.size) {
+      usage = buildShellUsageCountsFromShowItems(stagedShow?.items);
+    }
     if (!usage.size) return [];
 
     const packShells = new Map();

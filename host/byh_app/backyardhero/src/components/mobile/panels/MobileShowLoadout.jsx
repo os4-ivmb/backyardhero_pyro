@@ -9,6 +9,7 @@ import { Card, Section, Button, Badge, cn } from "@/design";
 import { getTypeLabel } from "@/constants";
 import {
   buildShellUsageCountsFromRackCellAssignments,
+  buildShellUsageCountsFromShowItems,
   parseShellPackShellKey,
 } from "@/utils/shellUsageCounts";
 
@@ -629,7 +630,13 @@ export default function MobileShowLoadout({ setCurrentTab }) {
   // Group rack-shell usage by shell pack -- same shape as the desktop
   // "Shells" section: pack -> [{ shellNumber, count, description }].
   const shellsToPackByPack = useMemo(() => {
-    const usage = buildShellUsageCountsFromRackCellAssignments(stagedShow?.items, racks);
+    // Prefer the physical rack cells the RACK_SHELLS cues point at; if those
+    // racks aren't available, fall back to the shell snapshot each cue persists
+    // in fireableItem.cellData so counts still render (see ShowLoadout.jsx).
+    let usage = buildShellUsageCountsFromRackCellAssignments(stagedShow?.items, racks);
+    if (!usage.size) {
+      usage = buildShellUsageCountsFromShowItems(stagedShow?.items);
+    }
     if (!usage.size) return [];
 
     const packShells = new Map();
