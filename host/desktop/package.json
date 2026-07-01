@@ -1,7 +1,7 @@
 {
   "name": "backyardhero-desktop",
   "productName": "Backyard Hero",
-  "version": "0.30.15",
+  "version": "0.30.16",
   "description": "Backyard Hero host - desktop bundle (Next.js UI + Python services + serial bridge) for macOS and Windows.",
   "private": true,
   "main": "src/main.js",
