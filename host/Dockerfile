@@ -28,6 +28,7 @@ RUN set -eux; \
     python3-dev \
     supervisor \
     ffmpeg \
+    alsa-utils \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

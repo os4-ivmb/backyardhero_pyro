@@ -3,10 +3,18 @@ import { MdClose } from "react-icons/md";
 import { FaImage } from "react-icons/fa6";
 
 import useAppStore from "@/store/useAppStore";
-import { Section, Button, IconButton, Card } from "@/design";
+import { Section, Button, IconButton, Card, cn } from "@/design";
 
 import InventoryList from "./InventoryList";
-import { INV_TYPES } from "@/constants";
+import { INV_TYPES, INV_COLOR_CODE, DEFAULT_ITEM_COLOR } from "@/constants";
+
+// Quick-pick swatches for the inventory timeline-colour field.
+const COLOR_PALETTE = [
+  "#3b82f6", "#26b0ff", "#06b6d4", "#22c55e", "#23cf53", "#eab308",
+  "#f59e0b", "#f97316", "#ef4444", "#ec4899", "#c026d3", "#a855f7",
+  "#8b5cf6", "#ffffff", "#94a3b8", "#000000",
+];
+
 import { normalizeYouTubeUrl } from "@/util/youtube";
 import { parseOptionalUnitCost } from "@/util/inventoryUnitCost";
 import { apiUrl, PROFILE } from "@/util/clientEnv";
@@ -218,7 +226,7 @@ export function FuseFields({ formObject, handleInputChange }) {
   );
 }
 
-const AddInventoryForm = (props) => {
+export const AddInventoryForm = (props) => {
   const [formObject, setFormObject] = useState(props.activeItem || DEFAULT_DATA);
   const [isNewItem, setIsNewItem] = useState(props.activeItem || DEFAULT_DATA);
 
@@ -340,6 +348,55 @@ const AddInventoryForm = (props) => {
               placeholder="0.00" className={inputClass}
             />
           </Field>
+          {formObject.type !== "FUSE" && (
+            <Field
+              label="Timeline colour (optional)"
+              hint="Overrides the type's default colour on the timeline. Leave as default to inherit."
+            >
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="color"
+                    value={formObject.color || INV_COLOR_CODE[formObject.type] || DEFAULT_ITEM_COLOR}
+                    onChange={(e) => setFormObject((prev) => ({ ...prev, color: e.target.value }))}
+                    className="h-9 w-12 shrink-0 rounded-sm border border-border bg-surface-1 cursor-pointer"
+                    aria-label="Timeline colour"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setFormObject((prev) => ({ ...prev, color: "" }))}
+                    disabled={!formObject.color}
+                    title="Reset to the type's default colour"
+                    className="h-9 px-3 rounded-sm border border-border text-sm text-fg-secondary hover:text-fg-primary hover:bg-surface-2 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Reset
+                  </button>
+                  <span className="text-xs text-fg-muted truncate">
+                    {formObject.color ? formObject.color : "Using type default"}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {COLOR_PALETTE.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => setFormObject((prev) => ({ ...prev, color: c }))}
+                      title={c}
+                      aria-label={`Set colour ${c}`}
+                      className={cn(
+                        "h-6 w-6 rounded-sm border",
+                        (formObject.color || "").toLowerCase() === c.toLowerCase()
+                          ? "ring-2 ring-accent border-transparent"
+                          : "border-border"
+                      )}
+                      style={{ backgroundColor: c }}
+                    />
+                  ))}
+                </div>
+              </div>
+            </Field>
+          )}
+
           <ImageField
             value={formObject.image}
             onChange={(v) => setFormObject((prev) => ({ ...prev, image: v }))}

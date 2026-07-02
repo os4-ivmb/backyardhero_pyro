@@ -443,7 +443,7 @@ const SpatialLayoutMap = ({
   }, [hoveredPair, markers, distanceGrid]);
 
   return (
-    <div className="mt-8">
+    <div>
       <div className="flex items-center justify-between mb-3 print:hidden gap-3 flex-wrap">
         <div>
           <h2 className="text-xl font-bold">Receiver Layout</h2>
