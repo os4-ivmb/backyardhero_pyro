@@ -3362,7 +3362,11 @@ const ShowBuilder = (props) => {
   };
 
   const openAddModal = (time, opts = {}) => {
-    if (!requireInventory()) return;
+    // Don't gate on inventory here: the Add modal also supports GENERIC cues
+    // (name + typed duration) that need no inventory item, so an operator with
+    // an empty inventory can still lay out a show. The inventory-item flows
+    // (target-grid "+", drag-from-inventory) keep their own requireInventory
+    // gate.
     setAddPresetItem(null);
     setAddPresetTarget(null);
     setAddItemStartTime(time);
