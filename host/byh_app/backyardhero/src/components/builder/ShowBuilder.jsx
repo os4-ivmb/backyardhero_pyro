@@ -3748,6 +3748,9 @@ const ShowBuilder = (props) => {
     const onKey = (e) => {
       if (e.code !== "Space" && e.key !== " ") return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+      // Don't toggle playback behind an open modal / inline form (same guard
+      // the ⌘/Ctrl+S handler uses); the design-system Modal sets role="dialog".
+      if (typeof document !== "undefined" && document.querySelector('[role="dialog"]')) return;
       const el = e.target;
       const tag = el?.tagName;
       if (
