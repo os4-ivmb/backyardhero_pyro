@@ -66,7 +66,11 @@ export default function HostAudioSettings() {
 
   const dirty = useMemo(() => JSON.stringify(draft) !== baseline, [draft, baseline]);
 
-  const persist = async (next) => {
+  // `keepDraftLatency` is set by the discrete auto-commit controls: they save
+  // their own change but must NOT commit a start-trim the operator has typed
+  // but not yet confirmed via the SaveBar, so we leave the in-progress
+  // deviceLatencyMs edit sitting in the draft (still dirty) after saving.
+  const persist = async (next, { keepDraftLatency = false } = {}) => {
     setError(null);
     setSaving(true);
     try {
@@ -82,8 +86,8 @@ export default function HostAudioSettings() {
         },
       };
       await saveSystemConfig(body);
-      setDraft(next);
       setBaseline(JSON.stringify(next));
+      setDraft((d) => (keepDraftLatency ? { ...next, deviceLatencyMs: d.deviceLatencyMs } : next));
       setSavedAt(Date.now());
     } catch (e) {
       console.error("Failed to save host audio settings:", e);
@@ -94,9 +98,22 @@ export default function HostAudioSettings() {
   };
 
   // The enable toggle and the device dropdown auto-commit (discrete choices);
-  // the numeric start-trim uses the SaveBar since it's fiddled.
-  const onToggle = (enabled) => persist({ ...draft, enabled });
-  const onDevice = (deviceId) => persist({ ...draft, deviceId });
+  // the numeric start-trim uses the SaveBar since it's fiddled. Both commit
+  // against the last-SAVED start-trim (from `baseline`), never the operator's
+  // unconfirmed draft value, so flipping the toggle doesn't sneak an unsaved
+  // trim edit through.
+  const committedLatencyMs = () => {
+    try {
+      const v = JSON.parse(baseline)?.deviceLatencyMs;
+      return Number.isFinite(v) ? v : draft.deviceLatencyMs;
+    } catch {
+      return draft.deviceLatencyMs;
+    }
+  };
+  const onToggle = (enabled) =>
+    persist({ ...draft, deviceLatencyMs: committedLatencyMs(), enabled }, { keepDraftLatency: true });
+  const onDevice = (deviceId) =>
+    persist({ ...draft, deviceLatencyMs: committedLatencyMs(), deviceId }, { keepDraftLatency: true });
 
   const onReset = () => {
     setDraft(normalize(systemConfig));
