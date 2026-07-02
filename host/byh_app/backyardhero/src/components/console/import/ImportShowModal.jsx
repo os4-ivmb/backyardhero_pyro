@@ -5,8 +5,10 @@ import useAppStore from "@/store/useAppStore";
 import StepsHeader from "./StepsHeader";
 import Step1SelectSource from "./Step1SelectSource";
 import Step2ResolveReceivers from "./Step2ResolveReceivers";
+import Step3MatchItems from "./Step3MatchItems";
 import Step3Finalize from "./Step3Finalize";
 import CueListModal from "./CueListModal";
+import ResolveItemsModal from "./ResolveItemsModal";
 
 import {
   IMPORT_SOURCES,
@@ -15,11 +17,13 @@ import {
   createConverter,
 } from "@/util/showImport/registry";
 import { BaseShowConverter } from "@/util/showImport/BaseShowConverter";
+import { autoMatchLabels } from "@/util/showImport/itemMatch";
 
 const STEPS = [
   { id: 1, label: "Select & upload" },
   { id: 2, label: "Resolve receivers" },
-  { id: 3, label: "Confirm" },
+  { id: 3, label: "Match items" },
+  { id: 4, label: "Confirm" },
 ];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -33,6 +37,8 @@ export default function ImportShowModal({ isOpen, onClose, onImported }) {
   const dbReceivers = useAppStore((s) => s.receivers);
   const createShow = useAppStore((s) => s.createShow);
   const systemConfig = useAppStore((s) => s.systemConfig);
+  const inventory = useAppStore((s) => s.inventory);
+  const inventoryById = useAppStore((s) => s.inventoryById);
 
   const protocolKeys = useMemo(
     () => Object.keys(systemConfig?.protocols || {}),
@@ -60,6 +66,10 @@ export default function ImportShowModal({ isOpen, onClose, onImported }) {
 
   const [cueModal, setCueModal] = useState({ open: false, key: null });
 
+  // Cue-name -> inventory id matches, plus the resolve window's open state.
+  const [itemMatches, setItemMatches] = useState({});
+  const [resolveOpen, setResolveOpen] = useState(false);
+
   // Reset everything whenever the modal (re)opens.
   useEffect(() => {
     if (!isOpen) return;
@@ -78,6 +88,8 @@ export default function ImportShowModal({ isOpen, onClose, onImported }) {
     setSaving(false);
     setSaveError(null);
     setCueModal({ open: false, key: null });
+    setItemMatches({});
+    setResolveOpen(false);
   }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const source = getImportSource(sourceId);
@@ -141,7 +153,9 @@ export default function ImportShowModal({ isOpen, onClose, onImported }) {
       await sleep(180);
       setConversion(conv);
       setResolutions(init);
-      setName((n) => n || deriveName(file.name));
+      // Seed cue-name -> inventory matches from the current inventory.
+      setItemMatches(autoMatchLabels(conv.cues, inventory));
+      setName((n) => n || conv.suggestedName || deriveName(file.name));
       setStep(2);
     } catch (e) {
       setProcessError(e?.message || "Failed to process the file.");
@@ -155,9 +169,15 @@ export default function ImportShowModal({ isOpen, onClose, onImported }) {
     setResolutions((prev) => ({ ...prev, [key]: id }));
   };
 
+  const handleSetMatch = (label, id) => {
+    setItemMatches((prev) => ({ ...prev, [label]: id }));
+  };
+
+  const goToMatch = () => setStep(3);
+
   const goToFinalize = () => {
     if (!protocol) setProtocol(protocolKeys[0] || "");
-    setStep(3);
+    setStep(4);
   };
 
   const handleCreate = async () => {
@@ -170,6 +190,8 @@ export default function ImportShowModal({ isOpen, onClose, onImported }) {
         name: name.trim(),
         authorization_code: authCode.trim(),
         protocol,
+        itemMatches,
+        inventoryById,
       });
       const id = await createShow(payload);
       if (!id) {
@@ -219,14 +241,24 @@ export default function ImportShowModal({ isOpen, onClose, onImported }) {
           <Button variant="outline" onClick={() => setStep(1)}>
             Back
           </Button>
-          <Button variant="primary" onClick={goToFinalize} disabled={!allResolved}>
+          <Button variant="primary" onClick={goToMatch} disabled={!allResolved}>
             Continue
           </Button>
         </>
       ) : null}
       {step === 3 ? (
         <>
-          <Button variant="outline" onClick={() => setStep(2)} disabled={saving}>
+          <Button variant="outline" onClick={() => setStep(2)}>
+            Back
+          </Button>
+          <Button variant="primary" onClick={goToFinalize}>
+            Continue
+          </Button>
+        </>
+      ) : null}
+      {step === 4 ? (
+        <>
+          <Button variant="outline" onClick={() => setStep(3)} disabled={saving}>
             Back
           </Button>
           <Button
@@ -285,6 +317,15 @@ export default function ImportShowModal({ isOpen, onClose, onImported }) {
           ) : null}
 
           {step === 3 ? (
+            <Step3MatchItems
+              conversion={conversion}
+              itemMatches={itemMatches}
+              inventoryById={inventoryById}
+              onOpenResolve={() => setResolveOpen(true)}
+            />
+          ) : null}
+
+          {step === 4 ? (
             <Step3Finalize
               conversion={conversion}
               name={name}
@@ -305,6 +346,14 @@ export default function ImportShowModal({ isOpen, onClose, onImported }) {
         onClose={() => setCueModal({ open: false, key: null })}
         receiver={cueModalReceiver}
         resolvedLabel={cueModalResolvedLabel}
+      />
+
+      <ResolveItemsModal
+        isOpen={resolveOpen}
+        onClose={() => setResolveOpen(false)}
+        cues={conversion?.cues}
+        itemMatches={itemMatches}
+        onSetMatch={handleSetMatch}
       />
     </>
   );
