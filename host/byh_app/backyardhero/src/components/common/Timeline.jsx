@@ -236,6 +236,7 @@ const TimelineItem = memo(function TimelineItem({
             pointerEvents: "auto",
             touchAction: canDrag ? "none" : undefined,
           }}
+          data-cue
           onPointerDown={(e) => handlers.pointerDown(e, item)}
           onClick={(e) => handlers.click(e, item)}
           onDoubleClick={(e) => handlers.doubleClick(e, item)}
@@ -321,6 +322,7 @@ const TimelineItem = memo(function TimelineItem({
           borderLeft: `2px solid ${color}`,
           touchAction: canDrag ? "none" : undefined,
         }}
+        data-cue
         onPointerDown={(e) => handlers.pointerDown(e, item)}
         onClick={(e) => handlers.click(e, item)}
         onDoubleClick={(e) => handlers.doubleClick(e, item)}
@@ -515,7 +517,14 @@ const Timeline = memo((props) => {
     e.stopPropagation();
     clearTooltip();
     setSwapSourceId(null);
-    setCtxMenu({ x: e.clientX, y: e.clientY, item });
+    // Right-clicking a cue that's part of a 2+ multi-selection opens the group
+    // menu (acts on every selected cue); otherwise the single-item menu.
+    const sel = props.selectedItems || [];
+    if (sel.length >= 2 && sel.some((s) => s.id === item.id)) {
+      setCtxMenu({ x: e.clientX, y: e.clientY, multi: sel });
+    } else {
+      setCtxMenu({ x: e.clientX, y: e.clientY, item });
+    }
   };
 
   const openBackgroundContextMenu = (e) => {
@@ -601,6 +610,42 @@ const Timeline = memo((props) => {
     setItems((prev) => prev.map((it) => (it.id === item.id ? { ...it, locked: !it.locked } : it)));
   };
 
+  // ---- Multi-selection context-menu actions --------------------------------
+  // These act on the snapshot captured when the menu opened (ctxMenu.multi).
+
+  const handleMultiDelete = async () => {
+    const sel = ctxMenu?.multi || [];
+    closeCtxMenu();
+    if (sel.length === 0) return;
+    if (await asyncConfirm({
+      message: `Remove ${sel.length} cues from the show?`,
+      destructive: true,
+    })) {
+      const ids = new Set(sel.map((s) => s.id));
+      setItems((prev) => prev.filter((it) => !ids.has(it.id)));
+      props.clearSelection?.();
+    }
+  };
+
+  const handleMultiLock = () => {
+    const sel = ctxMenu?.multi || [];
+    closeCtxMenu();
+    const ids = new Set(sel.map((s) => s.id));
+    setItems((prev) => prev.map((it) => (ids.has(it.id) ? { ...it, locked: true } : it)));
+    // Locked cues leave the multi-selection (they can't be multi-dragged).
+    props.clearSelection?.();
+  };
+
+  const handleMultiChain = () => {
+    closeCtxMenu();
+    props.onChainSelected?.();
+  };
+
+  const handleMultiClear = () => {
+    closeCtxMenu();
+    props.clearSelection?.();
+  };
+
   // ---- Hover tooltip (start/end time) --------------------------------------
   // Shows an item's start + end time, but only after the pointer has been
   // still over it for 1s. Any movement re-arms the 1s timer and hides an
@@ -653,6 +698,18 @@ const Timeline = memo((props) => {
   // otherwise `{ base }` — the dragged cue's snapped start (multi-drag derives
   // every other selected cue's start from it via the delta, see effectiveItems).
   const [dragOverride, setDragOverride] = useState(null);
+  // ---- Marquee (rubber-band) multi-select --------------------------------
+  // Dragging across empty timeline background draws a selection rectangle and
+  // highlights every unlocked cue it intersects, committing the set to the
+  // parent's multi-selection on release. `marqueeRef` holds the in-flight
+  // gesture (content-px coords); `marquee`/`marqueeIds` drive the overlay +
+  // live highlight. `pointerOnItemRef` is set by a cue's own pointerdown (which
+  // bubbles to the body) so the body handler knows not to start a marquee.
+  const marqueeRef = useRef(null);
+  const marqueeAttachedRef = useRef(null);
+  const pointerOnItemRef = useRef(false);
+  const [marquee, setMarquee] = useState(null); // { x0, y0, x1, y1 } | null
+  const [marqueeIds, setMarqueeIds] = useState(null); // Set<id> | null
   // Horizontal scroll position as a % of the inner content width. Drives the
   // "sticky" cue labels so they stay visible while any of a cue is on screen.
   const [viewLeftPct, setViewLeftPct] = useState(0);
@@ -819,6 +876,10 @@ const Timeline = memo((props) => {
   const onItemPointerDown = (e, item) => {
     if (isReadOnly || props.copyMode || swapSourceId != null) return;
     if (e.button !== 0) return; // left button only
+    // Landed on a cue -- the body's pointerdown fires next (bubbling); flag it
+    // so the body doesn't also start a marquee. Set even for locked cues so a
+    // marquee never begins on top of one.
+    pointerOnItemRef.current = true;
     if (item.locked) return;    // locked cues don't move
     const selected = props.selectedItems || [];
     const isMulti = selected.length > 1 && selected.some((s) => s.id === item.id);
@@ -849,6 +910,116 @@ const Timeline = memo((props) => {
 
   // Safety: tear down drag listeners if the component unmounts mid-gesture.
   useEffect(() => detachDragListeners, []);
+
+  // ---- Marquee (rubber-band) select helpers -------------------------------
+  // Convert an absolute client point to coordinates inside the scrolling
+  // content div (the same frame item positions live in), so a marquee rect and
+  // the cue rects can be intersection-tested directly.
+  const contentPointFromClient = (clientX, clientY) => {
+    const el = timelineRef.current;
+    if (!el) return { x: 0, y: 0 };
+    const rect = el.getBoundingClientRect();
+    return {
+      x: clientX - rect.left + el.scrollLeft,
+      y: clientY - rect.top + el.scrollTop,
+    };
+  };
+
+  // A cue's on-screen rect in content px. Mirrors the render: horizontal from
+  // startTime/duration over the full content width, vertical from its stacked
+  // row (rowOf) using the same rowH/barH/topPad the bars use. Width floors at
+  // the 14px min-bar so zero/short cues are still catchable.
+  const marqueeItemRect = (item) => {
+    const el = timelineRef.current;
+    const w = (el && el.scrollWidth) || 1;
+    const leftPx = (num(item.startTime) / maxTime) * w;
+    const widthPx = Math.max((num(item.duration) / maxTime) * w, 14);
+    const row = rowOf.get(item.id) ?? 0;
+    const topPx = row * rowH + topPad;
+    return { left: leftPx, right: leftPx + widthPx, top: topPx, bottom: topPx + barH };
+  };
+
+  const idsInMarquee = (m) => {
+    const x0 = Math.min(m.x0, m.x1), x1 = Math.max(m.x0, m.x1);
+    const y0 = Math.min(m.y0, m.y1), y1 = Math.max(m.y0, m.y1);
+    const ids = new Set();
+    effectiveItems.forEach((it) => {
+      if (it.locked) return; // locked cues can't join a multi-selection
+      const r = marqueeItemRect(it);
+      if (r.left <= x1 && r.right >= x0 && r.top <= y1 && r.bottom >= y0) ids.add(it.id);
+    });
+    return ids;
+  };
+
+  const detachMarqueeListeners = () => {
+    const a = marqueeAttachedRef.current;
+    if (!a) return;
+    window.removeEventListener("pointermove", a.move);
+    window.removeEventListener("pointerup", a.up);
+    marqueeAttachedRef.current = null;
+  };
+
+  const onMarqueePointerMove = (e) => {
+    const m = marqueeRef.current;
+    if (!m) return;
+    // Threshold so a plain background click doesn't spawn a rectangle (and
+    // steal the click that clears the selection / moves the cursor).
+    if (!m.moved &&
+        Math.abs(e.clientX - m.startClientX) < 4 &&
+        Math.abs(e.clientY - m.startClientY) < 4) return;
+    m.moved = true;
+    const p = contentPointFromClient(e.clientX, e.clientY);
+    m.x1 = p.x;
+    m.y1 = p.y;
+    const rect = { x0: m.x0, y0: m.y0, x1: p.x, y1: p.y };
+    setMarquee(rect);
+    setMarqueeIds(idsInMarquee(rect));
+  };
+
+  const onMarqueePointerUp = () => {
+    const m = marqueeRef.current;
+    marqueeRef.current = null;
+    detachMarqueeListeners();
+    if (typeof document !== "undefined") document.body.style.userSelect = "";
+    setMarquee(null);
+    setMarqueeIds(null);
+    if (!m || !m.moved) return; // no drag => let the normal click handler run
+    // Swallow the trailing click so handleTimelineClick doesn't clear what we
+    // just selected.
+    suppressNextClickRef.current = true;
+    const ids = idsInMarquee({ x0: m.x0, y0: m.y0, x1: m.x1, y1: m.y1 });
+    const chosen = effectiveItems.filter((it) => ids.has(it.id));
+    if (chosen.length > 0 && props.onSelectItems) {
+      props.onSelectItems(chosen);
+    } else {
+      props.clearSelection?.();
+    }
+  };
+
+  // Body pointerdown: on the console this scrubs the time cursor; in the editor
+  // an empty-background press begins a marquee select. Cue presses bubble here
+  // too (see pointerOnItemRef) and must be ignored so a cue-drag isn't shadowed.
+  const handleBodyPointerDown = (e) => {
+    const onItem = pointerOnItemRef.current;
+    pointerOnItemRef.current = false;
+    if (props.allowScrub) { handleScrubPointerDown(e); return; }
+    if (onItem) return;
+    if (isReadOnly || props.copyMode || swapSourceId != null) return;
+    if (e.button !== 0) return; // left button only
+    const p = contentPointFromClient(e.clientX, e.clientY);
+    marqueeRef.current = {
+      x0: p.x, y0: p.y, x1: p.x, y1: p.y,
+      startClientX: e.clientX, startClientY: e.clientY, moved: false,
+    };
+    if (typeof document !== "undefined") document.body.style.userSelect = "none";
+    detachMarqueeListeners();
+    marqueeAttachedRef.current = { move: onMarqueePointerMove, up: onMarqueePointerUp };
+    window.addEventListener("pointermove", onMarqueePointerMove);
+    window.addEventListener("pointerup", onMarqueePointerUp);
+  };
+
+  // Safety: tear down marquee listeners if unmounted mid-gesture.
+  useEffect(() => detachMarqueeListeners, []);
 
   // ---------------------------------------------------------------------
   // Scrub support. On a read-only timeline (the console) the operator can
@@ -1101,11 +1272,14 @@ const Timeline = memo((props) => {
       return;
     }
 
-    // If clicking on the timeline background (not on an item), clear selection
-    if (e.target === e.currentTarget || e.target.className.includes('border-l')) {
-      if (props.clearSelection) {
-        props.clearSelection();
-      }
+    // Clicking empty timeline background (not on a cue) clears the selection.
+    // Cue bars/labels carry `data-cue`; a click landing inside one is handled
+    // by the cue's own click handler, so we leave the selection alone. The grid
+    // lines / lane lines / cursor are pointer-events-none, so a background click
+    // targets the body or its content div — neither has data-cue.
+    const onCue = e.target instanceof Element && e.target.closest("[data-cue]");
+    if (!onCue && props.clearSelection) {
+      props.clearSelection();
     }
     
     // Handle time cursor if enabled
@@ -1943,7 +2117,7 @@ const Timeline = memo((props) => {
               ? "ew-resize"
               : undefined,
         }}
-        onPointerDown={handleScrubPointerDown}
+        onPointerDown={handleBodyPointerDown}
         onDragOver={isReadOnly ? () => {} : handleDragOver}
         onDrop={isReadOnly ? () => {} : handleDrop}
         onScroll={handleScroll}
@@ -2030,6 +2204,21 @@ const Timeline = memo((props) => {
             />
           ))}
 
+          {/* Marquee (rubber-band) selection rectangle. Content-px coords so it
+              tracks the same frame as the cue bars; pointer-events-none so it
+              never intercepts the drag. */}
+          {marquee && (
+            <div
+              className="absolute z-20 rounded-sm border border-accent bg-accent/10 pointer-events-none"
+              style={{
+                left: `${Math.min(marquee.x0, marquee.x1)}px`,
+                top: `${Math.min(marquee.y0, marquee.y1)}px`,
+                width: `${Math.abs(marquee.x1 - marquee.x0)}px`,
+                height: `${Math.abs(marquee.y1 - marquee.y0)}px`,
+              }}
+            />
+          )}
+
           {/* Items */}
           {stackedItems.flat().map((item) => {
             const itemDuration = num(item.duration);
@@ -2055,7 +2244,10 @@ const Timeline = memo((props) => {
                 showZoneCue={showZoneCue}
                 showStartTime={showStartTime}
                 showEndTime={showEndTime}
-                isSelected={(props.selectedItems || []).some((s) => s.id === item.id)}
+                isSelected={
+                  (props.selectedItems || []).some((s) => s.id === item.id) ||
+                  (marqueeIds ? marqueeIds.has(item.id) : false)
+                }
                 isDragging={draggingId === item.id}
                 isLocked={isLocked}
                 canDrag={!isReadOnly && !isLocked}
@@ -2107,7 +2299,28 @@ const Timeline = memo((props) => {
           onMouseDown={(e) => e.stopPropagation()}
           onContextMenu={(e) => e.preventDefault()}
         >
-          {ctxMenu.item ? (
+          {ctxMenu.multi ? (
+            <>
+              <div className="px-3 py-1.5 text-xs text-fg-muted truncate border-b border-border-subtle mb-1">
+                {ctxMenu.multi.length} cues selected
+              </div>
+              {props.onChainSelected && (
+                <ContextMenuItem icon={<FiClock aria-hidden />} onClick={handleMultiChain}>
+                  Chain timing…
+                </ContextMenuItem>
+              )}
+              <ContextMenuItem icon={<FaLock aria-hidden />} onClick={handleMultiLock}>
+                Lock movement
+              </ContextMenuItem>
+              <ContextMenuItem icon={<FiX aria-hidden />} onClick={handleMultiClear}>
+                Clear selection
+              </ContextMenuItem>
+              <div className="my-1 border-t border-border-subtle" />
+              <ContextMenuItem icon={<FaTrash aria-hidden />} danger onClick={handleMultiDelete}>
+                Delete {ctxMenu.multi.length} cues
+              </ContextMenuItem>
+            </>
+          ) : ctxMenu.item ? (
             <>
               <div className="px-3 py-1.5 text-xs text-fg-muted truncate border-b border-border-subtle mb-1">
                 {ctxMenu.item.name}
