@@ -2985,6 +2985,10 @@ const ShowBuilder = (props) => {
 
   // Drag the divider between the timeline and the tab panel. Dragging down
   // shrinks the panel (and grows the timeline); dragging up does the reverse.
+  // Holds the teardown for an in-flight divider drag so an unmount mid-drag
+  // can detach the window listeners + clear the userSelect override (the
+  // Timeline's pointer-drag path does the equivalent with its own cleanup).
+  const panelDragCleanupRef = useRef(null);
   const startPanelResize = (e) => {
     e.preventDefault();
     const startY = e.clientY;
@@ -2996,17 +3000,24 @@ const ShowBuilder = (props) => {
       latest = Math.min(max, Math.max(120, startH - dy));
       setDragPanelHeight(latest);
     };
-    const onUp = () => {
+    const detach = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       document.body.style.userSelect = "";
+      panelDragCleanupRef.current = null;
+    };
+    const onUp = () => {
+      detach();
       setPanelHeight(latest);    // persist the final height once
       setDragPanelHeight(null);  // fall back to the persisted value
     };
+    panelDragCleanupRef.current = detach;
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
     document.body.style.userSelect = "none";
   };
+  // Detach any live divider-drag listeners if we unmount mid-drag.
+  useEffect(() => () => panelDragCleanupRef.current?.(), []);
 
   // Edit/Add modal for a single show-receiver entry.
   // `editingReceiverEntry` is null for ADD mode, a copy of the entry for EDIT.
