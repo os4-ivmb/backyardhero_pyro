@@ -29,8 +29,9 @@ development without hardware:
 
 It has NO third-party dependencies (stdlib socket/json/threading/time only),
 so it runs under the container's plain python3 with no venv. It is wired into
-supervisord.dev.conf ONLY -- production (supervisord.conf) never runs it and
-always talks to the real host-side bridge.
+supervisord.devcontainer.conf ONLY -- production (supervisord.conf) and the
+plain dev profile (supervisord.dev.conf) never run it and always talk to the
+real host-side bridge.
 
 Env config (all optional):
   BYH_BRIDGE_BIND        bind address           (default 127.0.0.1)
