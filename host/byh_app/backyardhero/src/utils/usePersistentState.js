@@ -9,6 +9,12 @@ import { useEffect, useRef, useState } from "react";
 // the synchronous `localStorage.setItem` is coalesced so it runs once after
 // the value settles instead of on every keystroke/frame. The latest value is
 // always flushed on unmount so a pending debounced write is never lost.
+//
+// NOTE: there is no cross-tab sync — this hook does not listen for the
+// `storage` event, so two editor tabs open at once stomp each other
+// last-write-wins and neither sees the other's changes. That's acceptable for
+// the single-operator console use we have today; add a `storage` listener here
+// if multi-tab editing ever needs to stay in sync.
 export default function usePersistentState(key, initial, options) {
   const debounceMs = options?.debounce ?? 0;
   const [value, setValue] = useState(() => {
