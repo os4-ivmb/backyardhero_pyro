@@ -13,6 +13,7 @@ import {
   FiZap,
   FiMap,
   FiHelpCircle,
+  FiTool,
   FiEdit2,
   FiTrash2,
   FiLink2,
@@ -1142,11 +1143,15 @@ const ChainTimingModal = ({ isOpen, onClose, onApply, selectedItems }) => {
   );
 };
 
-const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex, inventory, inventoryById, availableDevices }) => {
+const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex, inventory, inventoryById, availableDevices, hasItems }) => {
   const [selectedReceivers, setSelectedReceivers] = useState([]);
   const [startTime, setStartTime] = useState(5);
   const [cadence, setCadence] = useState(1);
   const [pattern, setPattern] = useState("row"); // "row" or "sequential"
+  // Generating a test show replaces the entire timeline. When the operator
+  // already has cues placed, stash the freshly-built items here and surface a
+  // confirmation modal instead of clobbering their work silently.
+  const [pendingGenerate, setPendingGenerate] = useState(null);
 
   // Only show receivers the user actually wants to fire on. The DB's
   // Receivers.enabled flag is mirrored into the receiver record (see
@@ -1175,6 +1180,25 @@ const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex,
 
   const handleDeselectAll = () => {
     setSelectedReceivers([]);
+  };
+
+  // Apply a freshly-built test show. Validation runs before this, so by the
+  // time we're here the items are good to go -- we only need to guard against
+  // wiping out an existing timeline without warning.
+  const commitGenerated = (newItems, nextIndex) => {
+    if (hasItems) {
+      setPendingGenerate({ newItems, nextIndex });
+      return;
+    }
+    setCurrentIndex(nextIndex);
+    onGenerate(newItems);
+  };
+
+  const confirmPendingGenerate = () => {
+    if (!pendingGenerate) return;
+    setCurrentIndex(pendingGenerate.nextIndex);
+    onGenerate(pendingGenerate.newItems);
+    setPendingGenerate(null);
   };
 
   const handleGenerate = () => {
@@ -1279,8 +1303,7 @@ const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex,
       }
     }
 
-    setCurrentIndex(itemId);
-    onGenerate(newItems);
+    commitGenerated(newItems, itemId);
   };
 
   const handleTestAllCakes = () => {
@@ -1345,8 +1368,7 @@ const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex,
       currentTime += duration;
     });
 
-    setCurrentIndex(itemId);
-    onGenerate(newItems);
+    commitGenerated(newItems, itemId);
   };
 
   return (
@@ -1458,6 +1480,30 @@ const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex,
             </div>
           </div>
         </div>
+
+        <Modal
+          isOpen={pendingGenerate !== null}
+          onClose={() => setPendingGenerate(null)}
+          title="Replace the current show?"
+          eyebrow="Test Show Builder"
+          size="sm"
+          footer={
+            <>
+              <Button variant="outline" onClick={() => setPendingGenerate(null)}>
+                Cancel
+              </Button>
+              <Button variant="primary" onClick={confirmPendingGenerate}>
+                Clear and place test shots
+              </Button>
+            </>
+          }
+        >
+          <p className="text-sm text-fg-secondary">
+            The timeline already has cues on it. Generating a test show will
+            clear the current show and place down new test shots. This can't be
+            undone.
+          </p>
+        </Modal>
     </div>
   );
 };
@@ -2869,6 +2915,9 @@ const ShowBuilder = (props) => {
   // Collapse the whole bottom tab panel (nav stays; content hides) so the
   // timeline can take the full height when the operator doesn't need the tabs.
   const [tabsCollapsed, setTabsCollapsed] = usePersistentState("byh.editor.tabsCollapsed", false);
+  // Overflow menu holding the secondary "Tools" tabs (Diagnostics, Controls)
+  // so they don't crowd the primary authoring tabs. Purely local UI state.
+  const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
   // Audio panel: collapse the full waveform / BPM editor down to a compact
   // transport (play / pause / restart over the waveform) to give the timeline
   // more room. The track tabs stay visible either way.
@@ -3128,6 +3177,21 @@ const ShowBuilder = (props) => {
       });
     });
   };
+
+  // Close the Tools overflow menu on outside click / Escape. Mirrors the
+  // Timeline context-menu pattern: the menu stops propagation on its own
+  // mousedown so a click *inside* it doesn't close before the button fires.
+  useEffect(() => {
+    if (!toolsMenuOpen) return;
+    const onKey = (e) => { if (e.key === "Escape") setToolsMenuOpen(false); };
+    const onDown = () => setToolsMenuOpen(false);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onDown);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onDown);
+    };
+  }, [toolsMenuOpen]);
 
   // Default the show protocol if none is set yet. We no longer derive
   // availableDevices from the protocol; the editor's target grid comes
@@ -4495,9 +4559,7 @@ const ShowBuilder = (props) => {
                   { key: "target", label: "Target Grid", Icon: FiTarget },
                   { key: "racks", label: "Racks", Icon: FiGrid },
                   { key: "inventory", label: "Inventory", Icon: FiPackage },
-                  { key: "test", label: "Test Show Builder", Icon: FiZap },
                   { key: "layout", label: "Show Layout", Icon: FiMap },
-                  { key: "controls", label: "Controls", Icon: FiHelpCircle },
                 ].map(({ key, label, Icon }) => {
                   const isActive = activeTab === key && !tabsCollapsed;
                   return (
@@ -4530,26 +4592,113 @@ const ShowBuilder = (props) => {
                   );
                 })}
               </div>
-              {/* Collapse / expand the tab panel. */}
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setTabsCollapsed((v) => !v);
-                  e.currentTarget.blur();
-                }}
-                title={tabsCollapsed ? "Show tab panel" : "Hide tab panel"}
-                aria-expanded={!tabsCollapsed}
-                className="mr-1 inline-flex items-center gap-1.5 px-2 py-1 text-xs text-gray-400 hover:text-gray-200"
-              >
-                {tabsCollapsed ? (
-                  <FiChevronRight className="text-sm" aria-hidden />
-                ) : (
-                  <FiChevronDown className="text-sm" aria-hidden />
-                )}
-                {tabsCollapsed ? "Show" : "Hide"}
-              </button>
+
+              {/* Right-aligned cluster: the Tools overflow (secondary utility
+                  tabs, hoisted out of the primary authoring row) and the
+                  collapse/expand toggle. */}
+              <div className="flex items-end gap-1">
+                {/* Tools overflow: secondary utility tabs (Diagnostics,
+                    Controls) tucked behind a single menu so they don't crowd
+                    the primary authoring tabs. */}
+                {(() => {
+                  const TOOLS = [
+                    { key: "test", label: "Diagnostics", Icon: FiZap },
+                    { key: "controls", label: "Controls", Icon: FiHelpCircle },
+                  ];
+                  const toolActive = !tabsCollapsed && TOOLS.some((t) => t.key === activeTab);
+                  return (
+                    <div className="relative" onMouseDown={(e) => e.stopPropagation()}>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setToolsMenuOpen((v) => !v);
+                          e.currentTarget.blur();
+                        }}
+                        aria-haspopup="menu"
+                        aria-expanded={toolsMenuOpen}
+                        className={cn(
+                          "inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-t-md border border-b-0 -mb-px transition-colors",
+                          toolActive
+                            ? "bg-surface-2 border-border text-fg-primary"
+                            : "bg-surface-1/40 border-transparent text-fg-muted hover:text-fg-secondary hover:bg-surface-2/60"
+                        )}
+                      >
+                        <FiTool
+                          className={cn(
+                            "text-[15px] shrink-0",
+                            toolActive ? "text-accent" : "opacity-70"
+                          )}
+                          aria-hidden
+                        />
+                        Tools
+                        <FiChevronDown className="text-xs opacity-70" aria-hidden />
+                      </button>
+                      {toolsMenuOpen && (
+                        <div
+                          role="menu"
+                          className="absolute right-0 top-full z-20 mt-1 min-w-[180px] rounded-md border border-border bg-surface-2 py-1 shadow-e2"
+                        >
+                          {TOOLS.map(({ key, label, Icon }) => {
+                            const isActive = activeTab === key && !tabsCollapsed;
+                            return (
+                              <button
+                                key={key}
+                                type="button"
+                                role="menuitem"
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  if (tabsCollapsed) setTabsCollapsed(false);
+                                  handleTabChange(key);
+                                  setToolsMenuOpen(false);
+                                  e.currentTarget.blur();
+                                }}
+                                className={cn(
+                                  "flex w-full items-center gap-2 px-3 py-1.5 text-sm text-left transition-colors",
+                                  isActive
+                                    ? "text-fg-primary bg-surface-3"
+                                    : "text-fg-secondary hover:text-fg-primary hover:bg-surface-3/60"
+                                )}
+                              >
+                                <Icon
+                                  className={cn(
+                                    "text-[15px] shrink-0",
+                                    isActive ? "text-accent" : "opacity-70"
+                                  )}
+                                  aria-hidden
+                                />
+                                {label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+                {/* Collapse / expand the tab panel. */}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setTabsCollapsed((v) => !v);
+                    e.currentTarget.blur();
+                  }}
+                  title={tabsCollapsed ? "Show tab panel" : "Hide tab panel"}
+                  aria-expanded={!tabsCollapsed}
+                  className="mr-1 inline-flex items-center gap-1.5 px-2 py-1 text-xs text-gray-400 hover:text-gray-200"
+                >
+                  {tabsCollapsed ? (
+                    <FiChevronRight className="text-sm" aria-hidden />
+                  ) : (
+                    <FiChevronDown className="text-sm" aria-hidden />
+                  )}
+                  {tabsCollapsed ? "Show" : "Hide"}
+                </button>
+              </div>
             </div>
 
             {/* Tab Content -- the only vertical scroll region on the editor,
@@ -4618,6 +4767,7 @@ const ShowBuilder = (props) => {
                   inventory={inventory}
                   inventoryById={inventoryById}
                   availableDevices={availableDevices}
+                  hasItems={items.length > 0}
                 />
               )}
               
