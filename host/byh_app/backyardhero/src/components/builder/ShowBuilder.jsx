@@ -3541,6 +3541,15 @@ const ShowBuilder = (props) => {
     }
   };
 
+  // Batch-select from the timeline marquee. Snapshots go through the same
+  // live-repointing effect as click multi-select; locked cues are excluded so
+  // the multi-drag baseline (and chain timing) stays valid.
+  const handleSelectItems = (itemsToSelect) => {
+    const unlocked = (itemsToSelect || []).filter((it) => it && !it.locked);
+    setSelectedItem(false);
+    setSelectedItems(unlocked);
+  };
+
   const handleChainTiming = () => {
     if (selectedItems.length >= 2) {
       setIsChainTimingModalOpen(true);
@@ -4495,6 +4504,8 @@ const ShowBuilder = (props) => {
                 setSelectedItem={(item) => handleItemSelect(item, false)}
                 selectedItems={selectedItems}
                 onItemSelect={handleItemSelect}
+                onSelectItems={handleSelectItems}
+                onChainSelected={handleChainTiming}
                 clearSelection={clearSelection}
                 timeCursor={audioCurrentTime}
                 setTimeCursor={handleShowCursorChange}
