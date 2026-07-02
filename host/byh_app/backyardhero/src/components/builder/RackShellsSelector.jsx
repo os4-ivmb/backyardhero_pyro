@@ -7,6 +7,10 @@ import {
   shellPackShellKey
 } from '../../utils/shellUsageCounts';
 
+// Used-cell keys are scoped by rack id so that the same cell coordinate on two
+// different racks (e.g. an original and its copy) are tracked independently.
+const scopedCellKey = (rackId, cellKey) => `${String(rackId)}::${cellKey}`;
+
 export default function RackShellsSelector({ onSelect, onClose, items, inventory, showId }) {
   const [racks, setRacks] = useState([]);
   const [selectedRackId, setSelectedRackId] = useState(null);
@@ -28,11 +32,13 @@ export default function RackShellsSelector({ onSelect, onClose, items, inventory
     if (showId) {
       fetchRacks();
     }
-    // Extract used cells from existing items
+    // Extract used cells from existing items. Scope the key by rack id so a
+    // cell used on one rack doesn't mark the same coordinate as used on a
+    // different rack (e.g. a copied rack that shares cell coordinates).
     const used = new Set();
     items.forEach(item => {
-      if (item.type === 'RACK_SHELLS' && item.rackCells) {
-        item.rackCells.forEach(cell => used.add(cell));
+      if (item.type === 'RACK_SHELLS' && item.rackCells && item.rackId != null) {
+        item.rackCells.forEach(cell => used.add(scopedCellKey(item.rackId, cell)));
       }
     });
     setUsedCells(used);
@@ -66,7 +72,7 @@ export default function RackShellsSelector({ onSelect, onClose, items, inventory
 
     // Find all single cells with shells that aren't part of a fuse
     for (const [cellKey, cellData] of Object.entries(cells)) {
-      if (cellData.shellId && !cellData.fuseId && !usedCells.has(cellKey)) {
+      if (cellData.shellId && !cellData.fuseId && !usedCells.has(scopedCellKey(rack.id, cellKey))) {
         items.push({
           type: 'single',
           cells: [cellKey],
@@ -84,7 +90,7 @@ export default function RackShellsSelector({ onSelect, onClose, items, inventory
           const cellData = cells[cellKey];
           return cellData && cellData.shellId;
         });
-        const noneUsed = fuse.cells.every(cellKey => !usedCells.has(cellKey));
+        const noneUsed = fuse.cells.every(cellKey => !usedCells.has(scopedCellKey(rack.id, cellKey)));
         
         if (allHaveShells && noneUsed) {
           items.push({
@@ -104,7 +110,7 @@ export default function RackShellsSelector({ onSelect, onClose, items, inventory
 
   const getCellKey = (x, y) => `${x}_${y}`;
   const isCellUsed = (x, y) => {
-    return usedCells.has(getCellKey(x, y));
+    return usedCells.has(scopedCellKey(selectedRackId, getCellKey(x, y)));
   };
 
   // Get shell data from inventory
