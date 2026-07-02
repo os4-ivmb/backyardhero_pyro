@@ -50,6 +50,32 @@ function parseAplayL(out) {
   return devices;
 }
 
+// Parse `bluealsa-aplay -L` to expose connected Bluetooth (bluez-alsa) A2DP
+// sinks as selectable outputs. Plain `aplay -L` only shows a single generic
+// `bluealsa` PCM, so a paired speaker/headset is otherwise invisible + not
+// individually addressable. bluealsa-aplay lists a per-device PCM id
+// (bluealsa:DEV=<mac>,PROFILE=a2dp,...) plus the device name; ffmpeg's alsa
+// muxer plays straight to that id (same path the audio_test / daemon use).
+// Structure mirrors aplay -L: an id at column 0, then indented detail lines
+// whose first line is "<name>, <class>, <direction>".
+function parseBluealsaL(out) {
+  const devices = [];
+  const lines = out.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line || /^\s/.test(line)) continue;
+    const id = line.trim();
+    if (!id.startsWith('bluealsa:')) continue;
+    let name = 'Bluetooth';
+    const next = lines[i + 1];
+    if (next && /^\s/.test(next) && next.trim()) {
+      name = next.trim().split(',')[0].trim() || name;
+    }
+    devices.push({ id, label: `${name} (Bluetooth)` });
+  }
+  return devices;
+}
+
 // Fallback: parse /proc/asound/cards. Each card looks like:
 //   " 0 [Headphones     ]: bcm2835_headpho - bcm2835 Headphones"
 // We expose a safe `plughw:<index>,0` per card.
@@ -107,6 +133,12 @@ export default async function handler(req, res) {
     if (discovered.length) source = 'proc';
   }
 
-  const devices = dedupeById([DEFAULT_DEVICE, ...discovered]);
+  // Append any connected Bluetooth A2DP sinks (best-effort; absent if
+  // bluez-alsa isn't installed or nothing is paired).
+  const bt = await execFileP('bluealsa-aplay', ['-L']);
+  const btDevices = bt ? parseBluealsaL(bt) : [];
+  if (btDevices.length) source = source === 'none' ? 'bluealsa' : `${source}+bluealsa`;
+
+  const devices = dedupeById([DEFAULT_DEVICE, ...discovered, ...btDevices]);
   return res.status(200).json({ devices, source });
 }
