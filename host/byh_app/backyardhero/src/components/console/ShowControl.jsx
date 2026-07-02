@@ -349,12 +349,15 @@ export default function ShowControl({
     : 0;
   const workingOffsetMs = Number.isFinite(liveAudioOffsetMs) ? liveAudioOffsetMs : 0;
 
-  // When the box is playing the audio itself (host audio setting on), silence
-  // this console's own playback DURING A LIVE SHOW only -- local preview
-  // (isPlaying) still plays through the operator's speakers so they can
-  // rehearse. audioIsPlaying is the sst-driven live flag from ConsolePanel.
+  // When the box is playing the audio itself (host audio setting on), this
+  // console stays silent for the WHOLE live show so the sound comes solely
+  // from the box -- including if the operator hits local preview mid-show
+  // (otherwise the console would play on top of the box's output, double
+  // audio). Local preview still plays normally when NO live show is running
+  // (audioIsPlaying false) so the operator can rehearse. audioIsPlaying is the
+  // sst-driven live flag from ConsolePanel.
   const hostAudioActive = !!systemConfig?.system?.hostAudio?.enabled;
-  const liveMuted = hostAudioActive && !!audioIsPlaying && !isPlaying;
+  const liveMuted = hostAudioActive && !!audioIsPlaying;
 
   const nudgeSync = (deltaMs) => {
     onLiveAudioOffsetMsChange?.(workingOffsetMs + deltaMs);

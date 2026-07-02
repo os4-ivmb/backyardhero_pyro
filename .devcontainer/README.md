@@ -88,11 +88,31 @@ sign in on first use.
 
 ## Hardware / the dongle
 
-There's no USB dongle inside the container. In the real dev flow the
-in-container daemon talks to the dongle over a **host-side TCP↔serial
-bridge** (`host/tcp_serial_bridge/`), which you run on the host, not in
-here. Without it, the builder/UI and everything non-hardware still work.
-Set `SERIAL_PORT` in the environment before `up` if you wire one in.
+There's no USB dongle inside the container.
+
+**By default the container fires nothing.** `supervisord.devcontainer.conf`
+runs an in-container **mock bridge** (`host/pythings/mock_bridge/`) and points
+the daemon at it (`BYH_BRIDGE_HOST=127.0.0.1`). The mock reports a healthy
+dongle and **silently swallows every fire command** — the UI shows CONNECTED
+and firing "succeeds" on the wire, but nothing physically fires. This is what
+lets the builder/UI and everything non-hardware work with no dongle attached.
+
+### Using real hardware from the dev container
+
+Because the daemon is wired to the mock by default, you must explicitly take
+the mock out of the loop and re-point the daemon at the **host-side TCP↔serial
+bridge** (`host/tcp_serial_bridge/`, run on the host with `SERIAL_PORT` set to
+your dongle's port):
+
+1. Start the host-side bridge on the host (not in the container).
+2. Stop the mock so it isn't holding the port / answering as a fake dongle:
+   `supervisorctl stop mock-bridge`.
+3. Re-point the daemon at the host bridge instead of `127.0.0.1`: set
+   `BYH_BRIDGE_HOST=host.docker.internal` (and `BYH_BRIDGE_PORT` if you changed
+   it) for `firework-daemon`, then `supervisorctl restart firework-daemon`.
+
+Until you do all three, "CONNECTED" and successful fires in the UI are the
+**mock** — no receiver will actually fire.
 
 ## Rebuild triggers
 

@@ -2730,6 +2730,12 @@ const SAVEABLE_ITEM_ATTRIBUTES = [
   "delay", "rackId", "rackCells", "rackName", "rackSpacing", "fireableItem",
   "fireableItemId", "fuse", "spacing", "leadInInches", "shells", "multiple",
   "steps", "firstStepFuseDelay",
+  // Operator-entered EXTRA delay on top of the item's fuse/lift delay. Must
+  // persist: the inventory-edit re-sync recomputes `delay = metaDelaySec +
+  // item fuse/lift`, so if this were dropped on save a later edit would
+  // silently collapse the cue's firing delay to just the fuse/lift. See
+  // handleSaveInventoryItem.
+  "metaDelaySec",
   // Marks a cue that originated from the show-import flow (see
   // util/showImport). Kept so the "Imported" badge survives a builder
   // re-save, since there is no dedicated DB column for the marker.
@@ -2744,7 +2750,7 @@ const SAVEABLE_ITEM_ATTRIBUTES = [
 // string durations into a >1e10 garbage value, and the daemon's
 // `startTime - delay` raises a TypeError mid-load so the show never
 // reaches the receivers. Coerce on save so the stored payload is clean.
-const NUMERIC_ITEM_ATTRIBUTES = new Set(["startTime", "duration", "delay"]);
+const NUMERIC_ITEM_ATTRIBUTES = new Set(["startTime", "duration", "delay", "metaDelaySec"]);
 const coerceNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
 const compressItemsForSave = (items) =>
@@ -2880,11 +2886,23 @@ const ShowBuilder = (props) => {
 
   // Create or update an inventory item from the inline form, mirroring the
   // Inventory page's normalization, then refresh so changes show immediately.
+  // Fuse (+ lift, for aerial shells) delay contributed by an inventory item.
+  const itemFuseLiftDelay = (inv) =>
+    (Number(inv?.fuse_delay ?? inv?.fuseDelay ?? 0) || 0) +
+    (inv?.type === "AERIAL_SHELL" ? (Number(inv?.lift_delay ?? 0) || 0) : 0);
+
   const handleSaveInventoryItem = async (item) => {
     const normalized = { ...item, unit_cost: parseOptionalUnitCost(item.unit_cost) };
     if (item.youtube_link && item.youtube_link.trim() !== "") {
       normalized.youtube_link = normalizeYouTubeUrl(item.youtube_link) || "";
     }
+    // Snapshot the item's fuse/lift delay BEFORE the edit so we can back out
+    // the operator's extra delay from legacy cues that never persisted
+    // `metaDelaySec` (delay = metaDelaySec + fuse/lift, so metaDelaySec =
+    // delay − old fuse/lift).
+    const preEditDelay = normalized.id
+      ? itemFuseLiftDelay((useAppStore.getState().inventoryById || {})[Number(normalized.id)])
+      : 0;
     if (normalized.id) {
       let metadata = normalized.metadata;
       if (metadata && typeof metadata === "object") metadata = JSON.stringify(metadata);
@@ -2910,9 +2928,14 @@ const ShowBuilder = (props) => {
             if (it.itemId == null || Number(it.itemId) !== savedId) return it;
             const dur =
               inv.duration != null && inv.duration !== "" ? Number(inv.duration) : it.duration;
-            const itemDelay =
-              (inv.fuse_delay ?? inv.fuseDelay ?? 0) +
-              (inv.type === "AERIAL_SHELL" ? (inv.lift_delay ?? 0) : 0);
+            const itemDelay = itemFuseLiftDelay(inv);
+            // Preserve the operator's extra delay. Prefer the persisted
+            // `metaDelaySec`; for legacy cues that predate it, back it out of
+            // the cue's current total delay using the item's pre-edit
+            // fuse/lift so the firing time is preserved (not collapsed).
+            const extraDelay = Number.isFinite(Number(it.metaDelaySec))
+              ? Number(it.metaDelaySec)
+              : Math.max(0, (Number(it.delay) || 0) - preEditDelay);
             return {
               ...it,
               color: inv.color ?? it.color,
@@ -2922,7 +2945,9 @@ const ShowBuilder = (props) => {
               fuse_delay: inv.fuse_delay ?? it.fuse_delay,
               lift_delay: inv.lift_delay ?? it.lift_delay,
               duration: dur,
-              delay: (Number(it.metaDelaySec) || 0) + itemDelay,
+              // Persist the resolved extra delay so future re-syncs are exact.
+              metaDelaySec: extraDelay,
+              delay: extraDelay + itemDelay,
             };
           })
         );
@@ -2960,6 +2985,10 @@ const ShowBuilder = (props) => {
 
   // Drag the divider between the timeline and the tab panel. Dragging down
   // shrinks the panel (and grows the timeline); dragging up does the reverse.
+  // Holds the teardown for an in-flight divider drag so an unmount mid-drag
+  // can detach the window listeners + clear the userSelect override (the
+  // Timeline's pointer-drag path does the equivalent with its own cleanup).
+  const panelDragCleanupRef = useRef(null);
   const startPanelResize = (e) => {
     e.preventDefault();
     const startY = e.clientY;
@@ -2971,17 +3000,24 @@ const ShowBuilder = (props) => {
       latest = Math.min(max, Math.max(120, startH - dy));
       setDragPanelHeight(latest);
     };
-    const onUp = () => {
+    const detach = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       document.body.style.userSelect = "";
+      panelDragCleanupRef.current = null;
+    };
+    const onUp = () => {
+      detach();
       setPanelHeight(latest);    // persist the final height once
       setDragPanelHeight(null);  // fall back to the persisted value
     };
+    panelDragCleanupRef.current = detach;
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
     document.body.style.userSelect = "none";
   };
+  // Detach any live divider-drag listeners if we unmount mid-drag.
+  useEffect(() => () => panelDragCleanupRef.current?.(), []);
 
   // Edit/Add modal for a single show-receiver entry.
   // `editingReceiverEntry` is null for ADD mode, a copy of the entry for EDIT.
@@ -3298,12 +3334,30 @@ const ShowBuilder = (props) => {
   const refreshInventory = (items_in) => {
     setItems((items) => (items_in || items).map((item) => {
       const inv_item = inventoryById[item.itemId];
-      if (inv_item) {
-        const { id, ...InvItemWithoutId } = inv_item;
-        return { ...InvItemWithoutId, ...item };
-      }else{
-        return item
+      if (!inv_item) return item;
+      const { id, ...InvItemWithoutId } = inv_item;
+      // The cue wins by default so its placement + identity fields
+      // (startTime/zone/target/id/name/metaDelaySec/...) survive. But the
+      // inventory item OWNS its length + fuse/lift timing, so re-derive those
+      // from the live item -- otherwise a cue's stale `duration` snapshot
+      // shadows a later inventory edit and "adding length to a non-lengthed
+      // item" never shows on the timeline, even after reload. Mirrors the
+      // in-builder re-sync in handleSaveInventoryItem.
+      const merged = { ...InvItemWithoutId, ...item };
+      // Duration: prefer the item's current value when it has one set.
+      if (inv_item.duration != null && inv_item.duration !== "") {
+        merged.duration = Number(inv_item.duration);
       }
+      // Delay: only safe to recompute when the cue persisted its extra delay
+      // (metaDelaySec). Legacy cues predating it keep their stored delay so we
+      // don't corrupt firing timing by guessing the operator's extra delay.
+      merged.fuse_delay = inv_item.fuse_delay ?? item.fuse_delay;
+      merged.lift_delay = inv_item.lift_delay ?? item.lift_delay;
+      if (Number.isFinite(Number(item.metaDelaySec))) {
+        merged.metaDelaySec = Number(item.metaDelaySec);
+        merged.delay = merged.metaDelaySec + itemFuseLiftDelay(inv_item);
+      }
+      return merged;
     }));
   };
 
@@ -3319,7 +3373,11 @@ const ShowBuilder = (props) => {
   };
 
   const openAddModal = (time, opts = {}) => {
-    if (!requireInventory()) return;
+    // Don't gate on inventory here: the Add modal also supports GENERIC cues
+    // (name + typed duration) that need no inventory item, so an operator with
+    // an empty inventory can still lay out a show. The inventory-item flows
+    // (target-grid "+", drag-from-inventory) keep their own requireInventory
+    // gate.
     setAddPresetItem(null);
     setAddPresetTarget(null);
     setAddItemStartTime(time);
@@ -3701,6 +3759,9 @@ const ShowBuilder = (props) => {
     const onKey = (e) => {
       if (e.code !== "Space" && e.key !== " ") return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+      // Don't toggle playback behind an open modal / inline form (same guard
+      // the ⌘/Ctrl+S handler uses); the design-system Modal sets role="dialog".
+      if (typeof document !== "undefined" && document.querySelector('[role="dialog"]')) return;
       const el = e.target;
       const tag = el?.tagName;
       if (

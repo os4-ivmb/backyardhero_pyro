@@ -16,14 +16,13 @@
   // as `node` (uid 1000, == the WSL host user) so edited files stay writable.
   "remoteUser": "node",
 
-  // Claude Code CLI, installed on top of the compose-built image when
-  // launched via the Dev Containers extension / `devcontainer up`. (A plain
+  // Features are installed on top of the compose-built image when launched
+  // via the Dev Containers extension / `devcontainer up`. (A plain
   // `docker compose up` does NOT apply features -- see README.)
   "features": {
     // node:22-slim ships without git; VS Code's Source Control needs it
     // inside the container to detect and operate on the repo.
-    "ghcr.io/devcontainers/features/git:1": {},
-    "ghcr.io/anthropics/devcontainer-features/claude-code:1": {}
+    "ghcr.io/devcontainers/features/git:1": {}
   },
 
   "forwardPorts": [1776, 8090],
