@@ -10,7 +10,12 @@ import useStateAppStore from "@/store/useStateAppStore";
 import useAppMode from "@/design/useAppMode";
 import { Card, Button, Badge, Stat, IconButton, cn } from "@/design";
 import { protoStatusBadge, protoStatusLabel } from "@/util/protoStatus";
-import { audioFieldFromShow } from "@/utils/audioTracks";
+import {
+  audioFieldFromShow,
+  trackAtShowTime,
+  trackOffsets,
+  totalShowAudioDuration,
+} from "@/utils/audioTracks";
 import useShowReceiverVerification from "@/util/useShowReceiverVerification";
 import { asyncPrompt, asyncAlert } from "@/components/common/AsyncPrompt";
 
@@ -68,32 +73,118 @@ const formatTime = (sec) => {
 // track by the delta so the change is audible immediately.
 function MiniWave({
   audioTracks,
-  isPlaying,
+  // Preview playback (local rehearsal) vs. the sst-scheduled live show. They
+  // are mutually exclusive; the audio plays when either is true, but only
+  // preview mode is cursor-synced (the live cursor is daemon-driven).
+  previewPlaying,
+  liveAudio,
   audioOffsetMs,
   muted,
+  // Current show-time cursor (sec). The audio is a slave to this within the
+  // audio window: preview playback starts/resumes from here and scrubs seek
+  // to here. Read via a ref so per-frame cursor updates don't churn effects.
+  showTime,
+  // { seq, sec } — a user scrub on the timeline. `seq` bumps each scrub so we
+  // seek once per gesture-step regardless of play state.
+  seekRequest,
+  // (showSec) => void — called each audioprocess tick during PREVIEW so the
+  // cursor tracks the audio exactly (no drift).
+  onAudioTime,
+  // () => void — called when the audio stops being the clock (finished, or the
+  // cursor moved outside the audio window) so the host resumes its wall-clock.
+  onAudioInactive,
 }) {
   const ref = useRef(null);
   const ws = useRef(null);
   const [ready, setReady] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
+  // Action to apply once a (re)loaded track becomes ready: { local, play }.
+  const pendingRef = useRef(null);
 
   const playableTracks = useMemo(
     () => (audioTracks || []).filter((t) => t?.url),
     [audioTracks]
   );
   const activeUrl = playableTracks[activeIdx]?.url || null;
+  const offsets = useMemo(() => trackOffsets(playableTracks), [playableTracks]);
+  const totalDur = useMemo(
+    () => totalShowAudioDuration(playableTracks),
+    [playableTracks]
+  );
+
+  const playing = !!previewPlaying || !!liveAudio;
+
+  // Latest values the persistent wavesurfer event handlers need, kept in refs
+  // so we don't have to tear down + rebind (or recreate wavesurfer) on every
+  // render just to avoid stale closures.
+  const previewPlayingRef = useRef(false);
+  previewPlayingRef.current = !!previewPlaying;
+  const activeIdxRef = useRef(0);
+  activeIdxRef.current = activeIdx;
+  const offsetsRef = useRef(offsets);
+  offsetsRef.current = offsets;
+  const trackCountRef = useRef(0);
+  trackCountRef.current = playableTracks.length;
+  const onAudioTimeRef = useRef(onAudioTime);
+  onAudioTimeRef.current = onAudioTime;
+  const onAudioInactiveRef = useRef(onAudioInactive);
+  onAudioInactiveRef.current = onAudioInactive;
+  const showTimeRef = useRef(0);
+  showTimeRef.current = Number.isFinite(showTime) ? showTime : 0;
+  // Current show-level sync offset in seconds (positive = music is "ahead" of
+  // the cue clock). During preview the audio leads/trails the cursor by this,
+  // so the persistent audioprocess handler needs the latest value.
+  const audioOffsetSecRef = useRef(0);
+  audioOffsetSecRef.current = (Number.isFinite(audioOffsetMs) ? audioOffsetMs : 0) / 1000;
 
   // Reset to the first track whenever the playable URL list changes.
   useEffect(() => { setActiveIdx(0); }, [playableTracks.length]);
 
-  // Auto-rewind to track 0 every time the operator (re)starts the
-  // preview from a stopped state, mirroring the original single-track
-  // behavior of seeking back to 0 on pause.
-  const wasPlayingRef = useRef(false);
-  useEffect(() => {
-    if (isPlaying && !wasPlayingRef.current) setActiveIdx(0);
-    wasPlayingRef.current = !!isPlaying;
-  }, [isPlaying]);
+  // Seek the currently-loaded track to a local time (sec). Returns false when
+  // wavesurfer isn't ready yet so the caller can stash the seek for on-ready.
+  const applyLocalSeek = (localSec) => {
+    if (!ws.current || !ready) return false;
+    const dur = ws.current.getDuration?.() || 0;
+    if (dur <= 0) return false;
+    try { ws.current.seekTo(Math.max(0, Math.min(1, localSec / dur))); } catch { /* */ }
+    return true;
+  };
+
+  // Position the audio to a cue-clock show-time. In preview the audio leads/
+  // trails the cue clock by the show-level sync offset (positive = music ahead
+  // of cues), so we map the requested cue-time to an audio show-time before
+  // locating the track — this is what lets a ±offset nudge be *audible* against
+  // the cues instead of dragging the cursor along with it. Outside the audio
+  // window there's nothing to play, so we pause and hand the clock back to the
+  // host. Inside, we switch to the containing track if needed (applying the
+  // seek on ready) and optionally resume playback from there.
+  const positionAudioTo = (sec, resume) => {
+    // A small negative result means the cursor sits in the sub-offset lead-in
+    // of a "music-after-cue-0" trim; clamp up to the audio head so playback
+    // still starts (the reported cursor lands at |offset|) rather than going
+    // silent. Past the end there's genuinely nothing to play, so `hit` is null
+    // and we hand the clock back.
+    let audioSec = Number.isFinite(sec) ? sec + audioOffsetSecRef.current : NaN;
+    if (Number.isFinite(audioSec) && audioSec < 0) audioSec = 0;
+    const hit = Number.isFinite(audioSec) && audioSec < totalDur
+      ? trackAtShowTime(playableTracks, audioSec)
+      : null;
+    if (!hit) {
+      try { ws.current?.pause(); } catch { /* */ }
+      onAudioInactiveRef.current?.();
+      return;
+    }
+    if (hit.index !== activeIdx) {
+      pendingRef.current = { local: hit.localTime, play: resume };
+      setActiveIdx(hit.index);
+      return;
+    }
+    if (!applyLocalSeek(hit.localTime)) {
+      pendingRef.current = { local: hit.localTime, play: resume };
+      return;
+    }
+    if (resume) { try { ws.current?.play(); } catch { /* */ } }
+  };
 
   useEffect(() => {
     if (!ref.current || ws.current || !activeUrl) return;
@@ -114,12 +205,44 @@ function MiniWave({
           barWidth: 1, barRadius: 1, cursorWidth: 0,
           height: 28, barGap: 1, normalize: true, interact: false,
         });
-        ws.current.on("ready", () => setReady(true));
+        ws.current.on("ready", () => {
+          setReady(true);
+          // Apply a seek (and optional resume) queued while this track loaded.
+          const p = pendingRef.current;
+          pendingRef.current = null;
+          if (p) {
+            const dur = ws.current.getDuration?.() || 0;
+            if (dur > 0) {
+              try { ws.current.seekTo(Math.max(0, Math.min(1, p.local / dur))); } catch { /* */ }
+            }
+            if (p.play) { try { ws.current.play(); } catch { /* */ } }
+          }
+        });
         ws.current.on("error", () => setReady(false));
         ws.current.on("finish", () => {
-          // Advance to the next track if any. The render's useEffect
-          // below will reload the wavesurfer and resume playback.
-          setActiveIdx((i) => Math.min(i + 1, playableTracks.length));
+          // Advance to the next track and resume; when the last track ends,
+          // hand the clock back so the rest of the (audio-less) show keeps
+          // advancing.
+          setActiveIdx((i) => {
+            const next = i + 1;
+            if (next < trackCountRef.current) {
+              pendingRef.current = { local: 0, play: true };
+              return next;
+            }
+            onAudioInactiveRef.current?.();
+            return i;
+          });
+        });
+        // During PREVIEW, drive the cursor from the audio position so the two
+        // can't drift. Skipped for the live show (daemon owns the cursor).
+        ws.current.on("audioprocess", () => {
+          if (!ws.current || !previewPlayingRef.current) return;
+          const cur = ws.current.getCurrentTime?.() || 0;
+          const audioShowTime = (offsetsRef.current[activeIdxRef.current] || 0) + cur;
+          // Report the cue clock, not the audio position: they differ by the
+          // sync offset, so nudging the offset shifts the music against the
+          // cursor (and thus the cues) rather than moving both together.
+          onAudioTimeRef.current?.(audioShowTime - audioOffsetSecRef.current);
         });
         // ws.load() returns a Promise that rejects with AbortError when
         // the instance is destroyed mid-load (StrictMode double-mount,
@@ -147,19 +270,50 @@ function MiniWave({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeUrl]);
 
-  // Play / pause / seek. The show-level offset is applied upstream by
-  // ConsolePanel's sst scheduler; here we just play from the head.
+  // Play / pause. On the rising edge we position the audio: the live show
+  // starts from the top (its precise timing is owned by the sst scheduler),
+  // while a preview starts/resumes from the current cursor. On pause we leave
+  // the preview position parked (so a scrub or replay resumes from the cursor)
+  // but rewind the live audio to the head as before.
+  const wasPlayingRef = useRef(false);
   useEffect(() => {
     if (!ws.current || !ready) return;
+    const was = wasPlayingRef.current;
+    wasPlayingRef.current = playing;
     try {
-      if (isPlaying && activeIdx < playableTracks.length) {
-        ws.current.play();
-      } else {
+      if (playing && !was) {
+        if (liveAudio) {
+          if (activeIdx !== 0) {
+            pendingRef.current = { local: 0, play: true };
+            setActiveIdx(0);
+          } else {
+            applyLocalSeek(0);
+            ws.current.play();
+          }
+        } else {
+          positionAudioTo(showTimeRef.current, true);
+        }
+      } else if (!playing && was) {
         ws.current.pause();
-        if (!isPlaying) ws.current.seekTo(0);
+        if (liveAudio) applyLocalSeek(0);
+      } else if (playing && was) {
+        // Same play state across a track switch — make sure it's running.
+        ws.current.play();
       }
     } catch { /* */ }
-  }, [isPlaying, ready, activeIdx, playableTracks.length]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing, ready, liveAudio, activeIdx]);
+
+  // User scrub on the timeline: seek the audio to match, once per gesture-step.
+  // Resumes playback after the seek when we're mid-preview so the sound tracks
+  // the cursor live.
+  const lastSeekSeqRef = useRef(0);
+  useEffect(() => {
+    if (!seekRequest || seekRequest.seq === lastSeekSeqRef.current) return;
+    lastSeekSeqRef.current = seekRequest.seq;
+    positionAudioTo(seekRequest.sec, !!previewPlaying);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seekRequest]);
 
   // Silence the browser's own output when the host device is playing the
   // audio (the "Play show audio on this device" setting). We keep wavesurfer
@@ -181,13 +335,13 @@ function MiniWave({
     // Capture the current offset as "applied" each time playback
     // starts -- the parent already shifted the audio start, and
     // future nudges should be relative to that baseline.
-    if (isPlaying) appliedOffsetMsRef.current = audioOffsetMs;
+    if (playing) appliedOffsetMsRef.current = audioOffsetMs;
     // We intentionally DON'T re-run this effect on audioOffsetMs
     // change; the dedicated nudge effect below handles those.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPlaying, ready, activeIdx]);
+  }, [playing, ready, activeIdx]);
   useEffect(() => {
-    if (!ws.current || !ready || !isPlaying) return;
+    if (!ws.current || !ready || !playing) return;
     const applied = appliedOffsetMsRef.current || 0;
     if (audioOffsetMs === applied) return;
     const dur = ws.current.getDuration?.() || 0;
@@ -198,7 +352,7 @@ function MiniWave({
       ws.current.seekTo(Math.max(0, Math.min(1, newTime / dur)));
     } catch { /* */ }
     appliedOffsetMsRef.current = audioOffsetMs;
-  }, [audioOffsetMs, ready, isPlaying]);
+  }, [audioOffsetMs, ready, playing]);
 
   if (!activeUrl) return null;
   return <div ref={ref} className="w-40 rounded-sm bg-surface-inset" aria-hidden />;
@@ -321,6 +475,18 @@ export default function ShowControl({
   // BEFORE cue 0 (audio is "ahead"); negative = music starts after.
   liveAudioOffsetMs,
   onLiveAudioOffsetMsChange,
+  // Timeline scrub toggle (console rehearsal aid). Owned by ConsolePanel so it
+  // can also gate the Timeline's `allowScrub`; here we render the toggle and
+  // feed the seek target to MiniWave. `canScrub` is false once the show is
+  // loaded/live (the cursor is daemon-driven then).
+  scrubEnabled,
+  onScrubEnabledChange,
+  canScrub,
+  // Audio seek plumbing for scrubbing: `audioSeekReq` ({seq, sec}) is a
+  // user-scrub event; `onAudioInactive` lets MiniWave hand the cursor clock
+  // back to ConsolePanel when the audio window ends.
+  audioSeekReq,
+  onAudioInactive,
 }) {
   const { stagedShow, setStagedShow, updateShow, systemConfig } = useAppStore();
   const { stateData } = useStateAppStore();
@@ -735,9 +901,14 @@ export default function ShowControl({
         <div className="ml-auto flex items-center gap-2">
           <MiniWave
             audioTracks={audioTracks}
-            isPlaying={isPlaying || audioIsPlaying}
+            previewPlaying={isPlaying}
+            liveAudio={audioIsPlaying}
             audioOffsetMs={workingOffsetMs}
             muted={liveMuted}
+            showTime={timeCursor}
+            seekRequest={audioSeekReq}
+            onAudioTime={onAudioTimeUpdate}
+            onAudioInactive={onAudioInactive}
           />
           {hasAnyAudio ? (
             <SyncOffsetCluster
@@ -765,6 +936,24 @@ export default function ShowControl({
               onChange={(e) => onPlayVideosChange?.(e.target.checked)}
             />
             Play videos
+          </label>
+          <label
+            className={cn(
+              "inline-flex items-center gap-1.5 text-xs select-none",
+              !canScrub
+                ? "text-fg-muted cursor-not-allowed"
+                : "text-fg-secondary cursor-pointer"
+            )}
+            title="Drag or click the timeline to move the cursor; the preview audio seeks to match. Available before the show is loaded."
+          >
+            <input
+              type="checkbox"
+              className="cursor-inherit"
+              checked={!!scrubEnabled}
+              disabled={!canScrub}
+              onChange={(e) => onScrubEnabledChange?.(e.target.checked)}
+            />
+            Scrub
           </label>
           <IconButton
             label={isPlaying ? "Pause preview" : "Play preview"}

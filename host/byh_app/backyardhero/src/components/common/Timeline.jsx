@@ -850,6 +850,86 @@ const Timeline = memo((props) => {
   // Safety: tear down drag listeners if the component unmounts mid-gesture.
   useEffect(() => detachDragListeners, []);
 
+  // ---------------------------------------------------------------------
+  // Scrub support. On a read-only timeline (the console) the operator can
+  // opt into moving the time cursor by dragging/clicking the body when
+  // `props.allowScrub` is set. We use window listeners so a drag that
+  // leaves the timeline still tracks, mirroring the cue-drag gesture above.
+  // ---------------------------------------------------------------------
+  const scrubbingRef = useRef(false);
+  const attachedScrubRef = useRef(null);
+  // Whether the in-flight gesture started on the body vs. the ruler. Only a
+  // body gesture emits a trailing `click` on the body that handleTimelineClick
+  // must swallow; a ruler click lands on the (sibling) ruler and never reaches
+  // the body, so suppressing there would eat the operator's next body click.
+  const scrubFromBodyRef = useRef(false);
+  // Drives the ruler's cursor: "<->" (ew-resize) while a header drag is in
+  // flight, back to a pointer on release. Needs to be state (not the ref above)
+  // because the ruler's own element cursor overrides an inherited body cursor,
+  // so we must re-render the ruler with the new cursor class.
+  const [rulerDragging, setRulerDragging] = useState(false);
+
+  const detachScrubListeners = () => {
+    const a = attachedScrubRef.current;
+    if (!a) return;
+    window.removeEventListener("pointermove", a.move);
+    window.removeEventListener("pointerup", a.up);
+    attachedScrubRef.current = null;
+  };
+
+  const scrubToClientX = (clientX) => {
+    const t = clientXToShowTime(clientX);
+    if (!isFinite(t)) return;
+    // Clamp to the show's own length when the host provides it (the console
+    // passes the staged show's duration) so scrubbing can't run the cursor
+    // out past the end of the show into empty timeline; otherwise fall back
+    // to the full ruler extent (the editor, where there's no fixed duration).
+    const upper = isFinite(props.scrubMaxTime)
+      ? Math.min(maxTime, props.scrubMaxTime)
+      : maxTime;
+    const clamped = Math.max(0, Math.min(upper, t));
+    props.setTimeCursor?.(clamped);
+    // Signal a user-initiated scrub so the host can seek the audio to match.
+    // This fires whether or not preview playback is running, and is distinct
+    // from the audio-driven cursor updates during playback (so no feedback).
+    props.onScrubSeek?.(clamped);
+  };
+
+  const onScrubPointerMove = (e) => {
+    if (!scrubbingRef.current) return;
+    scrubToClientX(e.clientX);
+  };
+
+  const onScrubPointerUp = () => {
+    scrubbingRef.current = false;
+    setRulerDragging(false);
+    detachScrubListeners();
+    if (typeof document !== "undefined") {
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    }
+    // Swallow the click that trails a body gesture so handleTimelineClick
+    // doesn't re-run the scrub on release. Ruler gestures don't bubble a click
+    // to the body, so suppressing there would instead eat the next body click.
+    if (scrubFromBodyRef.current) suppressNextClickRef.current = true;
+  };
+
+  const handleScrubPointerDown = (e) => {
+    if (!props.allowScrub) return;   // only the console opts in
+    if (e.button !== 0) return;      // left button only
+    scrubbingRef.current = true;
+    scrubFromBodyRef.current = true;
+    scrubToClientX(e.clientX);       // a click alone repositions the cursor
+    if (typeof document !== "undefined") document.body.style.userSelect = "none";
+    detachScrubListeners();
+    attachedScrubRef.current = { move: onScrubPointerMove, up: onScrubPointerUp };
+    window.addEventListener("pointermove", onScrubPointerMove);
+    window.addEventListener("pointerup", onScrubPointerUp);
+  };
+
+  // Tear down scrub listeners if we unmount mid-gesture.
+  useEffect(() => detachScrubListeners, []);
+
   // Wheel-to-zoom is registered as a native, non-passive listener (see effect
   // below) because React attaches `onWheel` passively at the root, which makes
   // `preventDefault()` a no-op and lets the page scroll while zooming.
@@ -966,7 +1046,42 @@ const Timeline = memo((props) => {
     }
   }
 
+  // Dragging (or clicking) the ruler (time header) moves the time cursor to that
+  // point. The ruler is scroll-synced with, and width-matched to, the body, so
+  // an absolute clientX maps to the same show time as it would on the body —
+  // reuse the body's scrub machinery (scrubToClientX + the window-level
+  // move/up listeners) so a drag that leaves the ruler still tracks.
+  // Draggable in the editor, and on a read-only timeline only when the host has
+  // opted into scrubbing (matching handleTimelineClick's body gating).
+  const rulerCanSetCursor = !!props.setTimeCursor && (!isReadOnly || !!props.allowScrub);
+  const handleRulerPointerDown = (e) => {
+    if (!rulerCanSetCursor) return;
+    if (e.button !== 0) return; // left button only
+    scrubbingRef.current = true;
+    scrubFromBodyRef.current = false;
+    setRulerDragging(true);
+    scrubToClientX(e.clientX); // a click alone repositions the cursor
+    if (typeof document !== "undefined") {
+      document.body.style.userSelect = "none";
+      // Force the resize cursor globally for the duration of the drag so it
+      // stays "<->" even when the pointer leaves the ruler (cleared on pointerup).
+      document.body.style.cursor = "ew-resize";
+    }
+    detachScrubListeners();
+    attachedScrubRef.current = { move: onScrubPointerMove, up: onScrubPointerUp };
+    window.addEventListener("pointermove", onScrubPointerMove);
+    window.addEventListener("pointerup", onScrubPointerUp);
+  };
+
   const handleTimelineClick = (e) => {
+    // Readonly timelines (e.g. the console) still render the playhead so it can
+    // track playback, but the user must not be able to scrub it or clear
+    // selection by clicking the timeline body — UNLESS the host has opted into
+    // scrubbing via `allowScrub` (the console's Scrub toggle), in which case the
+    // dedicated pointer handler below does the scrubbing and swallows this click.
+    if (isReadOnly && !props.allowScrub) {
+      return;
+    }
     // Swallow the click that trails a drag gesture.
     if (suppressNextClickRef.current) {
       suppressNextClickRef.current = false;
@@ -1722,7 +1837,12 @@ const Timeline = memo((props) => {
       {/* Ruler -- thin, single-line. Switches between seconds and beats. */}
       <div
         ref={ticksRef}
-        className="relative w-full h-7 overflow-hidden bg-surface-inset border-b border-border-subtle"
+        className={cn(
+          "relative w-full h-7 overflow-hidden bg-surface-inset border-b border-border-subtle select-none",
+          rulerCanSetCursor && (rulerDragging ? "cursor-ew-resize" : "cursor-pointer")
+        )}
+        style={{ touchAction: rulerCanSetCursor ? "none" : undefined }}
+        onPointerDown={rulerCanSetCursor ? handleRulerPointerDown : undefined}
       >
         {/* Match the body inner div's used width exactly. The body is
             `100*zoom%` of its content box (`clientWidth`, which excludes any
@@ -1804,7 +1924,7 @@ const Timeline = memo((props) => {
       <div
         ref={timelineRef}
         className={cn(
-          "relative w-full overflow-x-scroll overflow-y-auto bg-surface-inset",
+          "relative w-full overflow-x-scroll overflow-y-auto bg-surface-inset select-none",
           props.bodyFill
             ? "flex-1 min-h-0"
             : cn("transition-[height] duration-200", props.bodyHeightClass || "h-64"),
@@ -1819,8 +1939,11 @@ const Timeline = memo((props) => {
               ? "copy"
               : swapSourceId != null
               ? "crosshair"
+              : props.allowScrub
+              ? "ew-resize"
               : undefined,
         }}
+        onPointerDown={handleScrubPointerDown}
         onDragOver={isReadOnly ? () => {} : handleDragOver}
         onDrop={isReadOnly ? () => {} : handleDrop}
         onScroll={handleScroll}
