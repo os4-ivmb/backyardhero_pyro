@@ -41,6 +41,16 @@ export default function ConsolePanel() {
 
   const [timeCursor, setTimeCursor] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  // Console-only rehearsal aid: when on, the operator can scrub the
+  // (otherwise read-only) timeline and the preview audio seeks to match.
+  // Gated to the pre-show phase below — a loaded/live show drives the
+  // cursor from the daemon, so manual scrubbing is disabled there.
+  const [scrubEnabled, setScrubEnabled] = useState(false);
+  // A user scrub is delivered to MiniWave as a bumped {seq, sec} so it seeks
+  // once per gesture-step regardless of play state (a plain time value would
+  // be indistinguishable from an audio-driven cursor update and could loop).
+  const [audioSeekReq, setAudioSeekReq] = useState(null);
+  const seekSeqRef = useRef(0);
   const [vidItems, setVidItems] = useState([]);
   const [countdownSeconds, setCountdownSeconds] = useState(null);
   const [audioIsPlaying, setAudioIsPlaying] = useState(false);
@@ -195,6 +205,23 @@ export default function ConsolePanel() {
     }
   };
 
+  // Audio window ended (last track finished, or the cursor moved outside the
+  // audio) — hand the cursor back to the wall-clock ticker so the rest of the
+  // (audio-less) show keeps advancing during a preview. Clearing the
+  // timestamp baseline avoids a jump on the next tick.
+  const handleAudioInactive = () => {
+    useAudioTimeRef.current = false;
+    lastUpdateTimeRef.current = null;
+  };
+
+  // A user scrub on the timeline. Bump the sequence so MiniWave treats each
+  // step as a distinct seek. The cursor itself is already set by the Timeline
+  // via setTimeCursor; this only drives the audio seek.
+  const requestAudioSeek = (sec) => {
+    seekSeqRef.current += 1;
+    setAudioSeekReq({ seq: seekSeqRef.current, sec });
+  };
+
   // Manual cursor tick when audio isn't driving (preserved).
   const updateCursor = (timestamp) => {
     if (hasAudio && useAudioTimeRef.current) {
@@ -270,6 +297,24 @@ export default function ConsolePanel() {
   const hasErrors = errors.length > 0;
   const isReadyToFire = isShowLoaded && !hasErrors;
 
+  // Scrubbing is a pre-show rehearsal tool only. Once the show is loaded or
+  // running the cursor is daemon-driven, so we neither allow manual scrubbing
+  // nor surface it as available.
+  const protoStatus = stateData.fw_state?.proto_handler_status || "";
+  const isLive = !!stateData.fw_state?.show_running || protoStatus.startsWith("START");
+  const canScrub = !isShowLoaded && !isLive;
+  const scrubActive = scrubEnabled && canScrub;
+
+  // Preview is a pre-show rehearsal tool only. If the operator leaves it
+  // running and then loads/fires the show, the Play/Pause button becomes
+  // disabled (they can't stop it) and a stale `isPlaying` would keep MiniWave
+  // in preview mode: its audio would drive the cursor against the daemon's
+  // fw_cursor AND live audio would resume from the preview's position instead
+  // of restarting from track 0. Force it off the moment we leave pre-show.
+  useEffect(() => {
+    if (!canScrub) setIsPlaying(false);
+  }, [canScrub]);
+
   // -------------------------------------------------------------------------
   // Render
   // -------------------------------------------------------------------------
@@ -283,12 +328,18 @@ export default function ConsolePanel() {
         isPlaying={isPlaying}
         setIsPlaying={(v) => {
           setIsPlaying(v);
-          if (!hasAudio) {
+          if (v) {
+            // On play, let the wall-clock ticker start fresh from the current
+            // cursor (audio takes over within its window via onAudioTime).
+            lastUpdateTimeRef.current = null;
             useAudioTimeRef.current = false;
-            if (v) {
-              setTimeCursor(0);
-              lastUpdateTimeRef.current = null;
-            }
+            // Restart from the top when there's no audio, or when the cursor
+            // is parked at the end of a finished run; otherwise resume from
+            // wherever the operator scrubbed/paused.
+            const dur = stagedShow?.duration || 0;
+            if (!hasAudio || (dur && timeCursor >= dur - 0.05)) setTimeCursor(0);
+          } else if (!hasAudio) {
+            useAudioTimeRef.current = false;
           }
         }}
         audioIsPlaying={audioIsPlaying}
@@ -302,6 +353,11 @@ export default function ConsolePanel() {
         onPlayVideosChange={setPlayVideos}
         liveAudioOffsetMs={liveAudioOffsetMs}
         onLiveAudioOffsetMsChange={setLiveAudioOffsetMs}
+        scrubEnabled={scrubEnabled}
+        onScrubEnabledChange={setScrubEnabled}
+        canScrub={canScrub}
+        audioSeekReq={audioSeekReq}
+        onAudioInactive={handleAudioInactive}
       />
 
       <ShowHealthStrip />
@@ -313,6 +369,9 @@ export default function ConsolePanel() {
           setTimeCursor={setTimeCursor}
           timeCursor={timeCursor}
           readOnly
+          allowScrub={scrubActive}
+          onScrubSeek={requestAudioSeek}
+          scrubMaxTime={stagedShow.duration}
           audioTracks={stagedShow.audioTracks}
         />
       </Card>
