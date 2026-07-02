@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import useAppStore from "@/store/useAppStore";
-import { Toggle, Field, inputClass, selectClass, fieldHintClass } from "@/design";
+import { Toggle, Field, Button, inputClass, selectClass, fieldHintClass } from "@/design";
 import SaveBar from "./SaveBar";
 
 // Host-device audio output. When enabled, the box running the show plays the
@@ -35,6 +35,8 @@ export default function HostAudioSettings() {
   const [error, setError] = useState(null);
   const [savedAt, setSavedAt] = useState(null);
   const [devices, setDevices] = useState([{ id: "default", label: "System default" }]);
+  // Test-tone playback: { state: "idle"|"playing"|"ok"|"error", message? }.
+  const [test, setTest] = useState({ state: "idle" });
 
   useEffect(() => {
     if (!systemConfig || Object.keys(systemConfig).length === 0) fetchSystemConfig();
@@ -112,12 +114,31 @@ export default function HostAudioSettings() {
   };
   const onToggle = (enabled) =>
     persist({ ...draft, deviceLatencyMs: committedLatencyMs(), enabled }, { keepDraftLatency: true });
-  const onDevice = (deviceId) =>
-    persist({ ...draft, deviceLatencyMs: committedLatencyMs(), deviceId }, { keepDraftLatency: true });
+  const onDevice = (deviceId) => {
+    setTest({ state: "idle" }); // prior result was for the old device
+    return persist({ ...draft, deviceLatencyMs: committedLatencyMs(), deviceId }, { keepDraftLatency: true });
+  };
 
   const onReset = () => {
     setDraft(normalize(systemConfig));
     setError(null);
+  };
+
+  // Play a short test tone out of the currently-selected device so the
+  // operator can confirm it makes sound. The device dropdown auto-commits, so
+  // draft.deviceId is what's actually saved -- test exactly that. The tone is
+  // ~1.2s; the request resolves once playback finishes (or reports why not).
+  const onTest = async () => {
+    setTest({ state: "playing" });
+    try {
+      await axios.post("/api/system/audio_test", { deviceId: draft.deviceId });
+      setTest({ state: "ok" });
+    } catch (e) {
+      setTest({
+        state: "error",
+        message: e?.response?.data?.error || e?.message || "Test failed",
+      });
+    }
   };
 
   // Make sure a previously-saved device that isn't in the enumerated list
@@ -145,16 +166,33 @@ export default function HostAudioSettings() {
         label="Output device"
         hint="Which of this device's audio outputs to play through. 'System default' follows the OS setting."
       >
-        <select
-          value={draft.deviceId}
-          disabled={!draft.enabled || saving}
-          onChange={(e) => onDevice(e.target.value)}
-          className={selectClass}
-        >
-          {deviceOptions.map((d) => (
-            <option key={d.id} value={d.id}>{d.label}</option>
-          ))}
-        </select>
+        <div className="flex items-center gap-2">
+          <select
+            value={draft.deviceId}
+            disabled={!draft.enabled || saving}
+            onChange={(e) => onDevice(e.target.value)}
+            className={`${selectClass} flex-1`}
+          >
+            {deviceOptions.map((d) => (
+              <option key={d.id} value={d.id}>{d.label}</option>
+            ))}
+          </select>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onTest}
+            loading={test.state === "playing"}
+            disabled={!draft.enabled || saving || test.state === "playing"}
+          >
+            {test.state === "playing" ? "Playing…" : "Test"}
+          </Button>
+        </div>
+        {test.state === "ok" ? (
+          <p className={fieldHintClass}>Test tone played on this device.</p>
+        ) : null}
+        {test.state === "error" ? (
+          <p className="text-sm text-danger-fg">{test.message}</p>
+        ) : null}
       </Field>
 
       <Field
