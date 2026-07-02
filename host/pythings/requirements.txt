@@ -1,7 +1,11 @@
 pyserial==3.5
 flask==2.3.3  # Only needed if you plan to add an API
 pyserial
-websockets
+# >=10 required: audio_player.py uses the reconnecting
+# `async for connection in websockets.connect(...)` idiom, which older
+# versions don't support. Pin the floor so an already-provisioned Pi that
+# re-syncs code without re-running pip doesn't crash-loop audio-player.
+websockets>=10
 psutil
 # inotify (Linux) / FSEvents (macOS) wrapper used by ws_server to react
 # to /data/state and /tmp/fw_cursor changes without polling. Falls back
