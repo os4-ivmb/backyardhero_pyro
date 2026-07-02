@@ -50,6 +50,16 @@ services:
       - byh_node_modules:/app/byh_app/node_modules
       - byh_next:/app/byh_app/.next
 
+      # The app source is bind-mounted a SECOND time at the VS Code workspace
+      # path (via the full-repo mount above), but node_modules lives only in
+      # the named volume overlaid on /app/byh_app -- so tooling run from the
+      # workspace copy (`next lint`, `next build`, eslint, package scripts)
+      # can't find `next`/deps. Mount the SAME named volumes at the workspace
+      # path too so both copies share one node_modules/.next and tooling works
+      # from either location.
+      - byh_node_modules:/workspaces/backyardhero_pyro/host/byh_app/backyardhero/node_modules
+      - byh_next:/workspaces/backyardhero_pyro/host/byh_app/backyardhero/.next
+
       # Dev supervisord: byh-app runs `npm run dev` instead of `npm run start`.
       - ../host/supervisord.devcontainer.conf:/etc/supervisor/conf.d/supervisord.conf
     ports:
