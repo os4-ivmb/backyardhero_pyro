@@ -57,3 +57,12 @@ export const INV_COLOR_CODE = {
     FUSED_LINE: '#f59e0b',
     RACK_SHELLS: '#FF8C00'
 }
+
+// Ultimate fallback colour for a cue with no explicit colour and no per-type
+// default. Blue, per the product default.
+export const DEFAULT_ITEM_COLOR = '#3b82f6';
+
+// Resolve a cue/inventory item's display colour: its own `color` wins, then
+// its type's default from INV_COLOR_CODE, then the blue fallback.
+export const itemColorOf = (it) =>
+    (it && it.color) || INV_COLOR_CODE[it && it.type] || DEFAULT_ITEM_COLOR;

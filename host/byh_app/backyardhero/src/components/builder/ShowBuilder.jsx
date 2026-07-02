@@ -1,5 +1,23 @@
 import React, { useEffect, useState, useRef, useMemo } from "react";
 import axios from "axios";
+import {
+  FiPlay,
+  FiPause,
+  FiRotateCcw,
+  FiChevronDown,
+  FiChevronRight,
+  FiInfo,
+  FiTarget,
+  FiGrid,
+  FiPackage,
+  FiZap,
+  FiMap,
+  FiHelpCircle,
+  FiEdit2,
+  FiTrash2,
+  FiLink2,
+  FiUpload,
+} from "react-icons/fi";
 import Timeline from "../common/Timeline";
 import useAppStore from '@/store/useAppStore';
 import FusedLineBuilderModal from "./FusedLineBuilderModal";
@@ -11,6 +29,12 @@ import VideoPreviewPopup from "../common/VideoPreviewPopup";
 import { asyncPrompt, asyncConfirm, asyncAlert } from "../common/AsyncPrompt";
 import SpatialLayoutMap from "./SpatialLayoutMap";
 import RacksTab from "./RacksTab";
+import InventoryTab from "./InventoryTab";
+import ControlsTab from "./ControlsTab";
+import { AddInventoryForm } from "../inventory/InventoryManager";
+import { normalizeYouTubeUrl } from "@/util/youtube";
+import { parseOptionalUnitCost } from "@/util/inventoryUnitCost";
+import usePersistentState from "@/utils/usePersistentState";
 import RackShellsSelector from "./RackShellsSelector";
 import WaveSurfer from 'wavesurfer.js';
 import { analyzeAudioFile, bpmFromTapTimes } from "@/utils/bpmAnalyzer";
@@ -102,7 +126,7 @@ const MULTIPLE_FIRE_TYPES = new Set([
   "AERIAL_SHELL",
 ]);
 
-const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, items, inventory, availableDevices, receiverLabels, showMetadata, editItem }) => {
+const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, items, inventory, availableDevices, receiverLabels, showMetadata, editItem, presetItem, presetTarget }) => {
   // editItem present => the modal is editing an already-placed cue rather than
   // adding a new one. Same UI, but it pre-populates from the cue, keeps the
   // existing start time, excludes the cue itself from occupancy checks, and on
@@ -124,6 +148,11 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
   // derive duration from their inventory item / composite structure, so
   // this is only surfaced and used when selectedType === "GENERIC".
   const [metaDuration, setMetaDuration] = useState(5);
+  // Optional, editable start time for the cue. `startAtSec` is the committed
+  // numeric value (seconds) used on save; `startAtText` is the raw mm:ss text
+  // the operator edits. Both are seeded from the `startTime` prop on open.
+  const [startAtSec, setStartAtSec] = useState(0);
+  const [startAtText, setStartAtText] = useState("00:00.00");
   const [fireMultiple, setFireMultiple] = useState(false);
   const [multipleCount, setMultipleCount] = useState(2);
   const [error, setError] = useState(null);
@@ -162,6 +191,20 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
     setError(null);
   }, [isOpen, editItem, inventory]);
 
+  // Seed the form from an inventory item dragged onto the timeline. Only for
+  // the add flow (never when editing), and only for directly-placeable types
+  // (the drag palette already filters to those). Zone/target still default
+  // via the effect below.
+  useEffect(() => {
+    if (!isOpen || isEdit || !presetItem) return;
+    setSelectedType(presetItem.type || "CAKE_FOUNTAIN");
+    setSelectedItem(presetItem);
+    setMetaLabel(presetItem.name ?? "");
+    setFireMultiple(false);
+    setMultipleCount(2);
+    setError(null);
+  }, [isOpen, presetItem, isEdit]);
+
   useEffect(() => {
     // Don't auto-pick a default zone/target while editing -- the cue already
     // has its routing, and the edit prefill sets it explicitly.
@@ -176,6 +219,71 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
       }
     }
   }, [availableDevices, zone, isEdit]);
+
+  // Force the routing to the receiver:cue picked from the Target Grid "+".
+  // Runs after the default-zone effect above so it wins on first open.
+  useEffect(() => {
+    if (!isOpen || isEdit || !presetTarget) return;
+    setZone(presetTarget.zone);
+    setTarget(presetTarget.target);
+  }, [isOpen, presetTarget, isEdit]);
+
+  // Reset transient form state whenever the modal closes. The component stays
+  // mounted (it just renders null when closed), so without this a cancelled
+  // preset add — dragging an inventory item or clicking a Target-Grid "+" then
+  // hitting Cancel — would leave the previous item/type/routing seeded for the
+  // next plain "add". The seeding effects above only *set* on open, never clear.
+  useEffect(() => {
+    if (isOpen) return;
+    setSelectedType("CAKE_FOUNTAIN");
+    setSelectedItem(null);
+    setFusedLine(null);
+    setFusedItemLine(null);
+    setRackShells(null);
+    setZone(null);
+    setTarget(null);
+    setMetaLabel("");
+    setMetaDelaySec(0);
+    setMetaDuration(5);
+    setFireMultiple(false);
+    setMultipleCount(2);
+    setError(null);
+  }, [isOpen]);
+
+  // mm:ss(.ss) formatting/parsing for the "Start at" field. Accepts either
+  // "mm:ss(.ss)" or bare seconds; returns null when unparseable/negative.
+  const fmtStartAt = (sec) => {
+    const v = Math.max(0, Number(sec) || 0);
+    const m = Math.floor(v / 60);
+    const s = v - m * 60;
+    return `${String(m).padStart(2, "0")}:${s.toFixed(2).padStart(5, "0")}`;
+  };
+  const parseStartAt = (str) => {
+    if (str == null) return null;
+    const t = String(str).trim();
+    if (t === "") return null;
+    let sec;
+    if (t.includes(":")) {
+      const parts = t.split(":");
+      if (parts.length !== 2) return null;
+      const m = Number(parts[0]);
+      const s = Number(parts[1]);
+      if (!Number.isFinite(m) || !Number.isFinite(s)) return null;
+      sec = m * 60 + s;
+    } else {
+      sec = Number(t);
+    }
+    return Number.isFinite(sec) && sec >= 0 ? sec : null;
+  };
+
+  // Seed the editable "Start at" field from the incoming start time (the
+  // click position for a new cue, or the edited cue's own start) each open.
+  useEffect(() => {
+    if (!isOpen) return;
+    const sec = Number(startTime) || 0;
+    setStartAtSec(sec);
+    setStartAtText(fmtStartAt(sec));
+  }, [isOpen, startTime]);
 
   // Helper function to check if a zone+target combination is occupied. The cue
   // currently being edited never counts as occupying its own slot.
@@ -230,6 +338,11 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
       return;
     }
     setError('');
+
+    // Resolve the (optionally edited) start time from the "Start at" field.
+    // Shadows the `startTime` prop for the rest of this handler so every emit
+    // path below stamps the value the operator chose.
+    const startTime = Number.isFinite(Number(startAtSec)) ? Number(startAtSec) : 0;
 
     // In edit mode, re-stamp the original id so the parent replaces the cue in
     // place instead of appending a new one.
@@ -383,15 +496,13 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
       });
       onClose();
     } else if (selectedType === "GENERIC") {
-      console.log("GENERIC ADD")
-      emit({ 
-        name: "GENERIC",
-        type: "GENERIC", 
+      emit({
+        type: "GENERIC",
         duration: Number(metaDuration) || 0,
-        startTime, 
-        zone, 
-        target, 
-        name: metaLabel, 
+        startTime,
+        zone,
+        target,
+        name: metaLabel || "GENERIC",
         delay: metaDelaySec || 0
       });
       onClose();
@@ -485,8 +596,8 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
         title={isEdit ? "Edit cue" : "Add item to timeline"}
         eyebrow={
           isEdit
-            ? `Cue · effect @ ${formatShowClock(startTime)}`
-            : `Cue · t = ${Number(startTime || 0).toFixed(2)}s`
+            ? `Cue · effect @ ${formatShowClock(startAtSec)}`
+            : `Cue · t = ${Number(startAtSec || 0).toFixed(2)}s`
         }
         size="lg"
         footer={
@@ -732,6 +843,26 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
               value={metaLabel}
               onChange={(e) => setMetaLabel(e.target.value)}
               placeholder="Auto-fills from item name"
+            />
+          </Field>
+
+          <Field
+            label="Start at (mm:ss)"
+            hint="When the effect appears on the timeline. Optional — defaults to the click position."
+          >
+            <input
+              type="text"
+              inputMode="numeric"
+              className={inputClass}
+              value={startAtText}
+              onChange={(e) => {
+                const raw = e.target.value;
+                setStartAtText(raw);
+                const sec = parseStartAt(raw);
+                if (sec != null) setStartAtSec(sec);
+              }}
+              onBlur={() => setStartAtText(fmtStartAt(startAtSec))}
+              placeholder="00:00.00"
             />
           </Field>
 
@@ -1012,7 +1143,6 @@ const ChainTimingModal = ({ isOpen, onClose, onApply, selectedItems }) => {
 };
 
 const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex, inventory, inventoryById, availableDevices }) => {
-  const [isExpanded, setIsExpanded] = useState(false);
   const [selectedReceivers, setSelectedReceivers] = useState([]);
   const [startTime, setStartTime] = useState(5);
   const [cadence, setCadence] = useState(1);
@@ -1220,36 +1350,27 @@ const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex,
   };
 
   return (
-    <div className="mb-4 p-3 bg-gray-800 rounded-lg border border-gray-700">
+    <div className="mb-4">
       <div className="flex items-center justify-between">
-        <button
-          onClick={() => setIsExpanded(!isExpanded)}
-          className="text-white font-semibold hover:text-gray-300 flex items-center"
-        >
-          <span className="mr-2">{isExpanded ? '▼' : '▶'}</span>
-          Test Show Builder
-        </button>
-        {isExpanded && (
-          <div className="flex gap-2">
-            <button
-              onClick={handleTestAllCakes}
-              className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded text-sm"
-            >
-              Test All Cakes
-            </button>
-            <button
-              onClick={handleGenerate}
-              className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded text-sm"
-              disabled={selectedReceivers.length === 0}
-            >
-              Generate
-            </button>
-          </div>
-        )}
+        <h3 className="text-white font-semibold">Test Show Builder</h3>
+        <div className="flex gap-2">
+          <button
+            onClick={handleTestAllCakes}
+            className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded text-sm"
+          >
+            Test All Cakes
+          </button>
+          <button
+            onClick={handleGenerate}
+            className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded text-sm"
+            disabled={selectedReceivers.length === 0}
+          >
+            Generate
+          </button>
+        </div>
       </div>
-      
-      {isExpanded && (
-        <div className="mt-4 space-y-4">
+
+      <div className="mt-4 space-y-4">
           {/* Receiver Selection */}
           <div>
             <div className="flex justify-between items-center mb-2">
@@ -1337,7 +1458,6 @@ const TestShowBuilder = ({ receivers, onGenerate, currentIndex, setCurrentIndex,
             </div>
           </div>
         </div>
-      )}
     </div>
   );
 };
@@ -1403,7 +1523,7 @@ const AudioTrackTabs = ({
             onClick={() => onSelect?.(t.id)}
             className={cn(
               "group relative inline-flex items-center gap-2 px-3 h-9 text-sm cursor-pointer select-none",
-              "border border-b-0 rounded-t-md",
+              "border border-b-0 rounded-t-sm",
               isActive
                 ? "bg-gray-800 border-gray-700 text-white"
                 : "bg-gray-900 border-gray-800 text-gray-400 hover:text-gray-200",
@@ -1447,7 +1567,7 @@ const AudioTrackTabs = ({
         type="button"
         onClick={onAdd}
         className={cn(
-          "inline-flex items-center gap-1.5 px-3 h-9 text-sm rounded-t-md",
+          "inline-flex items-center gap-1.5 px-3 h-9 text-sm rounded-t-sm",
           "bg-gray-900 border border-b-0 border-gray-800 text-gray-300",
           "hover:bg-gray-800 hover:text-white"
         )}
@@ -1815,9 +1935,11 @@ const AudioWaveform = ({
   onAudioFileUploaded,      // (file: File) => void  (parent uploads + updates active track)
   onBpmInfoChange,          // (patch) => void  (per-track BPM edit)
   onTrackRemove,            // optional: () => void  (delete the active track)
+  onRestart,                // optional: () => void  (restart active track from 0)
   trackLabel,               // string shown in the editor header
   isUploading,              // whether the parent is currently uploading audio
   isAutoDetecting,          // whether the parent is auto-detecting BPM in the background
+  compact = false,          // slim transport + waveform only (no BPM editor/chrome)
 }) => {
   const track = tracks?.find((t) => t.id === activeTrackId) || null;
   // Cache the most recently uploaded File handle so "Detect BPM" can run
@@ -2061,8 +2183,84 @@ const AudioWaveform = ({
     return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
   };
 
+  // All TrackPlayers stay mounted; only the active one is visible. Keeping the
+  // others warm is the entire reason transitions between songs are gap-free.
+  // Shared between the full editor and the compact transport so playback keeps
+  // working in both.
+  const trackPlayers = (
+    <div>
+      {tracks?.map((t) => (
+        <TrackPlayer
+          key={t.id}
+          track={t}
+          isActive={t.id === activeTrackId}
+          isPlayingShow={!!isPlaying}
+          localTime={t.id === activeTrackId ? localTime : 0}
+          onLocalTimeUpdate={onLocalTimeUpdate}
+          onPlayChange={onPlayChange}
+          onTrackEnded={onTrackEnded}
+          onTrackReady={handleTrackReady}
+          onTrackUnready={handleTrackUnready}
+        />
+      ))}
+    </div>
+  );
+
+  // Compact mode: play / pause / restart over the live waveform, with the BPM
+  // editor and upload/delete chrome hidden to give the timeline more room.
+  if (compact) {
+    return (
+      <div className="p-2 bg-gray-800 rounded-b-sm rounded-tr-sm border border-t-0 border-gray-700">
+        {hasAudio ? (
+          <div className="flex items-center gap-2 mb-2">
+            <button
+              type="button"
+              onClick={handlePlayClick}
+              disabled={!isReady}
+              className="inline-flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white px-3 py-1.5 rounded text-sm"
+              title="Play / pause the show preview (Space)"
+            >
+              {isPlaying ? <FiPause aria-hidden /> : <FiPlay aria-hidden />}
+              {isPlaying ? 'Pause' : 'Play'}
+            </button>
+            <button
+              type="button"
+              onClick={() => onRestart?.()}
+              disabled={!isReady}
+              className="inline-flex items-center gap-1.5 bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-white px-3 py-1.5 rounded text-sm"
+              title="Restart this track from the beginning"
+            >
+              <FiRotateCcw aria-hidden />
+              Restart
+            </button>
+            <span className="text-xs text-gray-300 num ml-1">
+              {formatTime(localTime || 0)} / {formatTime(localDuration || 0)}
+            </span>
+          </div>
+        ) : (
+          <label
+            className="flex w-full h-20 items-center justify-center gap-2 rounded border-2 border-dashed border-blue-500/60 bg-blue-600/10 hover:bg-blue-600/20 text-blue-200 hover:text-white text-sm cursor-pointer transition-colors"
+            title="Load an audio file for this track"
+          >
+            <FiUpload aria-hidden className="text-base" />
+            {isUploading ? "Uploading…" : "Load audio file"}
+            <input
+              type="file"
+              accept="audio/*"
+              onChange={handleFileUpload}
+              className="hidden"
+            />
+          </label>
+        )}
+        {/* Keep the players mounted (warm for gap-free playback) but collapse
+            the empty waveform box when the active track has no audio yet. */}
+        <div style={{ display: hasAudio ? undefined : "none" }}>{trackPlayers}</div>
+      </div>
+    );
+  }
+
   return (
-    <div className="p-4 bg-gray-800 rounded-b-lg border border-t-0 border-gray-700">
+    <div className="p-4 bg-gray-800 rounded-b-sm rounded-tr-sm border border-t-0 border-gray-700">
       <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
         <div className="min-w-0">
           <div className="text-[11px] uppercase tracking-wide text-gray-400">
@@ -2095,12 +2293,24 @@ const AudioWaveform = ({
               <button
                 type="button"
                 onClick={handlePlayClick}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded"
-                title="Play / pause the show preview"
+                className="inline-flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded"
+                title="Play / pause the show preview (Space)"
                 disabled={!isReady}
               >
+                {isPlaying ? <FiPause aria-hidden /> : <FiPlay aria-hidden />}
                 {isPlaying ? 'Pause' : 'Play'}
               </button>
+              {typeof onRestart === "function" && (
+                <button
+                  type="button"
+                  onClick={() => onRestart()}
+                  className="inline-flex items-center justify-center bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-white w-10 py-2 rounded"
+                  title="Restart this track from the beginning"
+                  disabled={!isReady}
+                >
+                  <FiRotateCcw aria-hidden />
+                </button>
+              )}
               <span className="text-sm text-gray-300 num">
                 {formatTime(localTime || 0)} / {formatTime(localDuration || 0)}
               </span>
@@ -2119,25 +2329,7 @@ const AudioWaveform = ({
         </div>
       </div>
 
-      {/* All TrackPlayers stay mounted; only the active one is visible.
-          Keeping the others warm is the entire reason transitions
-          between songs are gap-free. */}
-      <div>
-        {tracks?.map((t) => (
-          <TrackPlayer
-            key={t.id}
-            track={t}
-            isActive={t.id === activeTrackId}
-            isPlayingShow={!!isPlaying}
-            localTime={t.id === activeTrackId ? localTime : 0}
-            onLocalTimeUpdate={onLocalTimeUpdate}
-            onPlayChange={onPlayChange}
-            onTrackEnded={onTrackEnded}
-            onTrackReady={handleTrackReady}
-            onTrackUnready={handleTrackUnready}
-          />
-        ))}
-      </div>
+      {trackPlayers}
 
       {!hasAudio && (
         <div className="text-center text-gray-400 text-sm mt-2">
@@ -2542,6 +2734,9 @@ const SAVEABLE_ITEM_ATTRIBUTES = [
   // util/showImport). Kept so the "Imported" badge survives a builder
   // re-save, since there is no dedicated DB column for the marker.
   "importSource",
+  // Per-item movement lock set from the timeline context menu. Persisted so
+  // a locked cue stays locked across save/reload.
+  "locked",
 ];
 // Item fields that MUST persist as real numbers. A few authoring paths
 // (and older imported payloads) can leave these as strings, which then
@@ -2601,6 +2796,10 @@ const ShowBuilder = (props) => {
     setStagedShow,
     updateShow,
     createShow,
+    createInventoryItem,
+    updateInventoryItem,
+    deleteInventoryItem,
+    fetchInventory,
   } = useAppStore();
   const [items, setItems] = useState([]);
   const [showMetadata, setShowMetadata] = useState({});
@@ -2610,6 +2809,12 @@ const ShowBuilder = (props) => {
   // push every existing cue at/after the insertion point back by the new
   // item's duration so it slots into the middle of the show.
   const [addItemInsertMode, setAddItemInsertMode] = useState(false);
+  // Inventory item to pre-seed the Add modal with (set when a cue is dragged
+  // from the Inventory tab onto the timeline).
+  const [addPresetItem, setAddPresetItem] = useState(null);
+  // Receiver:cue to pre-seed the Add modal with (set when the "+" on an empty
+  // Target Grid cell is clicked). { zone, target } | null.
+  const [addPresetTarget, setAddPresetTarget] = useState(null);
   const [selectedItem, setSelectedItem] = useState(false);
   const [selectedItems, setSelectedItems] = useState([]);
   const [isChainTimingModalOpen, setIsChainTimingModalOpen] = useState(false);
@@ -2654,7 +2859,129 @@ const ShowBuilder = (props) => {
   const [showReceivers, setShowReceivers] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(50);
   const [itemsFixed, setItemsFixed] = useState(false);
-  const [activeTab, setActiveTab] = useState("target"); // "target", "racks", "test", "layout"
+  const [activeTab, setActiveTab] = usePersistentState("byh.editor.activeTab", "target"); // "showdetails", "target", "racks", "inventory", "test", "layout"
+  // Collapse the whole bottom tab panel (nav stays; content hides) so the
+  // timeline can take the full height when the operator doesn't need the tabs.
+  const [tabsCollapsed, setTabsCollapsed] = usePersistentState("byh.editor.tabsCollapsed", false);
+  // Audio panel: collapse the full waveform / BPM editor down to a compact
+  // transport (play / pause / restart over the waveform) to give the timeline
+  // more room. The track tabs stay visible either way.
+  const [audioCompact, setAudioCompact] = usePersistentState("byh.editor.audioCompact", false);
+  // Shown when an "add from inventory" flow is triggered but the inventory is
+  // empty — nudges the operator to populate their inventory first.
+  const [emptyInventoryModalOpen, setEmptyInventoryModalOpen] = useState(false);
+  // Controls the inline inventory add/edit modal (reused from the Inventory
+  // page) so the operator can manage stock without leaving the editor.
+  const [inventoryAddOpen, setInventoryAddOpen] = useState(false);
+  const [inventoryEditItem, setInventoryEditItem] = useState(null);
+  const openInventoryAdd = () => { setInventoryEditItem(null); setInventoryAddOpen(true); };
+  const openInventoryEdit = (item) => { setInventoryAddOpen(false); setInventoryEditItem(item); };
+  const closeInventoryForm = () => { setInventoryAddOpen(false); setInventoryEditItem(null); };
+
+  // Create or update an inventory item from the inline form, mirroring the
+  // Inventory page's normalization, then refresh so changes show immediately.
+  const handleSaveInventoryItem = async (item) => {
+    const normalized = { ...item, unit_cost: parseOptionalUnitCost(item.unit_cost) };
+    if (item.youtube_link && item.youtube_link.trim() !== "") {
+      normalized.youtube_link = normalizeYouTubeUrl(item.youtube_link) || "";
+    }
+    if (normalized.id) {
+      let metadata = normalized.metadata;
+      if (metadata && typeof metadata === "object") metadata = JSON.stringify(metadata);
+      await updateInventoryItem(normalized.id, { ...normalized, metadata });
+    } else {
+      await createInventoryItem(normalized);
+    }
+    await fetchInventory?.();
+    // After an *edit*, re-sync placed cues sourced from that exact item so its
+    // changes show on the timeline immediately. A brand-new item has no placed
+    // cues yet, so only edits need this. We scope to the edited item (untouched
+    // cues keep their identity), preserve any field the record doesn't define
+    // (?? it.x, so undefined never blanks an existing value), and recompute the
+    // cue's total delay from the item's (possibly edited) fuse/lift delays plus
+    // the cue's own additional delay. Composite cues (fused lines, rack shells)
+    // carry no `itemId`, so they're skipped and keep their built-in timing.
+    if (normalized.id) {
+      const savedId = Number(normalized.id);
+      const inv = (useAppStore.getState().inventoryById || {})[savedId];
+      if (inv) {
+        setItems((prev) =>
+          prev.map((it) => {
+            if (it.itemId == null || Number(it.itemId) !== savedId) return it;
+            const dur =
+              inv.duration != null && inv.duration !== "" ? Number(inv.duration) : it.duration;
+            const itemDelay =
+              (inv.fuse_delay ?? inv.fuseDelay ?? 0) +
+              (inv.type === "AERIAL_SHELL" ? (inv.lift_delay ?? 0) : 0);
+            return {
+              ...it,
+              color: inv.color ?? it.color,
+              image: inv.image ?? it.image,
+              unit_cost: inv.unit_cost ?? it.unit_cost,
+              youtube_link: inv.youtube_link ?? it.youtube_link,
+              fuse_delay: inv.fuse_delay ?? it.fuse_delay,
+              lift_delay: inv.lift_delay ?? it.lift_delay,
+              duration: dur,
+              delay: (Number(it.metaDelaySec) || 0) + itemDelay,
+            };
+          })
+        );
+      }
+    }
+    closeInventoryForm();
+  };
+
+  // Gate the add-from-inventory entry points: returns false (and pops the
+  // "add inventory first" modal) when there's nothing to place.
+  const requireInventory = () => {
+    if (!inventory || inventory.length === 0) {
+      setEmptyInventoryModalOpen(true);
+      return false;
+    }
+    return true;
+  };
+
+  // Lightweight, auto-dismissing toast (e.g. after a ⌘/Ctrl+S save).
+  const [toast, setToast] = useState(null); // { msg, tone } | null
+  const toastTimerRef = useRef(null);
+  const showToast = (msg, tone = "ok") => {
+    setToast({ msg, tone });
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToast(null), 2500);
+  };
+  // Height (px) of the bottom tab panel. The timeline flex-fills whatever
+  // space is left above it, so dragging the divider resizes both at once.
+  const [panelHeight, setPanelHeight] = usePersistentState("byh.editor.panelHeight", 300);
+  // Live height during a divider drag. Tracked in transient state so the drag
+  // doesn't rewrite localStorage on every mousemove (usePersistentState writes
+  // on each change); the final value is committed once, on mouse-up.
+  const [dragPanelHeight, setDragPanelHeight] = useState(null);
+  const effectivePanelHeight = dragPanelHeight ?? panelHeight;
+
+  // Drag the divider between the timeline and the tab panel. Dragging down
+  // shrinks the panel (and grows the timeline); dragging up does the reverse.
+  const startPanelResize = (e) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = panelHeight;
+    let latest = startH;
+    const onMove = (ev) => {
+      const dy = ev.clientY - startY;
+      const max = Math.max(160, window.innerHeight - 340);
+      latest = Math.min(max, Math.max(120, startH - dy));
+      setDragPanelHeight(latest);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+      setPanelHeight(latest);    // persist the final height once
+      setDragPanelHeight(null);  // fall back to the persisted value
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    document.body.style.userSelect = "none";
+  };
 
   // Edit/Add modal for a single show-receiver entry.
   // `editingReceiverEntry` is null for ADD mode, a copy of the entry for EDIT.
@@ -2992,6 +3319,9 @@ const ShowBuilder = (props) => {
   };
 
   const openAddModal = (time, opts = {}) => {
+    if (!requireInventory()) return;
+    setAddPresetItem(null);
+    setAddPresetTarget(null);
     setAddItemStartTime(time);
     setAddItemInsertMode(!!opts.insert);
     setIsAddModalOpen(true);
@@ -3002,6 +3332,33 @@ const ShowBuilder = (props) => {
     // Clear insert mode so a cancelled insert doesn't leak into the next add
     // (e.g. a copy/place, which calls addItemToTimeline directly).
     setAddItemInsertMode(false);
+    setAddPresetItem(null);
+    setAddPresetTarget(null);
+  };
+
+  // An inventory item was dragged from the Inventory tab onto the timeline at
+  // `time`. Open the add flow pre-seeded with that item so the operator only
+  // needs to confirm the receiver/cue routing.
+  const handleDropInventory = (inventoryId, time) => {
+    // inventoryId arrives as a number (Timeline parseInt's the drag payload);
+    // coerce each candidate id too so string/number id shapes still match.
+    const inv = inventory.find((i) => Number(i.id) === Number(inventoryId));
+    if (!inv) return;
+    setAddPresetItem(inv);
+    setAddPresetTarget(null);
+    setAddItemStartTime(Math.max(0, time));
+    setIsAddModalOpen(true);
+  };
+
+  // The "+" on an empty Target Grid cell was clicked. Open the add flow with
+  // the receiver/cue pre-selected so the operator only picks the inventory
+  // item. Start time defaults to 0; it can be dragged on the timeline after.
+  const openAddModalAtTarget = (zone, target) => {
+    if (!requireInventory()) return;
+    setAddPresetItem(null);
+    setAddPresetTarget({ zone, target });
+    setAddItemStartTime(0);
+    setIsAddModalOpen(true);
   };
 
   const addItemToTimeline = (item) => {
@@ -3044,6 +3401,10 @@ const ShowBuilder = (props) => {
 
   const handleItemSelect = (item, isMultiSelect) => {
     if (isMultiSelect) {
+      // Locked cues can't join a multi-selection (they can't be multi-dragged);
+      // they show a red outline on the timeline to signal this. Single-select
+      // still works so they can be inspected / unlocked.
+      if (item?.locked) return;
       setSelectedItems(prev => {
         const isSelected = prev.some(selected => selected.id === item.id);
         if (isSelected) {
@@ -3077,6 +3438,28 @@ const ShowBuilder = (props) => {
     setSelectedItem(false);
     setSelectedItems([]);
   };
+
+  // Keep the multi-selection pointing at the LIVE item objects. selectedItems
+  // holds snapshots captured at click time; after any move/edit their startTime
+  // (etc.) goes stale, so the multi-drag baseline and chain-timing would read
+  // old positions and cues "jump" on the next drag. Re-point to the current
+  // items by id whenever items changes, dropping any that were deleted. Returns
+  // the previous array unchanged when nothing moved, so this never loops.
+  useEffect(() => {
+    setSelectedItems((prev) => {
+      if (prev.length === 0) return prev;
+      const byId = new Map(items.map((it) => [it.id, it]));
+      let changed = false;
+      const next = [];
+      for (const s of prev) {
+        const live = byId.get(s.id);
+        if (!live) { changed = true; continue; }
+        if (live !== s) changed = true;
+        next.push(live);
+      }
+      return changed ? next : prev;
+    });
+  }, [items]);
 
   // Edit an existing timeline item (opened via double-click on the timeline or
   // the Edit button on the single-selection panel).
@@ -3304,6 +3687,39 @@ const ShowBuilder = (props) => {
     setIsAudioPlaying(!!playing);
   };
 
+  // Restart the active track from its beginning. Setting the show-time to the
+  // active track's offset drives the active wavesurfer's seek effect back to
+  // local time 0; playback keeps running if it was already playing.
+  const handleAudioRestart = () => {
+    setAudioCurrentTime(activeTrackOffset);
+  };
+
+  // Spacebar toggles audio playback, DAW-style. Ignored while typing in a
+  // field or when a control (button/select) is focused, so Space keeps its
+  // native behaviour there, and left alone when a modifier is held.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.code !== "Space" && e.key !== " ") return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const el = e.target;
+      const tag = el?.tagName;
+      if (
+        el?.isContentEditable ||
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        tag === "BUTTON"
+      ) {
+        return;
+      }
+      if (!audioTracks || audioTracks.length === 0) return;
+      e.preventDefault();
+      setIsAudioPlaying((v) => !v);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [audioTracks]);
+
   // Local-time emit from the active track's wavesurfer -> show-time.
   const handleLocalTimeUpdate = (localSec) => {
     if (!isFinite(localSec) || localSec < 0) return;
@@ -3381,20 +3797,25 @@ const ShowBuilder = (props) => {
   const [saveStatus, setSaveStatus] = useState("idle");
   const [lastSavedAt, setLastSavedAt] = useState(null);
 
+  // Resolves to a status object: { ok: true, id } on success, or
+  // { ok: false, reason } where reason is "needs-setup" (missing name/auth),
+  // "in-flight" (a save is already running — not a failure), "cancelled" (the
+  // operator dismissed the auth prompt), or "error" (the write threw). Callers
+  // that only fire-and-forget (auto-save, unmount flush) ignore the result.
   const handleSaveShow = async ({ silent = false } = {}) => {
-    if (!showMetadata.name) return null; // UI gates this; defensive
-    if (isSavingRef.current) return null; // a save is already in flight
+    if (!showMetadata.name) return { ok: false, reason: "needs-setup" }; // UI gates this; defensive
+    if (isSavingRef.current) return { ok: false, reason: "in-flight" }; // a save is already in flight
 
     let authorization_code = showMetadata.authorization_code;
     if (!authorization_code) {
-      if (silent) return null; // never prompt mid-edit
+      if (silent) return { ok: false, reason: "needs-setup" }; // never prompt mid-edit
       authorization_code = await asyncPrompt({
         title: "Set show auth code",
         message:
           "Please enter an auth code for this show. It will be used to both edit and launch the show.",
         okLabel: "Save",
       });
-      if (!authorization_code) return null;
+      if (!authorization_code) return { ok: false, reason: "cancelled" };
     }
 
     const compressedItems = compressItemsForSave(items);
@@ -3474,12 +3895,12 @@ const ShowBuilder = (props) => {
       setSaveStatus("saved");
       setLastSavedAt(Date.now());
       if (!silent) await asyncAlert("Updated Successfully!");
-      return savedId;
+      return { ok: true, id: savedId };
     } catch (error) {
       console.error("Failed to save show:", error);
       setSaveStatus("error");
       if (!silent) await asyncAlert("Failed to save show. See console for details.");
-      return null;
+      return { ok: false, reason: "error" };
     } finally {
       isSavingRef.current = false;
     }
@@ -3490,6 +3911,43 @@ const ShowBuilder = (props) => {
   // render.
   const handleSaveShowRef = useRef(handleSaveShow);
   handleSaveShowRef.current = handleSaveShow;
+
+  // ⌘/Ctrl+S saves the show (silently, so no blocking modal) and confirms
+  // with a toast. Uses the ref so the listener always runs the latest closure.
+  useEffect(() => {
+    const onKey = async (e) => {
+      const isSaveCombo = (e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S");
+      if (!isSaveCombo) return;
+      // Always suppress the browser's native "save page" dialog for ⌘/Ctrl+S.
+      e.preventDefault();
+      e.stopPropagation();
+      // Don't save the show while a modal / inline form is open — the operator
+      // is likely acting on that (e.g. the inventory editor), not the show.
+      if (typeof document !== "undefined" && document.querySelector('[role="dialog"]')) return;
+      const res = await handleSaveShowRef.current({ silent: true });
+      if (res?.ok) {
+        showToast("Show saved", "ok");
+      } else if (res?.reason === "in-flight") {
+        // A save is already running (e.g. debounced auto-save mid-flight); it
+        // will complete on its own, so this isn't a failure — stay quiet.
+      } else if (res?.reason === "needs-setup") {
+        // Missing name / auth code: take the operator to the Show Details tab
+        // (expanding the panel if collapsed) so the advice is actionable.
+        setTabsCollapsed(false);
+        setActiveTab("showdetails");
+        showToast("Open Show Details to finish setup (name + auth code)", "warn");
+      } else {
+        showToast("Couldn’t save — see console for details", "warn");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Drop the toast timer on unmount.
+  useEffect(() => () => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+  }, []);
 
   // Fingerprint of the editor's persistable state. Recomputed only when
   // a saveable input changes; the auto-save effect compares this to
@@ -3681,6 +4139,17 @@ const ShowBuilder = (props) => {
     setIsCopyTargetModalOpen(true);
   };
 
+  // Start the copy flow for a specific cue straight from the timeline context
+  // menu: seed it as the source and jump to picking the destination, skipping
+  // the "click a source" step.
+  const startCopyFromItem = (item) => {
+    setCopyTargetZone(null);
+    setCopyTargetCue(null);
+    setCopySourceItem(item);
+    setCopyMode("select-source");
+    setIsCopyTargetModalOpen(true);
+  };
+
   const handleCopyTargetConfirm = (zone, target) => {
     setCopyTargetZone(zone);
     setCopyTargetCue(target);
@@ -3705,45 +4174,54 @@ const ShowBuilder = (props) => {
   };
 
   return (
-    <div className="p-4">
-      <h1 className="text-xl mb-4">Show Editor</h1>
-      <ShowStateHeader 
-        items={items} 
-        setItems={setItems} 
-        refreshInventoryFnc={refreshInventory} 
-        inventoryById={inventoryById} 
-        showMetadata={showMetadata} 
-        setShowMetadata={setShowMetadata}
-        clearEditor={clearEditorFnc}
-        receiverLabels={receiverLabels}
-        onSaveShow={handleSaveShow}
-        saveStatus={saveStatus}
-        lastSavedAt={lastSavedAt}
-      />
-      <div>
-          {/* Audio editor: tab strip + per-track waveform/BPM card. */}
-          <div className="mb-4">
-            <AudioTrackTabs
-              tracks={audioTracks}
-              activeTrackId={activeTrackId}
-              audioOffsets={audioOffsets}
-              onSelect={(id) => {
-                setActiveTrackId(id);
-                const idx = audioTracks.findIndex((t) => t.id === id);
-                if (idx >= 0) setAudioCurrentTime(audioOffsets[idx] || 0);
-              }}
-              onAdd={handleAddTrack}
-              onRemove={handleRemoveTrack}
-              onReorder={handleReorderTracks}
-            />
+    <div className={cn("h-full flex flex-col min-h-0", tabsCollapsed ? "px-4 pt-4 pb-0" : "p-4")}>
+      <div className="flex-1 min-h-0 flex flex-col">
+          {/* Audio editor: tab strip + per-track waveform/BPM card. The
+              waveform body collapses (tabs stay) to give the timeline room. */}
+          <div className="mb-4 shrink-0">
+            <div className="flex items-end justify-between gap-2">
+              <div className="min-w-0 overflow-x-auto overflow-y-hidden">
+                <AudioTrackTabs
+                  tracks={audioTracks}
+                  activeTrackId={activeTrackId}
+                  audioOffsets={audioOffsets}
+                  onSelect={(id) => {
+                    setActiveTrackId(id);
+                    const idx = audioTracks.findIndex((t) => t.id === id);
+                    if (idx >= 0) setAudioCurrentTime(audioOffsets[idx] || 0);
+                  }}
+                  onAdd={handleAddTrack}
+                  onRemove={handleRemoveTrack}
+                  onReorder={handleReorderTracks}
+                />
+              </div>
+              {/* Collapse the full BPM editor down to the compact transport
+                  (or back). The track tabs above stay visible either way. */}
+              <button
+                type="button"
+                onClick={() => setAudioCompact((v) => !v)}
+                title={audioCompact ? "Show full waveform editor" : "Collapse to compact player"}
+                aria-expanded={!audioCompact}
+                className="mb-1 shrink-0 inline-flex items-center gap-1.5 h-7 px-2 rounded-sm text-xs text-fg-secondary hover:text-fg-primary hover:bg-surface-3"
+              >
+                {audioCompact ? (
+                  <FiChevronRight className="text-sm" aria-hidden />
+                ) : (
+                  <FiChevronDown className="text-sm" aria-hidden />
+                )}
+                {audioCompact ? "Expand" : "Collapse"}
+              </button>
+            </div>
             {audioTracks.length > 0 && activeTrack ? (
               <AudioWaveform
                 tracks={audioTracks}
                 activeTrackId={activeTrackId}
                 localTime={activeLocalTime}
                 isPlaying={isAudioPlaying}
+                compact={audioCompact}
                 onLocalTimeUpdate={handleLocalTimeUpdate}
                 onPlayChange={handleAudioPlayChange}
+                onRestart={handleAudioRestart}
                 onTrackEnded={handleActiveTrackEnded}
                 onTrackDurationKnown={handleTrackDurationKnown}
                 onAudioFileUploaded={(file) =>
@@ -3758,7 +4236,7 @@ const ShowBuilder = (props) => {
                 isAutoDetecting={autoDetectingTrackIds.has(activeTrack.id)}
               />
             ) : (
-              <div className="p-4 bg-gray-800 rounded-b-lg border border-t-0 border-gray-700 text-sm text-gray-400">
+              <div className="p-4 bg-gray-800 rounded-b-sm rounded-tr-sm border border-t-0 border-gray-700 text-sm text-gray-400">
                 Click <span className="text-gray-200 font-semibold">+ Add track</span>{" "}
                 above to attach an audio file to this show.
               </div>
@@ -3766,7 +4244,7 @@ const ShowBuilder = (props) => {
           </div>
 
           {selectedItems.length >= 2 && (
-            <Card tone="raised" padding="sm" className="mb-3">
+            <Card tone="raised" padding="sm" className="mb-3 shrink-0">
               <div className="flex items-center justify-between gap-3">
                 <div className="text-sm text-fg-secondary min-w-0">
                   <span className="num text-fg-primary">
@@ -3778,7 +4256,12 @@ const ShowBuilder = (props) => {
                     · ⌘-click to add or remove
                   </span>
                 </div>
-                <Button size="sm" variant="primary" onClick={handleChainTiming}>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  leading={<FiLink2 aria-hidden />}
+                  onClick={handleChainTiming}
+                >
                   Chain timing…
                 </Button>
               </div>
@@ -3789,7 +4272,7 @@ const ShowBuilder = (props) => {
               and exposes Edit / Delete. Hidden while a multi-select is active
               (that has its own panel) or during a copy flow. */}
           {selectedItem && selectedItems.length < 2 && !copyMode && (
-            <Card tone="raised" padding="sm" className="mb-3">
+            <Card tone="raised" padding="sm" className="mb-3 shrink-0">
               <div className="flex items-center justify-between gap-3">
                 <div className="text-sm text-fg-secondary min-w-0 flex items-center gap-x-4 gap-y-1 flex-wrap">
                   <span className="font-medium text-fg-primary truncate max-w-[16rem]">
@@ -3819,6 +4302,7 @@ const ShowBuilder = (props) => {
                   <Button
                     size="sm"
                     variant="outline"
+                    leading={<FiEdit2 aria-hidden />}
                     onClick={() => openEditModal(selectedItem)}
                   >
                     Edit…
@@ -3826,6 +4310,7 @@ const ShowBuilder = (props) => {
                   <Button
                     size="sm"
                     variant="danger"
+                    leading={<FiTrash2 aria-hidden />}
                     onClick={() => handleItemDelete(selectedItem)}
                   >
                     Delete
@@ -3835,48 +4320,53 @@ const ShowBuilder = (props) => {
             </Card>
           )}
 
-          <div className="mb-2 flex items-center justify-between gap-2 min-h-7">
-            <div className="flex items-center gap-2 min-w-0 text-sm">
+          {/* Copy-mode instructions. The Copy/Cancel button itself now lives
+              in the timeline header; this strip only appears while copying. */}
+          {copyMode && (
+            <div className="mb-2 flex items-center gap-2 min-w-0 text-sm shrink-0">
               {copyMode === "select-source" && (
-                <Badge tone="accent" size="sm">Pick source</Badge>
-              )}
-              {copyMode === "select-source" && (
-                <span className="text-fg-secondary truncate">
-                  Click an item in the timeline to copy.
-                </span>
+                <>
+                  <Badge tone="accent" size="sm">Pick source</Badge>
+                  <span className="text-fg-secondary truncate">
+                    Click an item in the timeline to copy.
+                  </span>
+                </>
               )}
               {copyMode === "select-position" && (
-                <Badge tone="accent" size="sm">Place copy</Badge>
+                <>
+                  <Badge tone="accent" size="sm">Place copy</Badge>
+                  <span className="text-fg-secondary truncate">
+                    Copying{" "}
+                    <span className="font-medium text-fg-primary">
+                      {copySourceItem?.name}
+                    </span>{" "}
+                    → {receiverLabels?.[copyTargetZone] || copyTargetZone}:
+                    {copyTargetCue}. Click a spot on the timeline.
+                  </span>
+                </>
               )}
-              {copyMode === "select-position" && (
-                <span className="text-fg-secondary truncate">
-                  Copying{" "}
-                  <span className="font-medium text-fg-primary">
-                    {copySourceItem?.name}
-                  </span>{" "}
-                  → {receiverLabels?.[copyTargetZone] || copyTargetZone}:
-                  {copyTargetCue}. Click a spot on the timeline.
-                </span>
-              )}
+              <Button
+                size="xs"
+                variant="ghost"
+                className="ml-auto shrink-0"
+                onClick={cancelCopyItem}
+              >
+                Cancel
+              </Button>
             </div>
-            <Button
-              size="sm"
-              variant={copyMode ? "danger" : "outline"}
-              onClick={copyMode ? cancelCopyItem : startCopyItem}
-              title="Copy an existing timeline item to another receiver/cue"
-              disabled={!hasShowReceivers && !copyMode}
-            >
-              {copyMode ? "Cancel copy" : "Copy item"}
-            </Button>
-          </div>
+          )}
 
-          <div className="relative">
-            <div className={cn(!hasShowReceivers && "opacity-35 grayscale pointer-events-none")}>
+          <div className="relative flex-1 min-h-0 flex flex-col">
+            <div className={cn("flex-1 min-h-0 flex flex-col", !hasShowReceivers && "opacity-35 grayscale pointer-events-none")}>
               <Timeline
+                persistKey="editor"
                 items={items}
                 setItems={setItems}
                 openAddModal={openAddModal}
                 openEditModal={openEditModal}
+                onItemDelete={handleItemDelete}
+                onDropInventory={handleDropInventory}
+                bodyFill
                 setSelectedItem={(item) => handleItemSelect(item, false)}
                 selectedItems={selectedItems}
                 onItemSelect={handleItemSelect}
@@ -3887,6 +4377,9 @@ const ShowBuilder = (props) => {
                 copyMode={copyMode}
                 onCopySourceClick={handleCopySourceClick}
                 onCopyPlaceClick={handleCopyPlaceClick}
+                onToggleCopy={copyMode ? cancelCopyItem : startCopyItem}
+                onCopyItem={startCopyFromItem}
+                copyDisabled={!hasShowReceivers && !copyMode}
                 audioTracks={audioTracks}
                 audioDurationSec={totalAudioDuration}
               />
@@ -3916,78 +4409,112 @@ const ShowBuilder = (props) => {
             ) : null}
           </div>
           
-          {/* Tabs Section */}
-          <div className="mt-4">
+          {/* Drag divider: resize the tab panel (and the timeline) vertically. */}
+          {!tabsCollapsed && (
+            <div
+              onMouseDown={startPanelResize}
+              title="Drag to resize the panel"
+              className="group shrink-0 h-2.5 my-1 flex items-center justify-center cursor-row-resize"
+            >
+              <div className="h-1 w-12 rounded-full bg-border group-hover:bg-accent transition-colors" />
+            </div>
+          )}
+
+          {/* Tabs Section -- fixed (resizable) height; the timeline flex-fills
+              the space above. Collapsed => just the nav row. */}
+          <div
+            className={cn("flex flex-col shrink-0 min-h-0", tabsCollapsed && "pt-2")}
+            style={tabsCollapsed ? undefined : { height: effectivePanelHeight }}
+          >
             {/* Tab Navigation */}
-            <div className="flex border-b border-gray-700 mb-4">
+            <div className={cn("flex items-center justify-between border-b border-border shrink-0", tabsCollapsed ? "mb-0" : "mb-4")}>
+              <div className="flex items-end gap-1">
+                {[
+                  { key: "showdetails", label: "Show Details", Icon: FiInfo },
+                  { key: "target", label: "Target Grid", Icon: FiTarget },
+                  { key: "racks", label: "Racks", Icon: FiGrid },
+                  { key: "inventory", label: "Inventory", Icon: FiPackage },
+                  { key: "test", label: "Test Show Builder", Icon: FiZap },
+                  { key: "layout", label: "Show Layout", Icon: FiMap },
+                  { key: "controls", label: "Controls", Icon: FiHelpCircle },
+                ].map(({ key, label, Icon }) => {
+                  const isActive = activeTab === key && !tabsCollapsed;
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (tabsCollapsed) setTabsCollapsed(false);
+                        handleTabChange(key);
+                        e.currentTarget.blur();
+                      }}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-t-md border border-b-0 -mb-px transition-colors",
+                        isActive
+                          ? "bg-surface-2 border-border text-fg-primary"
+                          : "bg-surface-1/40 border-transparent text-fg-muted hover:text-fg-secondary hover:bg-surface-2/60"
+                      )}
+                    >
+                      <Icon
+                        className={cn(
+                          "text-[15px] shrink-0",
+                          isActive ? "text-accent" : "opacity-70"
+                        )}
+                        aria-hidden
+                      />
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+              {/* Collapse / expand the tab panel. */}
               <button
                 type="button"
                 onClick={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  handleTabChange("target");
+                  setTabsCollapsed((v) => !v);
                   e.currentTarget.blur();
                 }}
-                className={`px-4 py-2 font-medium text-sm ${
-                  activeTab === "target"
-                    ? "text-blue-400 border-b-2 border-blue-400"
-                    : "text-gray-400 hover:text-gray-300"
-                }`}
+                title={tabsCollapsed ? "Show tab panel" : "Hide tab panel"}
+                aria-expanded={!tabsCollapsed}
+                className="mr-1 inline-flex items-center gap-1.5 px-2 py-1 text-xs text-gray-400 hover:text-gray-200"
               >
-                Target Grid
-              </button>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  handleTabChange("racks");
-                  e.currentTarget.blur();
-                }}
-                className={`px-4 py-2 font-medium text-sm ${
-                  activeTab === "racks"
-                    ? "text-blue-400 border-b-2 border-blue-400"
-                    : "text-gray-400 hover:text-gray-300"
-                }`}
-              >
-                Racks
-              </button>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  handleTabChange("test");
-                  e.currentTarget.blur();
-                }}
-                className={`px-4 py-2 font-medium text-sm ${
-                  activeTab === "test"
-                    ? "text-blue-400 border-b-2 border-blue-400"
-                    : "text-gray-400 hover:text-gray-300"
-                }`}
-              >
-                Test Show Builder
-              </button>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  handleTabChange("layout");
-                  e.currentTarget.blur();
-                }}
-                className={`px-4 py-2 font-medium text-sm ${
-                  activeTab === "layout"
-                    ? "text-blue-400 border-b-2 border-blue-400"
-                    : "text-gray-400 hover:text-gray-300"
-                }`}
-              >
-                Show Layout
+                {tabsCollapsed ? (
+                  <FiChevronRight className="text-sm" aria-hidden />
+                ) : (
+                  <FiChevronDown className="text-sm" aria-hidden />
+                )}
+                {tabsCollapsed ? "Show" : "Hide"}
               </button>
             </div>
-            
-            {/* Tab Content */}
-            <div className="tab-content">
+
+            {/* Tab Content -- the only vertical scroll region on the editor,
+                filling the space left below the timeline so the page itself
+                never scrolls. */}
+            <div
+              className={`tab-content ${
+                tabsCollapsed ? "hidden" : "flex-1 min-h-0 overflow-y-auto pr-1"
+              }`}
+            >
+              {activeTab === "showdetails" && (
+                <ShowStateHeader
+                  items={items}
+                  setItems={setItems}
+                  refreshInventoryFnc={refreshInventory}
+                  inventoryById={inventoryById}
+                  showMetadata={showMetadata}
+                  setShowMetadata={setShowMetadata}
+                  clearEditor={clearEditorFnc}
+                  receiverLabels={receiverLabels}
+                  onSaveShow={handleSaveShow}
+                  saveStatus={saveStatus}
+                  lastSavedAt={lastSavedAt}
+                />
+              )}
+
               {activeTab === "target" && (
                 <ShowTargetGrid
                   items={items}
@@ -3999,6 +4526,7 @@ const ShowBuilder = (props) => {
                   onAddReceiver={openAddReceiverModal}
                   onEditReceiver={openEditReceiverModal}
                   onRemoveReceiver={handleRemoveReceiver}
+                  onAddToTarget={openAddModalAtTarget}
                 />
               )}
               
@@ -4010,7 +4538,16 @@ const ShowBuilder = (props) => {
                   setShowItems={setItems}
                 />
               )}
-              
+
+              {activeTab === "inventory" && (
+                <InventoryTab
+                  inventory={inventory}
+                  onAddInventory={openInventoryAdd}
+                  onEditInventory={openInventoryEdit}
+                  onRefreshInventory={fetchInventory}
+                />
+              )}
+
               {activeTab === "test" && (
                 <TestShowBuilder
                   receivers={testShowReceivers}
@@ -4032,6 +4569,8 @@ const ShowBuilder = (props) => {
                   onSaveLocations={saveReceiverLocations}
                 />
               )}
+
+              {activeTab === "controls" && <ControlsTab />}
             </div>
           </div>
           
@@ -4041,6 +4580,8 @@ const ShowBuilder = (props) => {
             onAdd={addItemToTimeline}
             startTime={addItemStartTime}
             insertMode={addItemInsertMode}
+            presetItem={addPresetItem}
+            presetTarget={addPresetTarget}
             items={items}
             inventory={inventory}
             availableDevices={availableDevices}
@@ -4092,7 +4633,63 @@ const ShowBuilder = (props) => {
             existingShowReceivers={showReceivers}
             items={items}
           />
+          <Modal
+            isOpen={emptyInventoryModalOpen}
+            onClose={() => setEmptyInventoryModalOpen(false)}
+            title="Your inventory is empty"
+            eyebrow="Add inventory first"
+            size="sm"
+            footer={
+              <>
+                <Button variant="outline" onClick={() => setEmptyInventoryModalOpen(false)}>
+                  Not now
+                </Button>
+                <Button
+                  variant="primary"
+                  onClick={() => {
+                    setEmptyInventoryModalOpen(false);
+                    openInventoryAdd();
+                  }}
+                >
+                  Add inventory item
+                </Button>
+              </>
+            }
+          >
+            <p className="text-sm text-fg-secondary">
+              There are no items in your inventory yet, so there's nothing to
+              place on the timeline. Add a cake, shell, or other item to your
+              inventory, then it'll be ready to drop on the timeline.
+            </p>
+          </Modal>
+
+          {/* Inline inventory add/edit form (reused from the Inventory page)
+              so stock can be added or edited without leaving the editor. */}
+          <AddInventoryForm
+            showNewItem={inventoryAddOpen}
+            activeItem={inventoryEditItem}
+            addItemFnc={handleSaveInventoryItem}
+            deleteInventoryItem={deleteInventoryItem}
+            onItemDeleted={closeInventoryForm}
+            onDismiss={closeInventoryForm}
+          />
         </div>
+
+        {/* Auto-dismissing toast (e.g. ⌘/Ctrl+S save confirmation). */}
+        {toast && (
+          <div
+            role="status"
+            className={cn(
+              "fixed bottom-4 right-4 z-50 px-3 py-2 rounded-md shadow-e3 text-sm border",
+              "transition-opacity duration-200",
+              toast.tone === "warn"
+                ? "bg-warn-bg border-warn/60 text-warn-fg"
+                : "bg-ok-bg border-ok/60 text-ok-fg"
+            )}
+          >
+            {toast.msg}
+          </div>
+        )}
     </div>
   );
 };

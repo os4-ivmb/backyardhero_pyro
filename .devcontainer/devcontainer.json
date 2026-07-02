@@ -1,0 +1,58 @@
+{
+  "name": "Backyard Hero — host",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "firework-system",
+  // Open at the REPO ROOT (not host/) so the .git dir and the rest of the
+  // repo (devices/, etc.) are visible and VS Code's Git integration works.
+  "workspaceFolder": "/workspaces/backyardhero_pyro",
+
+  // Keep the image's CMD (entrypoint -> supervisord), which boots the whole
+  // stack (websock + firework-daemon + Next.js dev server). Do NOT let the
+  // Dev Containers extension replace it with `sleep infinity`.
+  "overrideCommand": false,
+
+  // supervisord starts as root (PID 1) to fix bind-mount ownership, then
+  // drops each app process to the unprivileged `node` user. Attach VS Code
+  // as `node` (uid 1000, == the WSL host user) so edited files stay writable.
+  "remoteUser": "node",
+
+  // Claude Code CLI, installed on top of the compose-built image when
+  // launched via the Dev Containers extension / `devcontainer up`. (A plain
+  // `docker compose up` does NOT apply features -- see README.)
+  "features": {
+    // node:22-slim ships without git; VS Code's Source Control needs it
+    // inside the container to detect and operate on the repo.
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1": {}
+  },
+
+  "forwardPorts": [1776, 8090],
+  "portsAttributes": {
+    "1776": { "label": "Next.js app", "onAutoForward": "openBrowser" },
+    "8090": { "label": "WebSocket server", "onAutoForward": "silent" }
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-python.python",
+        "ms-azuretools.vscode-docker"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3"
+      }
+    }
+  },
+
+  // Mark the bind-mounted repo as a safe git directory so git/VS Code don't
+  // refuse it with "detected dubious ownership" (can happen on bind mounts
+  // even when UIDs line up).
+  "postCreateCommand": "git config --global --add safe.directory /workspaces/backyardhero_pyro",
+
+  // Handy shortcuts once attached (see .devcontainer/README.md):
+  //   Restart Python daemon: supervisorctl restart firework-daemon
+  //   Restart websocket:      supervisorctl restart websock
+  "postAttachCommand": "echo 'Backyard Hero host is up -> http://localhost:1776  (ws: 8090). Restart a Python service with: supervisorctl restart firework-daemon | websock'"
+}

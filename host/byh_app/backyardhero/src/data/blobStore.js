@@ -75,7 +75,17 @@ function createFsBlobStore(kind) {
       const base = path.basename(originalName || kind);
       const filename = `${timestamp}_${base}`;
       const finalPath = path.join(UPLOAD_DIR, filename);
-      fs.renameSync(tmpPath, finalPath);
+      // Move the temp file into place. A plain rename fails with EXDEV when the
+      // OS temp dir and the uploads dir live on different filesystems (e.g. a
+      // dev container where the workspace is a separate bind mount), so fall
+      // back to copy + unlink in that case.
+      try {
+        fs.renameSync(tmpPath, finalPath);
+      } catch (err) {
+        if (err.code !== 'EXDEV') throw err;
+        fs.copyFileSync(tmpPath, finalPath);
+        fs.unlinkSync(tmpPath);
+      }
       const size = fs.statSync(finalPath).size;
       return {
         key: filename,

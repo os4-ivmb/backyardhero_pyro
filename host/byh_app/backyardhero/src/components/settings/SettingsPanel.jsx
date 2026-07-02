@@ -23,6 +23,7 @@ import RFScanPanel from "./RFScanPanel";
 import OtaFlashPanel from "./OtaFlashPanel";
 import DongleFlashPanel from "./DongleFlashPanel";
 import ReceiverConfigSettings from "./ReceiverConfigSettings";
+import HostAudioSettings from "./HostAudioSettings";
 import DefaultLocationSettings from "./DefaultLocationSettings";
 import AccessPointSettings from "./AccessPointSettings";
 import UpdateSettings from "./UpdateSettings";
@@ -69,7 +70,7 @@ const SUBTITLES = {
   data: "Export or import your Backyard Hero database.",
   cloud: "Push inventory, receivers, and shows to your cloud editor.",
   debug: "Spectrum diagnostics and daemon timing.",
-  show: "Pre-fire safety checks that apply to every show.",
+  show: "Audio output for this device, and pre-fire safety checks.",
 };
 
 function SettingCard({ title, eyebrow, className, children }) {
@@ -292,8 +293,18 @@ function DebugTab() {
 }
 
 function ShowTab() {
+  // Host-device audio playback is a local-deployment capability (the box
+  // streams bytes from its own fs audio store + plays through its own
+  // output); it's meaningless in the cloud profile, so hide it there.
+  const isCloud = useAppStore((s) => s.systemConfig?.caps?.profile) === "cloud";
   return (
     <div className="grid grid-cols-1 gap-4">
+      {!isCloud ? (
+        <SettingCard title="Show audio output" eyebrow="This device">
+          <HostAudioSettings />
+        </SettingCard>
+      ) : null}
+
       <SettingCard title="Pre-fire safety" eyebrow="Per-protocol checks">
         <ProtocolConfig />
       </SettingCard>

@@ -70,6 +70,7 @@ function MiniWave({
   audioTracks,
   isPlaying,
   audioOffsetMs,
+  muted,
 }) {
   const ref = useRef(null);
   const ws = useRef(null);
@@ -159,6 +160,16 @@ function MiniWave({
       }
     } catch { /* */ }
   }, [isPlaying, ready, activeIdx, playableTracks.length]);
+
+  // Silence the browser's own output when the host device is playing the
+  // audio (the "Play show audio on this device" setting). We keep wavesurfer
+  // running so it still drives the timeline cursor / cue previews from the
+  // same sst clock -- it's just muted, so the only sound comes from the box.
+  // Re-applied on (re)load since a fresh wavesurfer starts at full volume.
+  useEffect(() => {
+    if (!ws.current || !ready) return;
+    try { ws.current.setMuted(!!muted); } catch { /* */ }
+  }, [muted, ready, activeIdx]);
 
   // Live nudge while playing: when `audioOffsetMs` changes during
   // playback, seek the active track by the delta so the operator's
@@ -311,7 +322,7 @@ export default function ShowControl({
   liveAudioOffsetMs,
   onLiveAudioOffsetMsChange,
 }) {
-  const { stagedShow, setStagedShow, updateShow } = useAppStore();
+  const { stagedShow, setStagedShow, updateShow, systemConfig } = useAppStore();
   const { stateData } = useStateAppStore();
   const { mode, isShowLoaded, protoStatus, isArmed, startSwActive } = useAppMode();
   // Receiver verification for the staged show. Drives the Load Show
@@ -337,6 +348,13 @@ export default function ShowControl({
     ? stagedShow.audioOffsetMs
     : 0;
   const workingOffsetMs = Number.isFinite(liveAudioOffsetMs) ? liveAudioOffsetMs : 0;
+
+  // When the box is playing the audio itself (host audio setting on), silence
+  // this console's own playback DURING A LIVE SHOW only -- local preview
+  // (isPlaying) still plays through the operator's speakers so they can
+  // rehearse. audioIsPlaying is the sst-driven live flag from ConsolePanel.
+  const hostAudioActive = !!systemConfig?.system?.hostAudio?.enabled;
+  const liveMuted = hostAudioActive && !!audioIsPlaying && !isPlaying;
 
   const nudgeSync = (deltaMs) => {
     onLiveAudioOffsetMsChange?.(workingOffsetMs + deltaMs);
@@ -716,6 +734,7 @@ export default function ShowControl({
             audioTracks={audioTracks}
             isPlaying={isPlaying || audioIsPlaying}
             audioOffsetMs={workingOffsetMs}
+            muted={liveMuted}
           />
           {hasAnyAudio ? (
             <SyncOffsetCluster

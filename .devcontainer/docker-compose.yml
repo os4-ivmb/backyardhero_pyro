@@ -1,0 +1,73 @@
+# Dev Container compose for the Backyard Hero host stack.
+#
+# This mirrors host/run/osx/docker-compose-dev.yml (the proven dev setup)
+# but is rooted at .devcontainer/ and adds a full-repo workspace mount so
+# VS Code / the Dev Containers CLI can attach to it as an editing workspace.
+#
+# The image is built from host/Dockerfile. Source is bind-mounted over the
+# image's baked copies so edits hot-reload:
+#   * Frontend / Next.js API routes -> Next.js HMR (~1s, automatic)
+#   * Python daemon / websocket      -> supervisorctl restart (see README)
+#
+# supervisord.dev.conf is mounted over the prod config so byh-app runs
+# `npm run dev` (HMR) instead of `npm run start`.
+
+services:
+  firework-system:
+    build:
+      context: ../host
+      dockerfile: Dockerfile
+    # NOTE: intentionally NO `container_name`. A fixed name is GLOBAL, so the
+    # VS Code Dev Containers project and a manual `docker compose up` would
+    # collide ("name already in use"). Letting Compose derive the name per
+    # project lets both coexist. Reach the container via the service name:
+    #   docker compose -f .devcontainer/docker-compose.yml exec firework-system <cmd>
+    # Keep restarting so the container is always up for VS Code to attach.
+    restart: unless-stopped
+    volumes:
+      # Full repo mounted as the VS Code workspace. Editing the app source
+      # here hits the SAME host files as the /app/byh_app bind mount below,
+      # so HMR still fires.
+      - ..:/workspaces/backyardhero_pyro:cached
+
+      - ../host/data:/data
+      - ../host/config:/config
+      # /tmp/d_cmd: daemon's command-file inbox. Bind it from the host so an
+      # operator can drop debug commands from the WSL shell, matching prod.
+      - /tmp/d_cmd:/tmp/d_cmd
+
+      # Source bind mounts for hot reload.
+      - ../host/pythings:/app/pythings
+      - ../host/byh_app/backyardhero:/app/byh_app/
+
+      # NAMED volumes shadow the host bind mount so the container keeps its
+      # own Linux-built node_modules + .next -- otherwise a host-built
+      # better_sqlite3.node would leak in and require() blows up with
+      # "invalid ELF header". Docker populates a fresh named volume from the
+      # image's baked content on first `up`, so node_modules/.next arrive
+      # ready-to-run. Named (not anonymous) so they're reused across runs
+      # instead of orphaning a ~1-2 GB volume every up/down cycle.
+      - byh_node_modules:/app/byh_app/node_modules
+      - byh_next:/app/byh_app/.next
+
+      # Dev supervisord: byh-app runs `npm run dev` instead of `npm run start`.
+      - ../host/supervisord.devcontainer.conf:/etc/supervisor/conf.d/supervisord.conf
+    ports:
+      - "1776:1776"  # Next.js app
+      - "8090:8090"  # WebSocket server
+    environment:
+      # No physical dongle in the container -- serial reaches the dongle via
+      # the host-side TCP bridge (run separately; see README). Default is a
+      # harmless placeholder for boxes without one plugged in.
+      - SERIAL_PORT=${SERIAL_PORT:-/dev/ttyACM0}
+      - SERIAL_BAUD=115200
+      - LED_STATE_FILE=/data/ledstate
+      - NODE_ENV=development
+    privileged: true
+
+# Reused across dev runs so node_modules / .next aren't re-created (and
+# orphaned) on every up/down cycle. Reset them with:
+#   docker compose -f .devcontainer/docker-compose.yml down --volumes
+volumes:
+  byh_node_modules:
+  byh_next:

@@ -308,11 +308,11 @@ export default function ConsolePanel() {
 
       <Card padding="none" tone="neutral" className="overflow-hidden">
         <Timeline
+          persistKey="console"
           items={stagedShow.items}
           setTimeCursor={setTimeCursor}
           timeCursor={timeCursor}
           readOnly
-          timeCapSeconds={stagedShow.duration}
           audioTracks={stagedShow.audioTracks}
         />
       </Card>
