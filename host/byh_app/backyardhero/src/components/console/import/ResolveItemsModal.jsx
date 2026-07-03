@@ -12,6 +12,7 @@ import {
 } from "@/util/showImport/catalog";
 import { getTypeLabel } from "@/constants";
 import CatalogSearch from "./CatalogSearch";
+import InventorySearch from "./InventorySearch";
 
 // The "resolve name conflicts" window, as a single master–detail surface: the
 // cue-name list on the left, and the selected cue's resolver + full catalog
@@ -34,6 +35,7 @@ export default function ResolveItemsModal({
   const [busy, setBusy] = useState(() => new Set()); // labels mid-import
   const [importingAll, setImportingAll] = useState(false);
   const [selected, setSelected] = useState(null); // active cue name
+  const [searchTab, setSearchTab] = useState("inventory"); // "inventory" | "catalog"
 
   const labels = useMemo(() => uniqueLabels(cues || []), [cues]);
 
@@ -300,14 +302,38 @@ export default function ResolveItemsModal({
               </div>
 
               <div className="border-t border-border-subtle pt-3 flex-1 min-h-0 flex flex-col">
-                <div className="eyebrow mb-2 shrink-0">Search the catalog</div>
-                <CatalogSearch
-                  key={selected}
-                  label={selected}
-                  records={records}
-                  onImport={(rec) => importRecord(selected, rec)}
-                  className="flex-1 min-h-0"
-                />
+                <div className="flex items-center gap-1 mb-2 shrink-0">
+                  <TabButton
+                    active={searchTab === "inventory"}
+                    onClick={() => setSearchTab("inventory")}
+                  >
+                    Your inventory
+                  </TabButton>
+                  <TabButton
+                    active={searchTab === "catalog"}
+                    onClick={() => setSearchTab("catalog")}
+                  >
+                    Catalog
+                  </TabButton>
+                </div>
+                {searchTab === "inventory" ? (
+                  <InventorySearch
+                    key={`inv-${selected}`}
+                    label={selected}
+                    items={invOptions}
+                    selectedId={selectedMatchId}
+                    onSelect={(id) => onSetMatch(selected, id)}
+                    className="flex-1 min-h-0"
+                  />
+                ) : (
+                  <CatalogSearch
+                    key={`cat-${selected}`}
+                    label={selected}
+                    records={records}
+                    onImport={(rec) => importRecord(selected, rec)}
+                    className="flex-1 min-h-0"
+                  />
+                )}
               </div>
             </>
           ) : (
@@ -318,5 +344,22 @@ export default function ResolveItemsModal({
         </div>
       </div>
     </Modal>
+  );
+}
+
+function TabButton({ active, onClick, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "px-2.5 py-1 text-xs rounded-sm border transition-colors",
+        active
+          ? "border-accent bg-surface-3/60 text-fg-primary"
+          : "border-transparent text-fg-muted hover:bg-surface-3/30",
+      )}
+    >
+      {children}
+    </button>
   );
 }
