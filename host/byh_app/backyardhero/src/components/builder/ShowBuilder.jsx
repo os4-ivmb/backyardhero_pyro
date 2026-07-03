@@ -32,6 +32,7 @@ import SpatialLayoutMap from "./SpatialLayoutMap";
 import RacksTab from "./RacksTab";
 import InventoryTab from "./InventoryTab";
 import ControlsTab from "./ControlsTab";
+import HistoryPanel from "./HistoryPanel";
 import { AddInventoryForm } from "../inventory/InventoryManager";
 import { normalizeYouTubeUrl } from "@/util/youtube";
 import { parseOptionalUnitCost } from "@/util/inventoryUnitCost";
@@ -1028,6 +1029,62 @@ export const formatShowClock = (sec) => {
   const m = Math.floor(a / 60);
   const s = a - m * 60;
   return `${sign}${m}:${s.toFixed(2).padStart(5, "0")}`;
+};
+
+// First-run setup for a brand-new show. Rendered as the whole editor page (not
+// a modal) until the show has a name + arm code and has been saved, so the
+// operator sets identity and persists up front before anything can be added.
+const ShowSetupScreen = ({ onSave, saving, error, initialName = "", initialAuthCode = "" }) => {
+  const [name, setName] = useState(initialName);
+  const [authCode, setAuthCode] = useState(initialAuthCode);
+  const canSave = name.trim() !== "" && authCode.trim() !== "" && !saving;
+  const submit = () => { if (canSave) onSave(name.trim(), authCode.trim()); };
+  return (
+    <div className="h-full w-full flex items-center justify-center p-6">
+      <Card tone="raised" padding="lg" className="w-full max-w-md shadow-e3">
+        <div className="eyebrow text-fg-muted mb-1">New show</div>
+        <h2 className="text-lg font-semibold text-fg-primary">Name & save your show</h2>
+        <p className="mt-1 text-sm text-fg-secondary">
+          Give your show a name and arm code and save it before adding receivers
+          or cues. The arm code is used to edit and to launch the show.
+        </p>
+        <div className="mt-5 flex flex-col gap-4">
+          <Field label="Show name">
+            <input
+              autoFocus
+              type="text"
+              className={inputClass}
+              placeholder="Untitled show"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+            />
+          </Field>
+          <Field label="Arm code">
+            <input
+              type="password"
+              autoComplete="off"
+              data-lpignore="true"
+              data-1p-ignore
+              className={inputClass}
+              placeholder="e.g. 1234"
+              value={authCode}
+              onChange={(e) => setAuthCode(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+            />
+          </Field>
+          {error ? (
+            <p className="text-sm text-danger">{error}</p>
+          ) : null}
+          <div className="flex justify-end">
+            <Button variant="primary" onClick={submit} disabled={!canSave}>
+              {saving ? "Saving…" : "Save show"}
+            </Button>
+          </div>
+        </div>
+      </Card>
+    </div>
+  );
 };
 
 const ChainTimingModal = ({ isOpen, onClose, onApply, selectedItems }) => {
@@ -2799,6 +2856,124 @@ const SAVEABLE_ITEM_ATTRIBUTES = [
 const NUMERIC_ITEM_ATTRIBUTES = new Set(["startTime", "duration", "delay", "metaDelaySec"]);
 const coerceNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
+// Human label for an undo-history step, derived from the diff between the
+// previous and next item lists. Best-effort -- just enough for the History
+// panel to read as a sequence of actions ("Moved cue", "Added item", ...).
+const cueName = (it) => (it && it.name ? `“${it.name}”` : "cue");
+// Tracked fields whose change counts as an "edit" (beyond move/lock, handled
+// separately). Kept in sync with the History panel's diff view.
+const DIFF_FIELD_KEYS = ["duration", "zone", "target", "delay", "name", "type", "metaDelaySec"];
+const itemFieldsDiffer = (p, n) =>
+  DIFF_FIELD_KEYS.some((k) => String(p[k] ?? "") !== String(n[k] ?? ""));
+// Whether two item lists differ in a way worth recording as a history step.
+// A pure object-reference churn with identical ids/placement/fields (e.g. a
+// no-op inventory refresh) is NOT a change; an id remap (new ids) IS -- that
+// path is folded into the current step by the reassign flag, not recorded.
+const itemsDiffer = (prev, next) => {
+  prev = prev || [];
+  next = next || [];
+  if (prev.length !== next.length) return true;
+  const prevById = new Map(prev.map((i) => [i.id, i]));
+  for (const n of next) {
+    const p = prevById.get(n.id);
+    if (!p) return true; // added, or an id that didn't exist before
+    if (p === n) continue;
+    if (Number(p.startTime) !== Number(n.startTime)) return true;
+    if (!!p.locked !== !!n.locked) return true;
+    if (itemFieldsDiffer(p, n)) return true;
+  }
+  return false;
+};
+const describeItemsChange = (prev, next) => {
+  prev = prev || [];
+  next = next || [];
+  const prevById = new Map(prev.map((i) => [i.id, i]));
+  const nextById = new Map(next.map((i) => [i.id, i]));
+  if (next.length > prev.length) {
+    const added = next.filter((i) => !prevById.has(i.id));
+    return added.length === 1 ? `Added ${cueName(added[0])}` : `Added ${next.length - prev.length} items`;
+  }
+  if (next.length < prev.length) {
+    const removed = prev.filter((i) => !nextById.has(i.id));
+    return removed.length === 1 ? `Removed ${cueName(removed[0])}` : `Removed ${prev.length - next.length} items`;
+  }
+  const moved = [], edited = [], locked = [];
+  for (const n of next) {
+    const p = prevById.get(n.id);
+    if (!p || p === n) continue;
+    if (Number(p.startTime) !== Number(n.startTime)) moved.push(n);
+    else if (!!p.locked !== !!n.locked) locked.push(n);
+    else if (itemFieldsDiffer(p, n)) edited.push(n);
+  }
+  if (moved.length && !edited.length && !locked.length)
+    return moved.length === 1
+      ? `Moved ${cueName(moved[0])} to ${formatShowClock(Number(moved[0].startTime))}`
+      : `Moved ${moved.length} cues`;
+  if (locked.length && !moved.length && !edited.length)
+    return locked.length === 1
+      ? `${locked[0].locked ? "Locked" : "Unlocked"} ${cueName(locked[0])}`
+      : `Locked/unlocked ${locked.length} cues`;
+  if (edited.length && !moved.length && !locked.length)
+    return edited.length === 1 ? `Edited ${cueName(edited[0])}` : `Edited ${edited.length} cues`;
+  if (moved.length || edited.length || locked.length) return "Changed cues";
+  return "Change";
+};
+
+// ---- Per-show undo-history persistence (sessionStorage) ------------------
+// History survives switching shows / remounting within the browser session,
+// keyed by show id. Best-effort: any storage/quota/parse error is swallowed so
+// persistence never breaks editing.
+const HISTORY_STORAGE_PREFIX = "byh.editor.history.";
+const historyStorageKey = (showId) => (showId != null ? `${HISTORY_STORAGE_PREFIX}${showId}` : null);
+
+// Lightweight signature of a cue list: enough to tell whether the persisted
+// history still matches the freshly-loaded show (same cues, placements, locks).
+// Tolerates benign object churn (new refs, merged inventory fields).
+const itemsFingerprint = (arr) =>
+  (arr || [])
+    .map((i) => `${i.id}:${i.startTime}:${i.duration}:${i.zone}:${i.target}:${i.locked ? 1 : 0}`)
+    .join("|");
+
+const saveHistoryToSession = (showId, hist) => {
+  const key = historyStorageKey(showId);
+  if (!key || typeof window === "undefined") return;
+  let entries = hist.entries;
+  let index = hist.index;
+  // On quota errors, shed the oldest quarter of the log and retry.
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      window.sessionStorage.setItem(key, JSON.stringify({ entries, index }));
+      return;
+    } catch (e) {
+      if (entries.length <= 1) return;
+      const drop = Math.ceil(entries.length / 4);
+      entries = entries.slice(drop);
+      index = Math.max(0, index - drop);
+    }
+  }
+};
+
+const loadHistoryFromSession = (showId) => {
+  const key = historyStorageKey(showId);
+  if (!key || typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.entries) || typeof parsed.index !== "number") return null;
+    if (parsed.index < 0 || parsed.index >= parsed.entries.length) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+
+const clearHistoryStorage = (showId) => {
+  const key = historyStorageKey(showId);
+  if (!key || typeof window === "undefined") return;
+  try { window.sessionStorage.removeItem(key); } catch {}
+};
+
 const compressItemsForSave = (items) =>
   items.map((obj) =>
     SAVEABLE_ITEM_ATTRIBUTES.reduce((acc, key) => {
@@ -2856,6 +3031,13 @@ const ShowBuilder = (props) => {
   const [items, setItems] = useState([]);
   const [showMetadata, setShowMetadata] = useState({});
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  // First-run setup: an unsaved show renders the ShowSetupScreen in place of the
+  // whole editor until it's named + saved. `pendingSetupSaveRef` marks that the
+  // setup form was submitted so the save fires once the new metadata commits;
+  // `isSavingSetup` drives the button's saving state.
+  const [isSavingSetup, setIsSavingSetup] = useState(false);
+  const [setupError, setSetupError] = useState(null);
+  const pendingSetupSaveRef = useRef(false);
   const [addItemStartTime, setAddItemStartTime] = useState(0);
   // When true, the pending add came from a Shift + double-click: on commit we
   // push every existing cue at/after the insertion point back by the new
@@ -2869,6 +3051,40 @@ const ShowBuilder = (props) => {
   const [addPresetTarget, setAddPresetTarget] = useState(null);
   const [selectedItem, setSelectedItem] = useState(false);
   const [selectedItems, setSelectedItems] = useState([]);
+  // ---- Undo / redo history for timeline items ---------------------------
+  // A linear list of `items` snapshots with human labels, plus an `index`
+  // pointing at the current state. Every timeline mutation routes through the
+  // single `setItems` in this component and always produces a fresh array of
+  // fresh item objects (moves/edits/deletes all spread), so a captured `items`
+  // reference is an immutable point-in-time snapshot -- safe to stash and
+  // restore wholesale. Kept in state (not a ref) so the History panel can
+  // render it and let the operator jump to any step. `timeTravelRef` marks a
+  // setItems that came from a history jump so the watcher doesn't re-record it;
+  // `hydratingRef` marks a fresh show load so history resets to a clean base.
+  const HISTORY_LIMIT = 100;
+  const [history, setHistory] = useState({ entries: [], index: -1 });
+  const historyStateRef = useRef(history);
+  historyStateRef.current = history;
+  const historyIdRef = useRef(0);
+  const timeTravelRef = useRef(false);
+  const hydratingRef = useRef(false);
+  // Marks the internal id-renumber `setItems` (see the itemsFixed effect) so the
+  // history watcher folds it into the current step instead of logging a phantom
+  // "Change" entry -- the renumber is cosmetic and must never be its own undo.
+  const reassignRef = useRef(false);
+  // The last `items` the history watcher actually processed. Starts null so the
+  // watcher's unavoidable mount run (which fires with the pre-hydration items,
+  // before a staged show's cues have committed) is skipped instead of eating
+  // the hydration reset -- otherwise the real load lands as a recordable
+  // [] -> cues change and one undo wipes the whole timeline.
+  const lastSeenItemsRef = useRef(null);
+  // Latest items, so the global keydown listener + undo/redo read current
+  // state without re-subscribing on every change.
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  // The show whose history is currently in memory -- the sessionStorage key.
+  const currentShowIdRef = useRef(null);
+  currentShowIdRef.current = stagedShow?.id ?? null;
   const [isChainTimingModalOpen, setIsChainTimingModalOpen] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState(null);
@@ -2915,9 +3131,14 @@ const ShowBuilder = (props) => {
   // Collapse the whole bottom tab panel (nav stays; content hides) so the
   // timeline can take the full height when the operator doesn't need the tabs.
   const [tabsCollapsed, setTabsCollapsed] = usePersistentState("byh.editor.tabsCollapsed", false);
-  // Overflow menu holding the secondary "Tools" tabs (Diagnostics, Controls)
+  // Overflow menu holding the secondary "Tools" tabs (Test Show Builder, History, Controls)
   // so they don't crowd the primary authoring tabs. Purely local UI state.
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
+  // When on, selecting a cue that has a YouTube link auto-opens the floating
+  // video preview. Off by default -- operators found the unprompted popup
+  // intrusive; the preview can still be brought back via this toggle (Tools
+  // menu). Persisted so the choice sticks across sessions.
+  const [autoPreviewVideo, setAutoPreviewVideo] = usePersistentState("byh.editor.autoPreviewVideo", false);
   // Audio panel: collapse the full waveform / BPM editor down to a compact
   // transport (play / pause / restart over the waveform) to give the timeline
   // more room. The track tabs stay visible either way.
@@ -3224,6 +3445,9 @@ const ShowBuilder = (props) => {
         ...item,
         id: index + 1
       }));
+      // Cosmetic renumber only: fold it into the current history step rather
+      // than recording an undoable "Change".
+      reassignRef.current = true;
       setItems(updatedItems);
       setItemsFixed(true);
     }
@@ -3260,6 +3484,9 @@ const ShowBuilder = (props) => {
       return;
     }
     lastHydratedIdRef.current = sid;
+    // Loading (or clearing) a show replaces `items` wholesale; the history
+    // watcher below turns this into a clean baseline rather than an undo step.
+    hydratingRef.current = true;
 
     if (stagedShow?.id) {
       setShowMetadata(stagedShow);
@@ -3357,6 +3584,7 @@ const ShowBuilder = (props) => {
       setIsAudioPlaying(false);
       setReceiverLocations({});
       setShowReceivers([]);
+      // No saved show => the editor renders ShowSetupScreen (see main return).
     }
   }, [stagedShow]);
 
@@ -3434,6 +3662,22 @@ const ShowBuilder = (props) => {
   const clearEditorFnc = () => {
     setItems([]);
     setShowMetadata({name:""});
+    // No id now => the editor drops to ShowSetupScreen until it's saved again.
+  };
+
+  // A show is "ready to build" once it's been saved (has an id). Until then the
+  // editor is replaced by ShowSetupScreen, so the add flows below are only ever
+  // reachable on a saved show.
+  const isShowSaved = () => Boolean(showMetadata?.id);
+
+  // Setup form submitted: stamp name + arm code, then let the effect below save
+  // the show once that metadata has committed (handleSaveShow reads it from
+  // render state, so we can't save synchronously here).
+  const handleShowSetupSave = (name, authCode) => {
+    setShowMetadata((prev) => ({ ...prev, name, authorization_code: authCode }));
+    setSetupError(null);
+    setIsSavingSetup(true);
+    pendingSetupSaveRef.current = true;
   };
 
   const openAddModal = (time, opts = {}) => {
@@ -3515,7 +3759,10 @@ const ShowBuilder = (props) => {
         suppressVideoPopupRef.current = false;
         return;
       }
-      if (selectedItem.youtube_link) {
+      // Only auto-open when the operator has opted in (Tools > Auto-preview).
+      // Reads the latest value: this effect only re-runs on selection change,
+      // so flipping the toggle never pops the video on its own.
+      if (autoPreviewVideo && selectedItem.youtube_link) {
         setPopupVisible(true);
       }
     }
@@ -3528,13 +3775,22 @@ const ShowBuilder = (props) => {
       // still works so they can be inspected / unlocked.
       if (item?.locked) return;
       setSelectedItems(prev => {
-        const isSelected = prev.some(selected => selected.id === item.id);
-        if (isSelected) {
-          return prev.filter(selected => selected.id !== item.id);
-        } else {
-          return [...prev, item];
+        // Fold any current single selection into the multi-set first, so the
+        // originally clicked cue is counted too -- otherwise ⌘-clicking a 2nd
+        // and 3rd cue only ever tracks 2 (the single one stayed in
+        // `selectedItem` and was never added here).
+        let base = prev;
+        if (selectedItem && !selectedItem.locked && !prev.some(s => s.id === selectedItem.id)) {
+          base = [selectedItem, ...prev];
         }
+        const isSelected = base.some(selected => selected.id === item.id);
+        if (isSelected) {
+          return base.filter(selected => selected.id !== item.id);
+        }
+        return [...base, item];
       });
+      // The single selection is now represented inside selectedItems.
+      setSelectedItem(false);
     } else {
       setSelectedItem(item);
       setSelectedItems([]); // Clear multi-select when single selecting
@@ -3548,6 +3804,14 @@ const ShowBuilder = (props) => {
     const unlocked = (itemsToSelect || []).filter((it) => it && !it.locked);
     setSelectedItem(false);
     setSelectedItems(unlocked);
+  };
+
+  // Explicit "Preview video" from the cue context menu: select the cue and open
+  // the floating preview regardless of the auto-preview toggle.
+  const handlePreviewItem = (item) => {
+    if (!item) return;
+    handleItemSelect(item, false);
+    setPopupVisible(true);
   };
 
   const handleChainTiming = () => {
@@ -3591,6 +3855,133 @@ const ShowBuilder = (props) => {
       return changed ? next : prev;
     });
   }, [items]);
+
+  // Record timeline changes into the undo history. Runs after each `items`
+  // change. Each user action (drag, add, delete, edit, chain) commits to
+  // `items` exactly once, so one change == one recordable history step.
+  useEffect(() => {
+    // Mount run (or any re-run without a real items change): adopt items as the
+    // starting point but DON'T consume the hydration flag -- the staged show's
+    // cues commit on a later pass, and that pass is the one that should reset.
+    if (lastSeenItemsRef.current === null || items === lastSeenItemsRef.current) {
+      lastSeenItemsRef.current = items;
+      return;
+    }
+    lastSeenItemsRef.current = items;
+    // Fresh show load / clear: restore this show's saved history if it still
+    // matches the loaded cues; otherwise start a clean baseline entry.
+    if (hydratingRef.current) {
+      hydratingRef.current = false;
+      const saved = loadHistoryFromSession(currentShowIdRef.current);
+      if (saved && itemsFingerprint(saved.entries[saved.index].items) === itemsFingerprint(items)) {
+        // Point the restored "present" entry at the live (freshly merged) items
+        // so a jump back to it restores live-shaped objects, and bump the id
+        // counter past anything restored so new steps stay unique.
+        const entries = saved.entries.slice();
+        entries[saved.index] = { ...entries[saved.index], items };
+        historyIdRef.current = entries.reduce((m, e) => Math.max(m, e.id || 0), historyIdRef.current);
+        setHistory({ entries, index: saved.index });
+        return;
+      }
+      historyIdRef.current += 1;
+      setHistory({ entries: [{ id: historyIdRef.current, parentId: null, label: "Loaded show", items }], index: 0 });
+      return;
+    }
+    // The change produced by a history jump itself -- index already moved.
+    if (timeTravelRef.current) {
+      timeTravelRef.current = false;
+      return;
+    }
+    // The cosmetic id-renumber (itemsFixed effect): fold the new item refs into
+    // the current step so future diffs stay accurate, but don't log a phantom
+    // step. Must run before the record branch, which id-based diffing would
+    // otherwise treat as a wholesale change (every id is "new").
+    if (reassignRef.current) {
+      reassignRef.current = false;
+      setHistory((h) => {
+        if (h.index < 0) return h;
+        const entries = h.entries.slice();
+        entries[h.index] = { ...entries[h.index], items };
+        return { ...h, entries };
+      });
+      return;
+    }
+    // Record a new step. Append-only: we never truncate the "redo" branch, so
+    // states you visited before an edit stay in the log and remain jumpable.
+    // `parentId` records which state this was derived from, so the diff panel
+    // can compare against the right snapshot even after undo+edit.
+    setHistory((h) => {
+      const cur = h.entries[h.index];
+      if (cur && cur.items === items) return h;
+      // Object-identity churn with no meaningful field/placement change (e.g. a
+      // no-op inventory refresh): keep the present entry pointed at the live
+      // refs so later diffs compare correctly, but add no step.
+      if (cur && !itemsDiffer(cur.items, items)) {
+        const entries = h.entries.slice();
+        entries[h.index] = { ...cur, items };
+        return { ...h, entries };
+      }
+      let entries = [...h.entries];
+      // Editing from a non-tip entry means the operator jumped back through
+      // history first (normal edits always land on the last entry). Record that
+      // jump as its own "Reverted to …" step so the log shows the revert before
+      // the new edit, instead of the edit silently branching off an older state.
+      let base = cur;
+      if (cur && h.index < h.entries.length - 1) {
+        // Reuse an existing revert label rather than nesting ("Reverted to
+        // “Reverted to …”") when jumping to a marker and editing from it.
+        const label = cur.kind === "revert" ? cur.label : `Reverted to “${cur.label}”`;
+        historyIdRef.current += 1;
+        base = { id: historyIdRef.current, parentId: cur.id, kind: "revert", label, items: cur.items };
+        entries.push(base);
+      }
+      historyIdRef.current += 1;
+      const entry = { id: historyIdRef.current, parentId: base ? base.id : null, label: describeItemsChange(base ? base.items : [], items), items };
+      entries.push(entry);
+      let index = entries.length - 1;
+      if (entries.length > HISTORY_LIMIT) {
+        const drop = entries.length - HISTORY_LIMIT;
+        entries = entries.slice(drop);
+        index -= drop;
+      }
+      return { entries, index };
+    });
+  }, [items]);
+
+  // Persist the current show's history to sessionStorage on every change, so it
+  // survives switching shows / a remount within the session. Reads the show id
+  // synchronously (post-render) so the log is always saved under its own show.
+  useEffect(() => {
+    const showId = currentShowIdRef.current;
+    if (!showId || history.index < 0) return;
+    saveHistoryToSession(showId, history);
+  }, [history]);
+
+  // Jump the timeline to a specific history entry (undo, redo, or a direct
+  // click in the History panel). Restores that snapshot wholesale.
+  const goToHistory = (index) => {
+    const h = historyStateRef.current;
+    if (index < 0 || index >= h.entries.length || index === h.index) return;
+    timeTravelRef.current = true;
+    setItems(h.entries[index].items);
+    setHistory((prev) => ({ ...prev, index }));
+    clearSelection();
+  };
+
+  const handleUndo = () => goToHistory(historyStateRef.current.index - 1);
+  const handleRedo = () => goToHistory(historyStateRef.current.index + 1);
+
+  // Wipe the history log (and its stored copy), keeping the current timeline as
+  // the new baseline. Nothing is undoable until the next edit.
+  const clearHistory = () => {
+    clearHistoryStorage(currentShowIdRef.current);
+    historyIdRef.current += 1;
+    setHistory({ entries: [{ id: historyIdRef.current, parentId: null, label: "Current state", items: itemsRef.current }], index: 0 });
+  };
+
+  // Refs so the global keydown listener always calls the latest closures.
+  const historyHandlersRef = useRef({ undo: handleUndo, redo: handleRedo });
+  historyHandlersRef.current = { undo: handleUndo, redo: handleRedo };
 
   // Edit an existing timeline item (opened via double-click on the timeline or
   // the Edit button on the single-selection panel).
@@ -4046,6 +4437,25 @@ const ShowBuilder = (props) => {
   const handleSaveShowRef = useRef(handleSaveShow);
   handleSaveShowRef.current = handleSaveShow;
 
+  // Finish the first-run setup: once the submitted name + arm code have landed
+  // in showMetadata, save the show (creating its row). On success it gets an id
+  // and the editor replaces ShowSetupScreen. Runs off the ref so it uses fresh
+  // metadata (handleSaveShow reads from render state).
+  useEffect(() => {
+    if (!pendingSetupSaveRef.current) return;
+    if (!showMetadata?.name || !String(showMetadata?.authorization_code || "").trim()) return;
+    pendingSetupSaveRef.current = false;
+    (async () => {
+      const res = await handleSaveShowRef.current({ silent: true });
+      setIsSavingSetup(false);
+      if (res?.ok) {
+        showToast("Show saved", "ok");
+      } else {
+        setSetupError("Couldn’t save the show. Check the name and arm code, then try again.");
+      }
+    })();
+  }, [showMetadata]);
+
   // ⌘/Ctrl+S saves the show (silently, so no blocking modal) and confirms
   // with a toast. Uses the ref so the listener always runs the latest closure.
   useEffect(() => {
@@ -4072,6 +4482,45 @@ const ShowBuilder = (props) => {
         showToast("Open Show Details to finish setup (name + auth code)", "warn");
       } else {
         showToast("Couldn’t save — see console for details", "warn");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Timeline editing shortcuts:
+  //   ⌘/Ctrl+A       -> select every (unlocked) cue
+  //   ⌘/Ctrl+Z       -> undo the last timeline change
+  //   ⌘/Ctrl+Y or
+  //   ⌘/Ctrl+Shift+Z -> redo
+  // All ignored while a modal is open or focus is in a text field, so the
+  // native behaviour (select text, browser undo in an input) is preserved.
+  // Reads the latest state via refs, matching the Space / ⌘S handlers above.
+  useEffect(() => {
+    const onKey = (e) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      const key = e.key?.toLowerCase();
+      if (key !== "a" && key !== "z" && key !== "y") return;
+      // Don't hijack editing keys inside an open dialog / inline form.
+      if (typeof document !== "undefined" && document.querySelector('[role="dialog"]')) return;
+      const el = e.target;
+      const tag = el?.tagName;
+      if (el?.isContentEditable || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (key === "a") {
+        // Select all unlocked cues (locked cues are excluded from multi-select,
+        // mirroring handleSelectItems / the marquee).
+        e.preventDefault();
+        const all = (itemsRef.current || []).filter((it) => it && !it.locked);
+        if (all.length === 0) return;
+        setSelectedItem(false);
+        setSelectedItems(all);
+      } else if (key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        historyHandlersRef.current.undo();
+      } else if (key === "y" || (key === "z" && e.shiftKey)) {
+        e.preventDefault();
+        historyHandlersRef.current.redo();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -4307,6 +4756,20 @@ const ShowBuilder = (props) => {
     cancelCopyItem();
   };
 
+  // A brand-new / unsaved show takes over the whole editor page with the setup
+  // screen until it's named + saved (gets an id). Nothing can be added first.
+  if (!isShowSaved()) {
+    return (
+      <ShowSetupScreen
+        onSave={handleShowSetupSave}
+        saving={isSavingSetup}
+        error={setupError}
+        initialName={showMetadata?.name || ""}
+        initialAuthCode={showMetadata?.authorization_code || ""}
+      />
+    );
+  }
+
   return (
     <div className={cn("h-full flex flex-col min-h-0", tabsCollapsed ? "px-4 pt-4 pb-0" : "p-4")}>
       <div className="flex-1 min-h-0 flex flex-col">
@@ -4377,83 +4840,6 @@ const ShowBuilder = (props) => {
             )}
           </div>
 
-          {selectedItems.length >= 2 && (
-            <Card tone="raised" padding="sm" className="mb-3 shrink-0">
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-sm text-fg-secondary min-w-0">
-                  <span className="num text-fg-primary">
-                    {selectedItems.length}
-                  </span>{" "}
-                  items selected
-                  <span className="text-fg-muted">
-                    {" "}
-                    · ⌘-click to add or remove
-                  </span>
-                </div>
-                <Button
-                  size="sm"
-                  variant="primary"
-                  leading={<FiLink2 aria-hidden />}
-                  onClick={handleChainTiming}
-                >
-                  Chain timing…
-                </Button>
-              </div>
-            </Card>
-          )}
-
-          {/* Single-selection panel: shows the selected cue's exact fire time
-              and exposes Edit / Delete. Hidden while a multi-select is active
-              (that has its own panel) or during a copy flow. */}
-          {selectedItem && selectedItems.length < 2 && !copyMode && (
-            <Card tone="raised" padding="sm" className="mb-3 shrink-0">
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-sm text-fg-secondary min-w-0 flex items-center gap-x-4 gap-y-1 flex-wrap">
-                  <span className="font-medium text-fg-primary truncate max-w-[16rem]">
-                    {selectedItem.name}
-                  </span>
-                  <span className="text-fg-muted">
-                    {receiverLabels?.[selectedItem.zone] || selectedItem.zone}:
-                    {selectedItem.target}
-                  </span>
-                  <span>
-                    Fires{" "}
-                    <span className="num font-mono text-fg-primary">
-                      {formatShowClock(
-                        (Number(selectedItem.startTime) || 0) -
-                          (Number(selectedItem.delay) || 0)
-                      )}
-                    </span>
-                  </span>
-                  <span className="text-fg-muted">
-                    Effect{" "}
-                    <span className="num font-mono">
-                      {formatShowClock(Number(selectedItem.startTime) || 0)}
-                    </span>
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    leading={<FiEdit2 aria-hidden />}
-                    onClick={() => openEditModal(selectedItem)}
-                  >
-                    Edit…
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    leading={<FiTrash2 aria-hidden />}
-                    onClick={() => handleItemDelete(selectedItem)}
-                  >
-                    Delete
-                  </Button>
-                </div>
-              </div>
-            </Card>
-          )}
-
           {/* Copy-mode instructions. The Copy/Cancel button itself now lives
               in the timeline header; this strip only appears while copying. */}
           {copyMode && (
@@ -4502,8 +4888,12 @@ const ShowBuilder = (props) => {
                 onDropInventory={handleDropInventory}
                 bodyFill
                 setSelectedItem={(item) => handleItemSelect(item, false)}
+                selectedItem={selectedItem}
                 selectedItems={selectedItems}
                 onItemSelect={handleItemSelect}
+                onPreview={handlePreviewItem}
+                autoPreviewVideo={autoPreviewVideo}
+                setAutoPreviewVideo={setAutoPreviewVideo}
                 onSelectItems={handleSelectItems}
                 onChainSelected={handleChainTiming}
                 clearSelection={clearSelection}
@@ -4520,6 +4910,101 @@ const ShowBuilder = (props) => {
                 audioDurationSec={totalAudioDuration}
               />
             </div>
+
+            {/* Multi-selection popup: count + Chain timing, as the same
+                translucent strip pinned to the bottom of the timeline. */}
+            {selectedItems.length >= 2 && !copyMode && (
+              <div className="absolute bottom-3 left-3 right-3 z-20 rounded-md border border-border-subtle bg-surface-2/80 backdrop-blur-sm shadow-e3 px-3 py-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm text-fg-secondary min-w-0">
+                    <span className="num text-fg-primary">
+                      {selectedItems.length}
+                    </span>{" "}
+                    items selected
+                    <span className="text-fg-muted"> · ⌘-click to add or remove</span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      leading={<FiLink2 aria-hidden />}
+                      onClick={handleChainTiming}
+                    >
+                      Chain timing…
+                    </Button>
+                    <button
+                      type="button"
+                      onClick={clearSelection}
+                      aria-label="Clear selection"
+                      className="ml-1 text-fg-muted hover:text-fg-primary text-lg leading-none px-1"
+                    >
+                      &times;
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Single-selection popup: the selected cue's fire time + Edit /
+                Delete, as a translucent strip pinned to the bottom of the
+                timeline. Hidden during a multi-select (its own panel) or a
+                copy flow. */}
+            {selectedItem && selectedItems.length < 2 && !copyMode && (
+              <div className="absolute bottom-3 left-3 right-3 z-20 rounded-md border border-border-subtle bg-surface-2/80 backdrop-blur-sm shadow-e3 px-3 py-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm text-fg-secondary min-w-0 flex items-center gap-x-4 gap-y-1 flex-wrap">
+                    <span className="font-medium text-fg-primary truncate max-w-[16rem]">
+                      {selectedItem.name}
+                    </span>
+                    <span className="text-fg-muted">
+                      {receiverLabels?.[selectedItem.zone] || selectedItem.zone}:
+                      {selectedItem.target}
+                    </span>
+                    <span>
+                      Fires{" "}
+                      <span className="num font-mono text-fg-primary">
+                        {formatShowClock(
+                          (Number(selectedItem.startTime) || 0) -
+                            (Number(selectedItem.delay) || 0)
+                        )}
+                      </span>
+                    </span>
+                    <span className="text-fg-muted">
+                      Effect{" "}
+                      <span className="num font-mono">
+                        {formatShowClock(Number(selectedItem.startTime) || 0)}
+                      </span>
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      leading={<FiEdit2 aria-hidden />}
+                      onClick={() => openEditModal(selectedItem)}
+                    >
+                      Edit…
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      leading={<FiTrash2 aria-hidden />}
+                      onClick={() => handleItemDelete(selectedItem)}
+                    >
+                      Delete
+                    </Button>
+                    <button
+                      type="button"
+                      onClick={clearSelection}
+                      aria-label="Dismiss"
+                      className="ml-1 text-fg-muted hover:text-fg-primary text-lg leading-none px-1"
+                    >
+                      &times;
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {!hasShowReceivers ? (
               <div className="absolute inset-0 z-10 flex items-center justify-center rounded-md border border-border-subtle bg-surface-base/70 backdrop-blur-[1px]">
@@ -4608,12 +5093,13 @@ const ShowBuilder = (props) => {
                   tabs, hoisted out of the primary authoring row) and the
                   collapse/expand toggle. */}
               <div className="flex items-end gap-1">
-                {/* Tools overflow: secondary utility tabs (Diagnostics,
-                    Controls) tucked behind a single menu so they don't crowd
-                    the primary authoring tabs. */}
+                {/* Tools overflow: secondary utility tabs (Test Show Builder,
+                    History, Controls) tucked behind a single menu so they don't
+                    crowd the primary authoring tabs. */}
                 {(() => {
                   const TOOLS = [
-                    { key: "test", label: "Diagnostics", Icon: FiZap },
+                    { key: "test", label: "Test Show Builder", Icon: FiZap },
+                    { key: "history", label: "History", Icon: FiRotateCcw },
                     { key: "controls", label: "Controls", Icon: FiHelpCircle },
                   ];
                   const toolActive = !tabsCollapsed && TOOLS.some((t) => t.key === activeTab);
@@ -4792,6 +5278,16 @@ const ShowBuilder = (props) => {
                 />
               )}
 
+              {activeTab === "history" && (
+                <HistoryPanel
+                  entries={history.entries}
+                  index={history.index}
+                  onGoTo={goToHistory}
+                  onClear={clearHistory}
+                  formatTime={formatShowClock}
+                  receiverLabels={receiverLabels}
+                />
+              )}
               {activeTab === "controls" && <ControlsTab />}
             </div>
           </div>

@@ -2,7 +2,7 @@ import { INV_COLOR_CODE, itemColorOf } from "@/constants";
 import { asyncConfirm, asyncPrompt } from "@/components/common/AsyncPrompt";
 import React, { useState, useRef, memo, useEffect, useMemo } from "react";
 import { FaTrash, FaLock, FaLockOpen, FaPencil, FaArrowRightArrowLeft, FaRegClone } from "react-icons/fa6";
-import { FiZoomIn, FiZoomOut, FiPlus, FiClock, FiZap, FiX } from "react-icons/fi";
+import { FiZoomIn, FiZoomOut, FiPlus, FiClock, FiZap, FiX, FiVideo, FiEye, FiChevronDown, FiCheck } from "react-icons/fi";
 import axios from "axios";
 import { cn } from "@/design";
 import {
@@ -463,6 +463,10 @@ const Timeline = memo((props) => {
   const [scrollZoom, setScrollZoom] = usePersistentState(pkey("scrollZoom"), false);
   const scrollZoomRef = useRef(false);
   scrollZoomRef.current = scrollZoom;
+  // "View" toggles dropdown (label/display options). Declared here so the
+  // outside-click effect below can reference it without a temporal-dead-zone.
+  const [viewMenuOpen, setViewMenuOpen] = useState(false);
+  const viewMenuRef = useRef(null);
 
   // Close the context menu on any outside interaction / Escape, and cancel a
   // pending swap on Escape.
@@ -487,6 +491,21 @@ const Timeline = memo((props) => {
       window.removeEventListener("scroll", onDown, true);
     };
   }, [ctxMenu, swapSourceId]);
+
+  // Close the "View" toggles dropdown on outside click / Escape.
+  useEffect(() => {
+    if (!viewMenuOpen) return;
+    const onKey = (e) => { if (e.key === "Escape") setViewMenuOpen(false); };
+    const onDown = (e) => {
+      if (viewMenuRef.current && !viewMenuRef.current.contains(e.target)) setViewMenuOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onDown);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onDown);
+    };
+  }, [viewMenuOpen]);
 
   // Parse a "m:ss(.ss)" or bare-seconds string into seconds. Returns null on
   // empty / unparseable / negative input so callers can bail cleanly.
@@ -548,6 +567,11 @@ const Timeline = memo((props) => {
   const handleMenuEdit = (item) => {
     closeCtxMenu();
     props.openEditModal?.(item);
+  };
+
+  const handlePreview = (item) => {
+    closeCtxMenu();
+    props.onPreview?.(item);
   };
 
   const handleMenuDelete = async (item) => {
@@ -1607,12 +1631,12 @@ const Timeline = memo((props) => {
       e.stopPropagation();
       props.onItemSelect?.(item, true);
     } else {
-      // Single select mode
+      // Single select mode -- highlight just this cue. Stop the event here so
+      // the body handler doesn't also move the time cursor or clear the
+      // selection (mirrors the command-click branch above). setSelectedItem
+      // already drops any existing multi-selection, so no clearSelection call.
+      e.stopPropagation();
       props.setSelectedItem?.(item);
-      // Clear multi-selection when single clicking
-      if (props.clearSelection) {
-        props.clearSelection();
-      }
     }
   };
 
@@ -1919,92 +1943,69 @@ const Timeline = memo((props) => {
               </select>
             </span>
           )}
-          {/* Snap-to-beat toggle. Only meaningful in beats mode and only
-              shown to non-readonly users. Hold Alt during a drop to
-              bypass the snap for fine adjustments. */}
-          {useBeatsGrid && !isReadOnly && (
-            <label
-              className="ml-1 inline-flex items-center gap-1.5 text-xs text-fg-secondary cursor-pointer select-none"
-              title="When on, dragged items snap their start time to the nearest beat. Hold Alt while dropping to bypass."
+          {/* View toggles: the label/display options that used to sit inline as
+              a row of checkboxes, collapsed behind a dropdown to declutter the
+              toolbar. The menu stays open across clicks so several can be
+              flipped at once. */}
+          <div className="relative ml-1" ref={viewMenuRef}>
+            <button
+              type="button"
+              onClick={() => setViewMenuOpen((v) => !v)}
+              aria-haspopup="menu"
+              aria-expanded={viewMenuOpen}
+              title="Label & display options"
+              className={cn(
+                "inline-flex items-center gap-1.5 h-7 px-2 rounded-sm border text-xs transition-colors",
+                viewMenuOpen
+                  ? "bg-surface-2 border-border text-fg-primary"
+                  : "bg-surface-2 border-border-subtle text-fg-secondary hover:text-fg-primary"
+              )}
             >
-              <input
-                type="checkbox"
-                checked={snapToBeat}
-                onChange={(e) => setSnapToBeat(e.target.checked)}
-              />
-              Snap to beat
-            </label>
-          )}
-          <label
-            className="ml-1 inline-flex items-center gap-1.5 text-xs text-fg-secondary cursor-pointer select-none"
-            title="Show the zone:cue badge (e.g. RX142:1) on each timeline item."
-          >
-            <input
-              type="checkbox"
-              checked={showZoneCue}
-              onChange={(e) => setShowZoneCue(e.target.checked)}
-            />
-            Show zone:cue
-          </label>
-          <label
-            className="ml-1 inline-flex items-center gap-1.5 text-xs text-fg-secondary cursor-pointer select-none"
-            title="Show each cue's start time on its label."
-          >
-            <input
-              type="checkbox"
-              checked={showStartTime}
-              onChange={(e) => setShowStartTime(e.target.checked)}
-            />
-            Show start time
-          </label>
-          <label
-            className="ml-1 inline-flex items-center gap-1.5 text-xs text-fg-secondary cursor-pointer select-none"
-            title="Show each cue's end time on its label."
-          >
-            <input
-              type="checkbox"
-              checked={showEndTime}
-              onChange={(e) => setShowEndTime(e.target.checked)}
-            />
-            Show end time
-          </label>
-          <label
-            className="ml-1 inline-flex items-center gap-1.5 text-xs text-fg-secondary cursor-pointer select-none"
-            title="Compact view — smaller item bars. Uncheck for taller bars with larger labels."
-          >
-            <input
-              type="checkbox"
-              checked={compactItems}
-              onChange={(e) => setCompactItems(e.target.checked)}
-            />
-            Compact view
-          </label>
-          {/* Swap the wheel's default so it zooms instead of panning. Shift
-              then falls back to horizontal panning; Alt still virt-scrolls. */}
-          <label
-            className="ml-1 inline-flex items-center gap-1.5 text-xs text-fg-secondary cursor-pointer select-none"
-            title="When on, the scroll wheel zooms instead of panning. Hold Shift to pan horizontally, Alt to scroll vertically."
-          >
-            <input
-              type="checkbox"
-              checked={scrollZoom}
-              onChange={(e) => setScrollZoom(e.target.checked)}
-            />
-            Scroll zoom
-          </label>
-          {/* Auto-scroll to keep the playhead in view during playback. A manual
-              horizontal scroll switches this off automatically. */}
-          <label
-            className="ml-1 inline-flex items-center gap-1.5 text-xs text-fg-secondary cursor-pointer select-none"
-            title="Keep the playhead framed while audio plays. Turns off automatically when you scroll the timeline."
-          >
-            <input
-              type="checkbox"
-              checked={followPlayhead}
-              onChange={(e) => setFollowPlayhead(e.target.checked)}
-            />
-            Follow playhead
-          </label>
+              <FiEye aria-hidden />
+              View
+              <FiChevronDown className="text-[10px] opacity-70" aria-hidden />
+            </button>
+            {viewMenuOpen && (
+              <div
+                role="menu"
+                className="absolute right-0 top-full z-30 mt-1 min-w-[220px] rounded-md border border-border bg-surface-2 py-1 shadow-e2"
+              >
+                {(() => {
+                  const toggles = [
+                    ...(useBeatsGrid && !isReadOnly
+                      ? [{ key: "snapBeat", label: "Snap to beat", checked: snapToBeat, set: setSnapToBeat, title: "Dragged items snap their start to the nearest beat (hold Alt to bypass)." }]
+                      : []),
+                    { key: "zoneCue", label: "Show zone:cue", checked: showZoneCue, set: setShowZoneCue, title: "Show the zone:cue badge (e.g. RX142:1) on each item." },
+                    { key: "startTime", label: "Show start time", checked: showStartTime, set: setShowStartTime, title: "Show each cue's start time on its label." },
+                    { key: "endTime", label: "Show end time", checked: showEndTime, set: setShowEndTime, title: "Show each cue's end time on its label." },
+                    { key: "compact", label: "Compact view", checked: compactItems, set: setCompactItems, title: "Smaller item bars. Off = taller bars with larger labels." },
+                    { key: "scrollZoom", label: "Scroll zoom", checked: scrollZoom, set: setScrollZoom, title: "Scroll wheel zooms instead of panning (Shift pans, Alt scrolls vertically)." },
+                    { key: "followPlayhead", label: "Follow playhead", checked: followPlayhead, set: setFollowPlayhead, title: "Keep the playhead framed during playback. Turns off when you scroll manually." },
+                    ...(props.setAutoPreviewVideo
+                      ? [{ key: "autoPreview", label: "Auto-preview video on select", checked: !!props.autoPreviewVideo, set: props.setAutoPreviewVideo, title: "Selecting a cue that has a video auto-opens the floating preview." }]
+                      : []),
+                  ];
+                  return toggles.map((t) => (
+                    <button
+                      key={t.key}
+                      type="button"
+                      role="menuitemcheckbox"
+                      aria-checked={t.checked}
+                      title={t.title}
+                      onClick={() => t.set(!t.checked)}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-left text-fg-secondary hover:text-fg-primary hover:bg-surface-3/60 transition-colors"
+                    >
+                      <FiCheck
+                        className={cn("text-[13px] shrink-0", t.checked ? "text-accent" : "opacity-0")}
+                        aria-hidden
+                      />
+                      {t.label}
+                    </button>
+                  ));
+                })()}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -2091,6 +2092,29 @@ const Timeline = memo((props) => {
               </div>
             );
           })}
+
+          {/* Playhead head: a handle in the time-code header, aligned with the
+              thin cursor line down in the body. Lives in the ruler's scroll-
+              synced inner div so it tracks the body's gridlines exactly. */}
+          {props.timeCursor != null ? (
+            <div
+              className="absolute top-0 bottom-0 -translate-x-1/2 pointer-events-none"
+              style={{ left: `${(props.timeCursor / maxTime) * 100}%`, zIndex: 6 }}
+            >
+              {/* faint stem so the head reads as one piece with the body line */}
+              <div className="absolute top-3 bottom-0 left-1/2 -translate-x-1/2 w-px bg-accent/60" />
+              {/* solid downward handle meeting the body cursor at the border */}
+              <div
+                className="absolute left-1/2 -translate-x-1/2 w-0 h-0"
+                style={{
+                  bottom: "-1px",
+                  borderLeft: "5px solid transparent",
+                  borderRight: "5px solid transparent",
+                  borderTop: "7px solid rgb(var(--accent))",
+                }}
+              />
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -2186,12 +2210,7 @@ const Timeline = memo((props) => {
                 boxShadow: "0 0 6px rgb(var(--accent) / 0.5)",
                 zIndex: 5,
               }}
-            >
-              <span
-                className="absolute top-0 -translate-x-1/2 w-2 h-2 rotate-45 bg-accent"
-                aria-hidden
-              />
-            </div>
+            />
           ) : null}
 
           {/* Horizontal lane gridlines -- one per stacked row so items read as
@@ -2245,6 +2264,7 @@ const Timeline = memo((props) => {
                 showStartTime={showStartTime}
                 showEndTime={showEndTime}
                 isSelected={
+                  props.selectedItem?.id === item.id ||
                   (props.selectedItems || []).some((s) => s.id === item.id) ||
                   (marqueeIds ? marqueeIds.has(item.id) : false)
                 }
@@ -2328,6 +2348,14 @@ const Timeline = memo((props) => {
               <ContextMenuItem icon={<FaPencil aria-hidden />} onClick={() => handleMenuEdit(ctxMenu.item)}>
                 Edit…
               </ContextMenuItem>
+              {props.onPreview && ctxMenu.item.youtube_link ? (
+                <ContextMenuItem
+                  icon={<FiVideo aria-hidden />}
+                  onClick={() => handlePreview(ctxMenu.item)}
+                >
+                  Preview video
+                </ContextMenuItem>
+              ) : null}
               <ContextMenuItem
                 icon={<FiClock aria-hidden />}
                 onClick={() => handleStartAt(ctxMenu.item)}
