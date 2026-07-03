@@ -89,11 +89,18 @@ const ControlsTab = () => {
           Unlock, Delete.
         </Row>
         <Row keys={["Right-click empty"]}>Add inventory at that time.</Row>
+        <Row keys={["Ctrl / ⌘", "Z"]}>Undo the last timeline change.</Row>
+        <Row keys={["Ctrl / ⌘", "Y"]}>
+          Redo (also <Key>Ctrl / ⌘</Key> + <Key>Shift</Key> + <Key>Z</Key>).
+        </Row>
       </Section>
 
       <Section title="Selection">
         <Row keys={["Click"]}>Select a single item.</Row>
         <Row keys={["Ctrl / ⌘", "Click"]}>Add or remove an item from the selection.</Row>
+        <Row keys={["Ctrl / ⌘", "A"]}>
+          Select every cue (locked cues excluded).
+        </Row>
         <Row keys={["Click empty"]}>
           Clear the selection / move the time cursor.
         </Row>
