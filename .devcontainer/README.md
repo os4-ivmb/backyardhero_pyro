@@ -74,18 +74,6 @@ them if deps get weird:
 docker compose -f .devcontainer/docker-compose.yml down --volumes
 ```
 
-## Claude Code CLI
-
-The [`claude`](https://claude.com/claude-code) CLI is added via the
-`ghcr.io/anthropics/devcontainer-features/claude-code` feature, so it's on
-`PATH` inside the container when you launch through the Dev Containers
-extension or `devcontainer up`. Run `claude` from any terminal in here and
-sign in on first use.
-
-> Features are **not** applied by a plain `docker compose up`. If you brought
-> the stack up that way, install it manually:
-> `docker compose -f .devcontainer/docker-compose.yml exec -u root firework-system npm install -g @anthropic-ai/claude-code`
-
 ## Hardware / the dongle
 
 There's no USB dongle inside the container.
