@@ -32,9 +32,15 @@ services:
 
       - ../host/data:/data
       - ../host/config:/config
-      # /tmp/d_cmd: daemon's command-file inbox. Bind it from the host so an
-      # operator can drop debug commands from the WSL shell, matching prod.
-      - /tmp/d_cmd:/tmp/d_cmd
+      # NOTE: prod/osx compose bind host /tmp/d_cmd here so an operator can
+      # drop debug command-files from the host shell. We intentionally DON'T
+      # in the devcontainer: on Docker Desktop for Linux, /tmp is not a shared
+      # File Sharing path, so any /tmp/* bind source is refused ("path is not
+      # shared from the host"). It's also unneeded here -- the daemon's
+      # command-file inbox at /tmp/d_cmd is created inside the container (see
+      # host/Dockerfile + docker-entrypoint.sh), and both the writer (Next.js
+      # API) and reader (daemon) run in-container. To hand-drop a debug command
+      # while attached, just write into /tmp/d_cmd from the container terminal.
 
       # Source bind mounts for hot reload.
       - ../host/pythings:/app/pythings
