@@ -6,6 +6,7 @@ import {
   parseShellPackShellKey,
 } from "@/utils/shellUsageCounts";
 import { getTypeLabel } from "@/constants";
+import { buildShowReceiverCueMap } from "@/util/showReceivers";
 import { audioFieldFromShow } from "@/utils/audioTracks";
 import { asyncAlert } from "@/components/common/AsyncPrompt";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -68,13 +69,19 @@ function ShowLoadout({ setCurrentTab }) {
   }, [stagedShow]);
 
   useEffect(() => {
-    let receiversTmp = systemConfig?.receivers || {};
+    // Size each receiver by the cues the SHOW designates for it (entry.cues),
+    // not the physical hardware cue map -- so the loadout matches the show
+    // editor's target grid (e.g. a 16-cue rack on an 8-cue DB receiver).
+    let hardwareReceivers = systemConfig?.receivers || {};
+    if (stateData.fw_state?.receivers) {
+      hardwareReceivers = stateData.fw_state?.receivers;
+    }
+    const receiversTmp = buildShowReceiverCueMap(
+      hardwareReceivers,
+      stagedShow?.showReceivers
+    );
 
     if (receiversTmp) {
-      if (stateData.fw_state?.receivers) {
-        receiversTmp = stateData.fw_state?.receivers;
-      }
-
       // Build a lookup table for zones and targets to receivers
       const lookupTable = {};
       Object.keys(receiversTmp).forEach((receiverKey) => {
@@ -176,16 +183,21 @@ function ShowLoadout({ setCurrentTab }) {
       return;
     }
 
-    // Build lookup table for zones and targets to receivers
-    let receiversTmp = systemConfig?.receivers || {};
+    // Build lookup table for zones and targets to receivers, sized by the
+    // show's designated cue counts (matches the show editor / first effect).
+    let hardwareReceivers = systemConfig?.receivers || {};
     if (stateData.fw_state?.receivers) {
-      receiversTmp = stateData.fw_state?.receivers;
+      hardwareReceivers = stateData.fw_state?.receivers;
     }
+    const receiversTmp = buildShowReceiverCueMap(
+      hardwareReceivers,
+      stagedShow?.showReceivers
+    );
 
     const lookupTable = {};
     Object.keys(receiversTmp).forEach((receiverKey) => {
       const receiver = receiversTmp[receiverKey];
-      Object.keys(receiver.cues).forEach((zoneKey) => {
+      Object.keys(receiver.cues || {}).forEach((zoneKey) => {
         receiver.cues[zoneKey].forEach((target) => {
           lookupTable[`${zoneKey}:${target}`] = receiverKey;
         });
@@ -233,7 +245,7 @@ function ShowLoadout({ setCurrentTab }) {
 
     console.log('Cell to item map:', cellMap);
     setCellToItemMap(cellMap);
-  }, [stagedShow?.items, racks, systemConfig?.receivers, stateData.fw_state?.receivers, receiverNames]);
+  }, [stagedShow?.items, stagedShow?.showReceivers, racks, systemConfig?.receivers, stateData.fw_state?.receivers, receiverNames]);
 
   // Function to arrange cues in the specified order
   const arrangeCuesInOrder = (cues) => {
@@ -802,10 +814,10 @@ function ShowLoadout({ setCurrentTab }) {
           const receiverMapping = targetRcvMap[rcv_key];
           const firstZone = Object.keys(receiver.cues)[0];
           const cues = receiver.cues[firstZone] || [];
-          
+
           // Only render if there are cues
           if (cues.length === 0) return null;
-          
+
           const arrangedCues = arrangeCuesInOrder(cues);
 
           return (

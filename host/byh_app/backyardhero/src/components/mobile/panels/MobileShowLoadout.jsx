@@ -7,6 +7,7 @@ import useAppStore from "@/store/useAppStore";
 import useStateAppStore from "@/store/useStateAppStore";
 import { Card, Section, Button, Badge, cn } from "@/design";
 import { getTypeLabel } from "@/constants";
+import { buildShowReceiverCueMap } from "@/util/showReceivers";
 import {
   buildShellUsageCountsFromRackCellAssignments,
   buildShellUsageCountsFromShowItems,
@@ -495,10 +496,16 @@ export default function MobileShowLoadout({ setCurrentTab }) {
 
   // Build receiver -> zone -> cue -> item map. Same algorithm as desktop.
   useEffect(() => {
-    let receiversTmp = systemConfig?.receivers || {};
+    // Size receivers by the show's designated cue counts (matches the show
+    // editor's target grid), not the physical hardware cue map.
+    let hardwareReceivers = systemConfig?.receivers || {};
     if (stateData.fw_state?.receivers) {
-      receiversTmp = stateData.fw_state.receivers;
+      hardwareReceivers = stateData.fw_state.receivers;
     }
+    const receiversTmp = buildShowReceiverCueMap(
+      hardwareReceivers,
+      stagedShow?.showReceivers
+    );
 
     const lookup = {};
     Object.keys(receiversTmp).forEach((rcvKey) => {
@@ -544,10 +551,14 @@ export default function MobileShowLoadout({ setCurrentTab }) {
       return;
     }
 
-    let receiversTmp = systemConfig?.receivers || {};
+    let hardwareReceivers = systemConfig?.receivers || {};
     if (stateData.fw_state?.receivers) {
-      receiversTmp = stateData.fw_state.receivers;
+      hardwareReceivers = stateData.fw_state.receivers;
     }
+    const receiversTmp = buildShowReceiverCueMap(
+      hardwareReceivers,
+      stagedShow?.showReceivers
+    );
 
     const lookup = {};
     Object.keys(receiversTmp).forEach((rcvKey) => {
@@ -585,6 +596,7 @@ export default function MobileShowLoadout({ setCurrentTab }) {
     setCellToItemMap(cellMap);
   }, [
     stagedShow?.items,
+    stagedShow?.showReceivers,
     racks,
     systemConfig?.receivers,
     stateData.fw_state?.receivers,

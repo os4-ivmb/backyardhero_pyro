@@ -112,6 +112,40 @@ export function availableDevicesFromShowReceivers(showReceivers) {
 }
 
 /**
+ * Build a receiver map keyed by the cue counts the SHOW designates for each
+ * receiver (entry.cues -> [1..N]), overlaid on the hardware/DB receiver rows
+ * for metadata. This mirrors the show builder's target grid, which sizes each
+ * receiver by the cues the show allocates to it -- NOT the receiver's physical
+ * hardware cue map (which may be smaller, e.g. an 8-cue DB row driving a 16-cue
+ * rack). Surfaces (loadout, spatial map) that render "the cues in the show
+ * editor" should build off this instead of `systemConfig.receivers` directly.
+ *
+ * The cues are keyed by `String(entry.id)`, which equals `item.zone` for native
+ * receivers (id-as-zone) and the zone number for Bilusocn entries, so the
+ * usual `${zone}:${target}` lookup tables resolve correctly.
+ *
+ * Falls back to the hardware map unchanged when the show has no showReceivers
+ * entries (legacy shows saved before the column existed).
+ */
+export function buildShowReceiverCueMap(hardwareReceivers, showReceivers) {
+  const hw = hardwareReceivers || {};
+  if (!Array.isArray(showReceivers) || showReceivers.length === 0) return hw;
+  const out = {};
+  for (const entry of showReceivers) {
+    if (!entry || !entry.id) continue;
+    const zoneKey = String(entry.id);
+    const n = isBilusocnEntry(entry)
+      ? BILUSOCN_ZONE_CUES
+      : Math.max(0, parseInt(entry.cues, 10) || 0);
+    out[entry.id] = {
+      ...(hw[entry.id] || {}),
+      cues: { [zoneKey]: Array.from({ length: n }, (_, i) => i + 1) },
+    };
+  }
+  return out;
+}
+
+/**
  * Synthesize the in-memory receivers map a staged show would see. Native
  * entries are passed through from `activeReceivers`; for each Bilusocn
  * entry we generate 3 ephemeral 4-cue receiver rows tiling the zone's
