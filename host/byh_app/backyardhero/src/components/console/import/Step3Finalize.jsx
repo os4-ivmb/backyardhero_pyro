@@ -58,11 +58,12 @@ export default function Step3Finalize({
 
       <Field label="Auth code" hint="Used to edit and launch this show.">
         <input
-          type="text"
+          type="password"
           value={authCode}
           onChange={(e) => onAuthCodeChange(e.target.value)}
           className={inputClass}
           placeholder="Enter an auth code"
+          autoComplete="new-password"
         />
       </Field>
 

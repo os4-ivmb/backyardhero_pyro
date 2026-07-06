@@ -312,6 +312,9 @@ const useAppStore = create(persist((set, get) => ({
         inventory: [...state.inventory, newItem],
         inventoryById: { ...state.inventoryById, [data.id]: newItem },
       }));
+      // Return the created row so callers can link to it immediately (e.g. the
+      // show-import flow links an imported cue to a just-imported catalog item).
+      return newItem;
     } catch (error) {
       console.error('Failed to create inventory item:', error);
       throw error;

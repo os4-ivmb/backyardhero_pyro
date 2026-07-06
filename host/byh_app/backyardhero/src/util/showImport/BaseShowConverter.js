@@ -184,12 +184,17 @@ export class BaseShowConverter {
   }
 
   // Build the createShow() payload from a conversion, the user's receiver
-  // resolutions (importedReceiverKey -> chosen DB receiver id), and the
+  // resolutions (importedReceiverKey -> chosen DB receiver id), the item
+  // matches (cue label -> inventory id, from the "Match items" step) and the
   // finalize-step metadata.
   //
-  // Each cue becomes a GENERIC display item carrying its own name/duration,
-  // pinned to the resolved receiver (`zone`) and cue number (`target`). The
-  // `importSource` tag is what marks the show as imported — there is no
+  // A cue whose label matched an inventory item becomes a real inventory-backed
+  // display item (its `itemId` links back to inventory; color/cost/image are
+  // re-hydrated from there on load). An unmatched cue stays a GENERIC display
+  // item carrying its own name/duration. Both are pinned to the resolved
+  // receiver (`zone`) and cue number (`target`).
+  //
+  // The `importSource` tag is what marks the show as imported — there is no
   // dedicated DB column; readers detect it from display_payload (see
   // isImportedShow.js). It is whitelisted in the builder's
   // SAVEABLE_ITEM_ATTRIBUTES so it survives a later edit/re-save.
@@ -199,19 +204,61 @@ export class BaseShowConverter {
     name,
     authorization_code,
     protocol,
+    itemMatches,
+    inventoryById,
   }) {
     const res = resolutions || {};
-    const display = (conversion?.cues || []).map((c, i) => ({
-      id: i,
-      type: "GENERIC",
-      name: c.label || "Imported cue",
-      duration: Number.isFinite(c.duration) ? c.duration : 0,
-      startTime: Number.isFinite(c.startTime) ? c.startTime : 0,
-      delay: 0,
-      zone: res[c.receiverKey] || "",
-      target: c.target,
-      importSource: conversion?.sourceId || "import",
-    }));
+    const matches = itemMatches || {};
+    const invById = inventoryById || {};
+    const importSource = conversion?.sourceId || "import";
+
+    const display = (conversion?.cues || []).map((c, i) => {
+      const startTime = Number.isFinite(c.startTime) ? c.startTime : 0;
+      const zone = res[c.receiverKey] || "";
+      const matchedId = matches[c.label];
+      const inv = matchedId != null ? invById[matchedId] : null;
+
+      if (inv) {
+        // Delay contributed by the physical item, matching the add-item modal:
+        // fuse burn + (aerial) lift. Inventory-derived visuals/cost rehydrate
+        // from itemId on load, so we only persist the linking + timing fields.
+        const fuseDelay = Number(inv.fuse_delay ?? inv.fuseDelay ?? 0) || 0;
+        const liftDelay =
+          inv.type === "AERIAL_SHELL" ? Number(inv.lift_delay) || 0 : 0;
+        // Inventory duration wins when present; otherwise keep the cue's own
+        // (a null/blank inventory duration must not zero out a .fin duration).
+        const invDuration =
+          inv.duration != null ? Number(inv.duration) : NaN;
+        return {
+          id: i,
+          type: inv.type || "GENERIC",
+          itemId: inv.id,
+          name: c.label || inv.name || "Imported cue",
+          duration: Number.isFinite(invDuration)
+            ? invDuration
+            : Number.isFinite(c.duration)
+              ? c.duration
+              : 0,
+          startTime,
+          delay: fuseDelay + liftDelay,
+          zone,
+          target: c.target,
+          importSource,
+        };
+      }
+
+      return {
+        id: i,
+        type: "GENERIC",
+        name: c.label || "Imported cue",
+        duration: Number.isFinite(c.duration) ? c.duration : 0,
+        startTime,
+        delay: 0,
+        zone,
+        target: c.target,
+        importSource,
+      };
+    });
     const show_receivers = (conversion?.receivers || []).map((r) => ({
       id: res[r.key] || "",
       kind: "native",
