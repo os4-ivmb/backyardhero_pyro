@@ -1,0 +1,89 @@
+# Dev Container compose for the Backyard Hero host stack.
+#
+# This mirrors host/run/osx/docker-compose-dev.yml (the proven dev setup)
+# but is rooted at .devcontainer/ and adds a full-repo workspace mount so
+# VS Code / the Dev Containers CLI can attach to it as an editing workspace.
+#
+# The image is built from host/Dockerfile. Source is bind-mounted over the
+# image's baked copies so edits hot-reload:
+#   * Frontend / Next.js API routes -> Next.js HMR (~1s, automatic)
+#   * Python daemon / websocket      -> supervisorctl restart (see README)
+#
+# supervisord.dev.conf is mounted over the prod config so byh-app runs
+# `npm run dev` (HMR) instead of `npm run start`.
+
+services:
+  firework-system:
+    build:
+      context: ../host
+      dockerfile: Dockerfile
+    # NOTE: intentionally NO `container_name`. A fixed name is GLOBAL, so the
+    # VS Code Dev Containers project and a manual `docker compose up` would
+    # collide ("name already in use"). Letting Compose derive the name per
+    # project lets both coexist. Reach the container via the service name:
+    #   docker compose -f .devcontainer/docker-compose.yml exec firework-system <cmd>
+    # Keep restarting so the container is always up for VS Code to attach.
+    restart: unless-stopped
+    volumes:
+      # Full repo mounted as the VS Code workspace. Editing the app source
+      # here hits the SAME host files as the /app/byh_app bind mount below,
+      # so HMR still fires.
+      - ..:/workspaces/backyardhero_pyro:cached
+
+      - ../host/data:/data
+      - ../host/config:/config
+      # NOTE: prod/osx compose bind host /tmp/d_cmd here so an operator can
+      # drop debug command-files from the host shell. We intentionally DON'T
+      # in the devcontainer: on Docker Desktop for Linux, /tmp is not a shared
+      # File Sharing path, so any /tmp/* bind source is refused ("path is not
+      # shared from the host"). It's also unneeded here -- the daemon's
+      # command-file inbox at /tmp/d_cmd is created inside the container (see
+      # host/Dockerfile + docker-entrypoint.sh), and both the writer (Next.js
+      # API) and reader (daemon) run in-container. To hand-drop a debug command
+      # while attached, just write into /tmp/d_cmd from the container terminal.
+
+      # Source bind mounts for hot reload.
+      - ../host/pythings:/app/pythings
+      - ../host/byh_app/backyardhero:/app/byh_app/
+
+      # NAMED volumes shadow the host bind mount so the container keeps its
+      # own Linux-built node_modules + .next -- otherwise a host-built
+      # better_sqlite3.node would leak in and require() blows up with
+      # "invalid ELF header". Docker populates a fresh named volume from the
+      # image's baked content on first `up`, so node_modules/.next arrive
+      # ready-to-run. Named (not anonymous) so they're reused across runs
+      # instead of orphaning a ~1-2 GB volume every up/down cycle.
+      - byh_node_modules:/app/byh_app/node_modules
+      - byh_next:/app/byh_app/.next
+
+      # The app source is bind-mounted a SECOND time at the VS Code workspace
+      # path (via the full-repo mount above), but node_modules lives only in
+      # the named volume overlaid on /app/byh_app -- so tooling run from the
+      # workspace copy (`next lint`, `next build`, eslint, package scripts)
+      # can't find `next`/deps. Mount the SAME named volumes at the workspace
+      # path too so both copies share one node_modules/.next and tooling works
+      # from either location.
+      - byh_node_modules:/workspaces/backyardhero_pyro/host/byh_app/backyardhero/node_modules
+      - byh_next:/workspaces/backyardhero_pyro/host/byh_app/backyardhero/.next
+
+      # Dev supervisord: byh-app runs `npm run dev` instead of `npm run start`.
+      - ../host/supervisord.devcontainer.conf:/etc/supervisor/conf.d/supervisord.conf
+    ports:
+      - "1776:1776"  # Next.js app
+      - "8090:8090"  # WebSocket server
+    environment:
+      # No physical dongle in the container -- serial reaches the dongle via
+      # the host-side TCP bridge (run separately; see README). Default is a
+      # harmless placeholder for boxes without one plugged in.
+      - SERIAL_PORT=${SERIAL_PORT:-/dev/ttyACM0}
+      - SERIAL_BAUD=115200
+      - LED_STATE_FILE=/data/ledstate
+      - NODE_ENV=development
+    privileged: true
+
+# Reused across dev runs so node_modules / .next aren't re-created (and
+# orphaned) on every up/down cycle. Reset them with:
+#   docker compose -f .devcontainer/docker-compose.yml down --volumes
+volumes:
+  byh_node_modules:
+  byh_next:

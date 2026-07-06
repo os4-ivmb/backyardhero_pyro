@@ -8,7 +8,7 @@ import {
 } from "@dnd-kit/core";
 import { MdEdit, MdSwapHoriz, MdAdd, MdDeleteOutline } from "react-icons/md";
 import { FaX, FaTriangleExclamation, FaCircleQuestion } from "react-icons/fa6";
-import { INV_COLOR_CODE } from "@/constants";
+import { itemColorOf } from "@/constants";
 import { SHOW_RECEIVER_STATUS, isBilusocnEntry } from "@/util/showReceivers";
 import { asyncAlert } from "@/components/common/AsyncPrompt";
 
@@ -37,6 +37,7 @@ export default function ShowTargetGrid({
   onAddReceiver,
   onEditReceiver,
   onRemoveReceiver,
+  onAddToTarget,
 }) {
   const [activeItem, setActiveItem] = useState(null);
   const [migrateSourceZone, setMigrateSourceZone] = useState(null);
@@ -276,10 +277,10 @@ export default function ShowTargetGrid({
                         key={`droppable-${zoneName}-${target}`}
                         id={`${zoneName}-${target}`}
                       >
-                        {item && (
+                        {item ? (
                           <DraggableItem
                             id={item.id}
-                            color={INV_COLOR_CODE[item.type]}
+                            color={itemColorOf(item)}
                           >
                             {item.image && (
                               <div
@@ -292,6 +293,20 @@ export default function ShowTargetGrid({
                             )}
                             <div className="relative z-10">{item.name}</div>
                           </DraggableItem>
+                        ) : (
+                          // Empty cue -- "+" to add an inventory item routed to
+                          // this exact receiver:cue.
+                          <button
+                            type="button"
+                            onClick={() => onAddToTarget?.(zoneName, target)}
+                            title={`Add an item to ${displayLabel} cue ${target}`}
+                            className="group flex h-full w-full items-center justify-center gap-1 rounded text-gray-600 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors"
+                          >
+                            <MdAdd className="text-lg opacity-60 group-hover:opacity-100" />
+                            <span className="text-[10px] text-gray-600 group-hover:text-emerald-400">
+                              {target}
+                            </span>
+                          </button>
                         )}
                       </DroppableCell>
                     );
@@ -318,7 +333,7 @@ export default function ShowTargetGrid({
             <div
               className="p-2 text-white font-bold rounded-md"
               style={{
-                backgroundColor: INV_COLOR_CODE[activeItem.type],
+                backgroundColor: itemColorOf(activeItem),
               }}
             >
               {activeItem.image && (
@@ -414,7 +429,7 @@ function DraggableItem({ id, children }) {
       ref={setNodeRef}
       {...listeners}
       {...attributes}
-      className="p-4 text-white text-xs font-bold rounded-md cursor-grab overflow-hidden"
+      className="flex h-full w-full items-center p-2 text-white text-xs font-bold rounded-md cursor-grab overflow-hidden"
       style={style}
     >
       {children}
@@ -428,10 +443,9 @@ function DroppableCell({ id, children }) {
   return (
     <div
       ref={setNodeRef}
-      className={`relative p-2 border border-gray-800 rounded-md col-span-1 ${
+      className={`relative p-2 border border-gray-800 rounded-md col-span-1 h-16 ${
         isOver ? "bg-blue-100" : "bg-gray-900"
       }`}
-      style={{ minHeight: "30px" }}
     >
       {children}
     </div>

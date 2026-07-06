@@ -334,6 +334,11 @@ apt_install() {
     iptables
     net-tools
     avahi-daemon
+    # ALSA userspace tools. The container plays show audio through the Pi's
+    # sound hardware; alsa-utils on the host lets an operator set the default
+    # output + volume (alsamixer / amixer) and inspect cards (aplay -l), which
+    # the "System default" output option follows.
+    alsa-utils
     # Time sync stack -- see setup_time_sync() for the rationale.
     # systemd-timesyncd ships on Bookworm/Bullseye/Ubuntu but isn't
     # always installed on minimal Debian; pull it explicitly. fake-hwclock

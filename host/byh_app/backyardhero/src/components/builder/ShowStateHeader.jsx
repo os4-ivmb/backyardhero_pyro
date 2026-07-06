@@ -1,5 +1,79 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { FiEye, FiEyeOff, FiEdit2, FiCheck } from "react-icons/fi";
 import useAppStore from '@/store/useAppStore';
+import { Button, IconButton, Card, CardHeader, Stat, cn, inputClass, fieldLabelClass } from "@/design";
+
+// Arm code field for the Show Details tab. Hidden (masked) by default with a
+// click-to-reveal toggle and an edit button; editing writes straight to
+// showMetadata so the builder's normal save path persists it. The arm code is
+// what gates editing and launching the show, so it's kept out of sight until
+// the operator deliberately reveals it.
+function ArmCodeField({ value, onChange }) {
+  const [revealed, setRevealed] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const code = value || "";
+  const masked = code ? "•".repeat(Math.max(6, Math.min(code.length, 12))) : "";
+
+  return (
+    <div className="min-w-0">
+      <label htmlFor="arm-code" className={fieldLabelClass}>
+        Arm code
+      </label>
+      {editing ? (
+        <div className="mt-1 flex items-center gap-2">
+          <input
+            id="arm-code"
+            type="text"
+            autoFocus
+            placeholder="e.g. 1234"
+            value={code}
+            onChange={(e) => onChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") setEditing(false);
+            }}
+            className={cn(inputClass, "w-40")}
+          />
+          <Button
+            size="sm"
+            variant="primary"
+            leading={<FiCheck />}
+            onClick={() => setEditing(false)}
+          >
+            Done
+          </Button>
+        </div>
+      ) : (
+        <div className="mt-1 flex items-center gap-2">
+          <span
+            className={cn(
+              "font-mono text-sm px-3 h-9 inline-flex items-center rounded border border-border bg-surface-1 min-w-[8rem]",
+              !code && "text-fg-muted",
+            )}
+          >
+            {code ? (revealed ? code : masked) : "Not set"}
+          </span>
+          <IconButton
+            size="sm"
+            variant="ghost"
+            label={revealed ? "Hide arm code" : "Reveal arm code"}
+            onClick={() => setRevealed((v) => !v)}
+            disabled={!code}
+          >
+            {revealed ? <FiEyeOff /> : <FiEye />}
+          </IconButton>
+          <Button
+            size="sm"
+            variant="outline"
+            leading={<FiEdit2 />}
+            onClick={() => setEditing(true)}
+          >
+            {code ? "Edit" : "Set"}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // Resolve a non-negative number from a unit_cost-like value; returns 0 otherwise.
 const toCost = (val) => {
@@ -244,81 +318,77 @@ export default function ShowStateHeader({
   };
 
   return (
-    <div className="border border-gray-700 rounded-md p-4 flex items-center justify-between bg-gray-800 mb-3">
-      {/* Left Section: Show Name */}
-      <div className="flex items-center space-x-2">
-        <input
-          type="text"
-          placeholder="Show Name"
-          value={showMetadata.name}
-          onChange={(e) => setShowMetadata((showmd) => ({ ...showmd, name: e.target.value }))}
-          className="p-2 border border-gray-300 rounded-md"
-        />
-      </div>
+    <div className="space-y-4 w-full">
+      {/* Show name + primary actions */}
+      <Card tone="raised" padding="md">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="flex flex-wrap items-end gap-4 min-w-0">
+            <div className="min-w-0">
+              <label htmlFor="show-name" className={fieldLabelClass}>
+                Show name
+              </label>
+              <input
+                id="show-name"
+                type="text"
+                placeholder="Untitled show"
+                value={showMetadata.name || ""}
+                onChange={(e) =>
+                  setShowMetadata((showmd) => ({ ...showmd, name: e.target.value }))
+                }
+                className={cn(inputClass, "mt-1 w-72")}
+              />
+            </div>
+            <ArmCodeField
+              value={showMetadata.authorization_code}
+              onChange={(v) =>
+                setShowMetadata((showmd) => ({ ...showmd, authorization_code: v }))
+              }
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <SaveStatusBadge
+              status={saveStatus}
+              lastSavedAt={lastSavedAt}
+              hasShowId={!!showMetadata.id}
+            />
+            <Button size="sm" variant="ghost" onClick={() => refreshInventoryFnc()}>
+              Refresh inventory
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => clearEditor()}>
+              Clear
+            </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={() => onSaveShow?.()}
+              disabled={!showMetadata.name || saveStatus === "saving"}
+              title={
+                showMetadata.id
+                  ? "Auto-save runs after edits; this button forces an immediate save."
+                  : "Save creates the show row; subsequent edits auto-save."
+              }
+            >
+              {showMetadata.id ? "Save" : "Add show"}
+            </Button>
+          </div>
+        </div>
+      </Card>
 
-      {/* Middle Section: Show Details */}
-      <div className="text-center">
-        <div className="text-sm text-gray-4s00">
-          <p>Items: <b>{stats.itemCount}</b></p>
-          <p>Total Duration: <b>{stats.totalDuration}</b></p>
+      {/* Show statistics */}
+      <Card tone="raised" padding="md">
+        <CardHeader eyebrow="Summary" title="Show statistics" />
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-9 gap-x-6 gap-y-4">
+          <Stat label="Items" value={stats.itemCount} numeric />
+          <Stat label="Total duration" value={stats.totalDuration} numeric />
+          <Stat label="Used zones" value={stats.usedZones} numeric />
+          <Stat label="Used cues" value={stats.usedTargets} numeric />
+          <Stat label="Closest fire" value={stats.closestFire} numeric />
+          <Stat label="Max concurrency" value={stats.maxConcurrency} numeric />
+          <Stat label="Show density" value={stats.showDensity} numeric />
+          <Stat label="Total cost" value={formatMoney(stats.totalCost)} numeric />
+          <Stat label="Cost / min" value={formatMoney(stats.costPerMin)} numeric />
         </div>
-      </div>
-      <div className="text-center">
-        <div className="text-sm text-gray-4s00">
-          <p>Used Zones: <b>{stats.usedZones}</b></p>
-          <p>Used Cues: <b>{stats.usedTargets}</b></p>
-        </div>
-      </div>
-      <div className="text-center">
-        <div className="text-sm text-gray-400">
-          <p>Closest Fire: <b>{stats.closestFire}</b></p>
-          <p>Max Concurrency: <b>{stats.maxConcurrency}</b></p>
-        </div>
-      </div>
-      <div className="text-center">
-        <div className="text-sm text-gray-400">
-          <p>Show Density: <b>{stats.showDensity}</b></p>
-        </div>
-      </div>
-      <div className="text-center">
-        <div className="text-sm text-gray-400">
-          <p>Total Cost: <b>{formatMoney(stats.totalCost)}</b></p>
-          <p>$/min: <b>{formatMoney(stats.costPerMin)}</b></p>
-        </div>
-      </div>
-      <div className="text-center">
-        <div className="text-white flex items-center gap-2 justify-end">
-          <SaveStatusBadge
-            status={saveStatus}
-            lastSavedAt={lastSavedAt}
-            hasShowId={!!showMetadata.id}
-          />
-          <button
-            className="bg-blue-800 px-4 py-2 rounded mx-1"
-            onClick={()=>clearEditor()}
-          >
-            Clear
-          </button>
-          <button
-            className="bg-blue-800 px-4 py-2 rounded mx-1"
-            onClick={()=>refreshInventoryFnc()}
-          >
-            Refresh Inventory
-          </button>
-          <button
-            onClick={() => onSaveShow?.()}
-            className={`p-2 mx-1 bg-blue-800 text-white rounded-md ${!showMetadata.name ? 'bg-gray-400' : 'hover:bg-blue-600'}`}
-            disabled={!showMetadata.name || saveStatus === "saving"}
-            title={
-              showMetadata.id
-                ? "Auto-save runs after edits; this button forces an immediate save."
-                : "Save creates the show row; subsequent edits auto-save."
-            }
-          >
-            {showMetadata.id ? "Save" : "Add Show"}
-          </button>
-        </div>
-      </div>
+      </Card>
     </div>
   );
 }
