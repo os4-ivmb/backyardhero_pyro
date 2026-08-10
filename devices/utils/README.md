@@ -14,6 +14,20 @@ updates write only the app partition, so once a receiver has been
 provisioned, its `NODE_ID` and ident persist forever -- through every
 firmware update, until you explicitly wipe them.
 
+The BYH Omni uses the same partition and provisioning flow with its own
+firmware and artifacts:
+
+```bash
+devices/utils/build_omni.sh
+devices/utils/flash_omni.py --full
+```
+
+Its firmware lives in `devices/byh_omni/`, emits `byh_omni_v<N>.*`
+artifacts, and stores `NODE_ID` plus ident in the `byh_omni` NVS
+namespace. Routine `flash_omni.py` updates preserve that partition;
+`--full` and `--set-id` provision it with `SETID`, defaulting the ident
+to `O<node_id>`.
+
 ### One-time setup (host)
 
 ```bash

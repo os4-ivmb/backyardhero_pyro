@@ -24,6 +24,7 @@ host/data/update-backups/
 **/.DS_Store
 host/byh_app/backyardhero/public/uploads/
 devices/os4_receiver/.build/
+devices/byh_omni/.build/
 devices/os4_dongle/.build/
 host/data/backyardhero.db.backup*
 host/data/last_scan.json
@@ -50,11 +51,12 @@ out/
 Thumbs.db
 ehthumbs.db
 
-# Firmware build artifacts (produced by devices/utils/build_{receiver,dongle}.sh).
+# Firmware build artifacts (produced by devices/utils/build_{receiver,omni,dongle}.sh).
 # We deliberately keep the bin/ directories themselves (they hold a
 # README.md / .gitkeep so the layout is documented in-tree), but the
 # generated .bin files are large, churn every build, and any operator
 # who needs a binary builds it locally. The dongle UI flasher and
 # update_dongle.sh both compile-on-demand from devices/os4_dongle/.
 devices/os4_receiver/bin/*.bin
+devices/byh_omni/bin/*.bin
 devices/os4_dongle/bin/*.bin
