@@ -76,6 +76,15 @@ const bool RECEIVER_USES_V1_CUES = false;
 #define STATUS_LED_COUNT 3
 #define BATT_VOLTAGE_PIN 3
 #define BOARD_CT_PIN 2
+
+enum OmniMode {
+  OMNI_MODE_HOST,
+  OMNI_MODE_CUE_RECEIVER,
+  OMNI_MODE_DMX_RECEIVER
+};
+
+OmniMode omniMode = OMNI_MODE_CUE_RECEIVER;
+
 int NUM_BOARDS = 1;
 int NUM_LEDS = (8 * NUM_BOARDS);
 bool noBoardsDetected = false;
@@ -1691,6 +1700,15 @@ void updateStatusLEDs() {
 
 void setBoardCount() {
   int targetY = analogRead(BOARD_CT_PIN);
+
+  if (targetY <= 500) {
+    omniMode = OMNI_MODE_HOST;
+  } else if (targetY >= 4000) {
+    omniMode = OMNI_MODE_DMX_RECEIVER;
+  } else {
+    omniMode = OMNI_MODE_CUE_RECEIVER;
+  }
+
   if      (targetY < 1100) NUM_BOARDS = 1;
   else if (targetY < 1900) NUM_BOARDS = 2;
   else if (targetY < 2500) NUM_BOARDS = 3;

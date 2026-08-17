@@ -128,7 +128,7 @@ def parse_args() -> argparse.Namespace:
         help="clear the NVS identity (back to UNPROVISIONED). Reboots the chip.",
     )
 
-    p.add_argument("--node", type=int, help="receiver NODE_ID to set (1-254). Skips the prompt.")
+    p.add_argument("--node", type=int, help="receiver NODE_ID to set (1-65535). Skips the prompt.")
     p.add_argument("--ident", help="receiver ident string (default: RX<node>). Skips the prompt.")
     p.add_argument(
         "--no-banner-wait", action="store_true",
@@ -224,7 +224,7 @@ def main() -> int:
         return issue_wipe(port)
 
     node_id = args.node if args.node is not None else prompt_node_id()
-    if not (1 <= node_id <= 254):
+    if not (1 <= node_id <= 65535):
         print(f"[set_node_id] ERROR: node_id out of range: {node_id}", file=sys.stderr)
         return 1
     ident = args.ident or prompt_ident(default=f"RX{node_id}")

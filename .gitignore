@@ -28,6 +28,7 @@ devices/byh_omni/.build/
 devices/os4_dongle/.build/
 host/data/backyardhero.db.backup*
 host/data/last_scan.json
+**/.build-check
 
 
 # Next.js

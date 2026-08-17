@@ -196,7 +196,11 @@
 //     arrives after the receiver has been silent longer than ~4 poll cycles
 //     (8s floor) -- the point at which the host already treats it as offline.
 //     The next poll slot then issues a CONFIG_QUERY, same as a cold connect.
-#define FW_VERSION 29
+// v30: 2026-08-16 - Backward-compatible 16-bit receiver IDs. Legacy ACK
+//   payloads remain valid: status/OTA add an optional trailing high byte and
+//   config responses use reserved[0]. All command payloads remain unchanged;
+//   only the RF destination address and dongle bookkeeping widen to uint16_t.
+#define FW_VERSION 30
 
 #define BOARD_VERSION 2
 
@@ -296,13 +300,17 @@ struct ShowStartMessage {
 // Must stay <= 32 bytes (nRF24 max payload). Currently 31 bytes packed.
 struct ReceiverStatusMessage {
   uint8_t type;
-  uint8_t nodeID;
+  uint8_t nodeID;            // low byte; legacy offset preserved
   uint8_t batteryLevel;
   uint16_t showState;
   char ident[10];
   uint64_t cont64_0;
   uint64_t cont64_1;
+  uint8_t nodeIDHigh;        // v30 optional trailing byte
 } __attribute__((packed));
+
+#define LEGACY_RECEIVER_STATUS_SIZE 31
+static_assert(sizeof(ReceiverStatusMessage) == 32, "receiver status wire layout changed");
 
 // dongle -> receiver: fetch config (and optionally apply settings).
 // flags == 0 is a pure fetch. Wire layout is append-only -- new knobs
@@ -319,15 +327,17 @@ struct ReceiverConfigSetMessage {
 // zero-padded for future fields without a wire bump.
 struct ReceiverConfigResponseMessage {
   uint8_t  type;              // RECEIVER_CONFIG_RESPONSE
-  uint8_t  nodeID;
+  uint8_t  nodeID;            // low byte; legacy offset preserved
   uint8_t  fwVersion;
   uint8_t  boardVersion;
   uint8_t  numBoards;         // 0 if noBoardsDetected, else detected NUM_BOARDS
   uint8_t  noBoardsDetected;  // 0 or 1
   uint8_t  cuesAvailable;     // 0 if noBoardsDetected, else NUM_BOARDS * 8
   uint16_t fireDurationMs;    // currently-effective fire pulse width (ms)
-  uint8_t  reserved[8];       // future fields
+  uint8_t  reserved[8];       // reserved[0] = v30 nodeID high byte
 } __attribute__((packed));
+
+static_assert(sizeof(ReceiverConfigResponseMessage) == 17, "config response wire layout changed");
 
 // ---------------------------------------------------------------------------
 // OTA flash protocol -- mirrors os4_receiver.ino. See FW_VERSION v10 notes.
@@ -361,8 +371,12 @@ struct ReceiverOtaStatusMessage {
   uint16_t lastChunk;
   uint32_t bytesReceived;
   uint8_t  errorCode;
-  uint8_t  nodeID;
+  uint8_t  nodeID;           // low byte; legacy offset preserved
+  uint8_t  nodeIDHigh;       // v30 optional trailing byte
 } __attribute__((packed));
+
+#define LEGACY_RECEIVER_OTA_STATUS_SIZE 10
+static_assert(sizeof(ReceiverOtaStatusMessage) == 11, "OTA status wire layout changed");
 
 // Maximum data bytes per OTA_DATA frame. 32-byte nRF payload minus the
 // 3-byte OtaDataMessage header. Must match the host's chunk size.
@@ -374,7 +388,7 @@ struct ReceiverOtaStatusMessage {
 #define OTA_REJOIN_TIMEOUT_MS 30000UL
 
 struct ReceiverInfo {
-  uint8_t nodeID;
+  uint16_t nodeID;
   String ident;
   uint8_t batteryLevel;
   uint16_t showId;
@@ -480,7 +494,7 @@ uint8_t rfChannel = 85;
 uint8_t rfSystemId = 0;
 
 struct QueuedCommand {
-  uint8_t targetNodeID;
+  uint16_t targetNodeID;
   MessageType messageType;
 
   uint8_t fire_position;
@@ -538,7 +552,7 @@ uint64_t lastPollDispatchTime = 0;
 // ---------------------------------------------------------------------------
 bool     otaActive            = false;
 uint8_t  otaPhase             = 0;
-uint8_t  otaTargetNodeID      = 0;
+uint16_t otaTargetNodeID      = 0;
 String   otaTargetIdent       = "";
 uint8_t  otaDataRate          = 2;       // 0=250k, 1=1M, 2=2M
 uint32_t otaTotalSize         = 0;
@@ -655,7 +669,7 @@ RF24 radio(RF24_CE_PIN, RF24_CSN_PIN);
 // RX163 (odd) both ended up listening on address 163. Result: when the
 // dongle thought it was talking to one of the pair, the other actually
 // answered, and any newly-registered odd-paired receiver was silently
-// invisible to the radio. Switching to `+` gives every uint8_t nodeID a
+// invisible to the radio. Switching to `+` gives every nodeID a
 // unique address. Receivers and dongle MUST be running matching firmware
 // (v8+ on dongle, v10+ on receiver) for the math to agree.
 //
@@ -687,7 +701,7 @@ RF24 radio(RF24_CE_PIN, RF24_CSN_PIN);
 
 static inline uint64_t systemSalt() {
   // 4-byte left-shift so the system ID lives in the high 32 bits and never
-  // collides with the 0..255 nodeID range in the low byte.
+  // collides with the 0..65535 nodeID range in the low two bytes.
   return ((uint64_t)rfSystemId) << 32;
 }
 static inline uint64_t masterReadAddress() {
@@ -695,7 +709,7 @@ static inline uint64_t masterReadAddress() {
   // makes the salt-merge intent explicit.
   return MASTER_READ_BASE | systemSalt();
 }
-static inline uint64_t receiverAddress(uint8_t nodeID) {
+static inline uint64_t receiverAddress(uint16_t nodeID) {
   // See the IMPORTANT note above re: arithmetic add vs. bitwise OR, and
   // RF_ADDR_ENTROPY_MASK for the H8 entropy XOR (applied on both ends).
   return RF_ADDR_ENTROPY_MASK ^ (systemSalt() + RECEIVER_BASE + (uint64_t)nodeID);
@@ -887,7 +901,7 @@ void checkGpioStatus() {
 // We exploit this so the dongle can address a freshly-known receiver before
 // receiving its first status frame. Returns 0 if the ident doesn't match the
 // pattern.
-uint8_t nodeIDFromIdent(const String &ident) {
+uint16_t nodeIDFromIdent(const String &ident) {
   if (ident.length() < 3) return 0;
   if (ident.charAt(0) != 'R' || ident.charAt(1) != 'X') return 0;
   long val = 0;
@@ -895,9 +909,9 @@ uint8_t nodeIDFromIdent(const String &ident) {
     char c = ident.charAt(i);
     if (c < '0' || c > '9') return 0;
     val = val * 10 + (c - '0');
-    if (val > 255) return 0;
+    if (val > 65535) return 0;
   }
-  return (uint8_t)val;
+  return (uint16_t)val;
 }
 
 ReceiverInfo* getReceiverByIdent(const String &ident, bool createIfNotExist) {
@@ -909,7 +923,7 @@ ReceiverInfo* getReceiverByIdent(const String &ident, bool createIfNotExist) {
   if (!createIfNotExist) return nullptr;
 
   if (numReceivers < MAX_RECEIVERS) {
-    uint8_t newNodeID = nodeIDFromIdent(ident);
+    uint16_t newNodeID = nodeIDFromIdent(ident);
     // Defensive: refuse to register a receiver whose radio address would
     // collide with one we already know about. A collision means radio
     // writes to the new receiver land on the old one (RX162 ACKs for
@@ -985,7 +999,7 @@ ReceiverInfo* getReceiverByIdent(const String &ident, bool createIfNotExist) {
   return nullptr;
 }
 
-ReceiverInfo* getReceiverByNodeID(uint8_t nodeID) {
+ReceiverInfo* getReceiverByNodeID(uint16_t nodeID) {
   if (nodeID == 0) return nullptr;
   for (uint8_t i = 0; i < numReceivers; i++) {
     if (receivers[i].nodeID == nodeID) return &receivers[i];
@@ -999,7 +1013,7 @@ ReceiverInfo* getReceiverByNodeID(uint8_t nodeID) {
 // for everyone else.
 //
 // Returns the number of commands dropped.
-uint8_t scrubQueueForNode(uint8_t nodeID) {
+uint8_t scrubQueueForNode(uint16_t nodeID) {
   if (cmdQueueCount == 0 || nodeID == 0) return 0;
   uint8_t dropped = 0;
   // Walk the live range and copy survivors back to a fresh head.
@@ -1032,7 +1046,7 @@ uint8_t scrubQueueForNode(uint8_t nodeID) {
 bool removeReceiverByIdent(const String &ident) {
   for (uint8_t i = 0; i < numReceivers; i++) {
     if (receivers[i].ident == ident) {
-      uint8_t goneNodeID = receivers[i].nodeID;
+      uint16_t goneNodeID = receivers[i].nodeID;
       // Shift the tail down to keep the array compact.
       for (uint8_t j = i; j < numReceivers - 1; ++j) receivers[j] = receivers[j + 1];
       numReceivers--;
@@ -1146,7 +1160,7 @@ void emitRxUpd(const ReceiverInfo* r, bool includeFreshLatency) {
 // success%) before the line goes out, ensuring rxupd carries the freshest
 // possible sample for that TX.
 ReceiverInfo* ingestStatusFrame(const uint8_t* buf, uint8_t len, uint64_t now) {
-  if (len < sizeof(ReceiverStatusMessage)) {
+  if (len < LEGACY_RECEIVER_STATUS_SIZE) {
     if (debugMode > 0) {
       Serial.print(F("WARN: short status frame, len=")); Serial.println(len);
     }
@@ -1196,7 +1210,11 @@ ReceiverInfo* ingestStatusFrame(const uint8_t* buf, uint8_t len, uint64_t now) {
     r->configQueryPending = true;
   }
 
-  r->nodeID = status->nodeID;
+  uint16_t wireNodeID = status->nodeID;
+  if (len >= sizeof(ReceiverStatusMessage)) {
+    wireNodeID |= ((uint16_t)status->nodeIDHigh) << 8;
+  }
+  r->nodeID = wireNodeID;
   r->batteryLevel = status->batteryLevel;
   r->showId = status->showState & 0x3FFF;
   r->loadComplete = (status->showState & (1 << 14)) ? true : false;
@@ -1241,17 +1259,19 @@ ReceiverInfo* ingestConfigResponse(const uint8_t* buf, uint8_t len, uint64_t now
     return NULL;
   }
   const ReceiverConfigResponseMessage* cr = (const ReceiverConfigResponseMessage*)buf;
-  if (cr->nodeID == 0) {
+  uint16_t wireNodeID = (uint16_t)cr->nodeID
+      | (((uint16_t)cr->reserved[0]) << 8);
+  if (wireNodeID == 0) {
     if (debugMode > 0) Serial.println(F("WARN: cfg resp nodeID=0"));
     return NULL;
   }
-  ReceiverInfo* r = getReceiverByNodeID(cr->nodeID);
+  ReceiverInfo* r = getReceiverByNodeID(wireNodeID);
   if (!r) {
     // Unknown nodeID -- we don't have an ident here so we can't auto-create.
     // The next normal status frame will register the receiver, after which a
     // fresh config query (auto- or operator-driven) will succeed.
     if (debugMode > 0) {
-      Serial.print(F("WARN: cfg resp from unknown N")); Serial.println(cr->nodeID);
+      Serial.print(F("WARN: cfg resp from unknown N")); Serial.println(wireNodeID);
     }
     return NULL;
   }
@@ -1393,7 +1413,7 @@ void runRadioScan(uint16_t passes, uint8_t chStart, uint8_t chEnd) {
 // returns true once the receiver auto-ACKs. If that ACK carried a payload
 // (which it should, since the receiver pre-loads its status), we read it out
 // and ingest it as a status update.
-bool sendCommandFrame(uint8_t nodeID, const void* msg, uint8_t msgLen, uint64_t now) {
+bool sendCommandFrame(uint16_t nodeID, const void* msg, uint8_t msgLen, uint64_t now) {
   if (!radio.isChipConnected()) {
     if (debugMode > 0) {
       Serial.print(F("TX ERR: radio not connected, N")); Serial.println(nodeID);
@@ -1475,12 +1495,12 @@ bool sendCommandFrame(uint8_t nodeID, const void* msg, uint8_t msgLen, uint64_t 
   return ok;
 }
 
-bool sendManualFire(uint8_t nodeID, uint8_t position, uint64_t now) {
+bool sendManualFire(uint16_t nodeID, uint8_t position, uint64_t now) {
   ManualFireMessage msg = { (uint8_t)MANUAL_FIRE, position };
   return sendCommandFrame(nodeID, &msg, sizeof(msg), now);
 }
 
-bool sendClockSync(uint8_t nodeID, uint64_t timestamp, uint64_t now) {
+bool sendClockSync(uint16_t nodeID, uint64_t timestamp, uint64_t now) {
   // Stamp timestamp as late as possible to minimize the offset the receiver
   // must compensate for. The receiver applies ADDITIONAL_CLOCK_TX_OFFSET to
   // account for residual TX/decode latency.
@@ -1490,17 +1510,17 @@ bool sendClockSync(uint8_t nodeID, uint64_t timestamp, uint64_t now) {
   return sendCommandFrame(nodeID, &msg, sizeof(msg), now);
 }
 
-bool sendStartLoad(uint8_t nodeID, uint8_t numTargets, uint16_t showId, uint64_t now) {
+bool sendStartLoad(uint16_t nodeID, uint8_t numTargets, uint16_t showId, uint64_t now) {
   StartLoadMessage msg = { (uint8_t)START_LOAD, numTargets, showId };
   return sendCommandFrame(nodeID, &msg, sizeof(msg), now);
 }
 
-bool sendShowLoad(uint8_t nodeID, uint32_t t1, uint8_t p1, uint32_t t2, uint8_t p2, uint64_t now) {
+bool sendShowLoad(uint16_t nodeID, uint32_t t1, uint8_t p1, uint32_t t2, uint8_t p2, uint64_t now) {
   ShowLoadMessage msg = { (uint8_t)SHOW_LOAD, t1, p1, t2, p2 };
   return sendCommandFrame(nodeID, &msg, sizeof(msg), now);
 }
 
-bool sendShowLoadN(uint8_t nodeID, const ShowLoadNCue* cues, uint8_t count, uint64_t now) {
+bool sendShowLoadN(uint16_t nodeID, const ShowLoadNCue* cues, uint8_t count, uint64_t now) {
   if (count == 0) return false;
   if (count > SHOW_LOADN_MAX_CUES) count = SHOW_LOADN_MAX_CUES;
   ShowLoadNMessage msg;
@@ -1512,12 +1532,12 @@ bool sendShowLoadN(uint8_t nodeID, const ShowLoadNCue* cues, uint8_t count, uint
   return sendCommandFrame(nodeID, &msg, bytesUsed, now);
 }
 
-bool sendShowStart(uint8_t nodeID, uint64_t startTime, uint8_t numTargets, uint16_t showId, uint64_t now) {
+bool sendShowStart(uint16_t nodeID, uint64_t startTime, uint8_t numTargets, uint16_t showId, uint64_t now) {
   ShowStartMessage msg = { (uint8_t)SHOW_START, startTime, numTargets, showId };
   return sendCommandFrame(nodeID, &msg, sizeof(msg), now);
 }
 
-bool sendGeneric(uint8_t nodeID, uint8_t commandType, uint64_t now) {
+bool sendGeneric(uint16_t nodeID, uint8_t commandType, uint64_t now) {
   GenericMessage msg = { commandType };
   return sendCommandFrame(nodeID, &msg, sizeof(msg), now);
 }
@@ -1532,7 +1552,7 @@ bool sendGeneric(uint8_t nodeID, uint8_t commandType, uint64_t now) {
 //
 // Returns true if BOTH writes succeeded. The CLOCK_SYNC failing means
 // we definitely lost the response; the host can re-issue rxcfg.
-bool sendConfigQuery(uint8_t nodeID, uint8_t flags, uint16_t fire_dur_ms, uint64_t now) {
+bool sendConfigQuery(uint16_t nodeID, uint8_t flags, uint16_t fire_dur_ms, uint64_t now) {
   ReceiverConfigSetMessage q;
   q.type = RECEIVER_CONFIG_QUERY;
   q.flags = flags;
@@ -1713,9 +1733,11 @@ bool readOtaAckPayload(ReceiverOtaStatusMessage* outMsg) {
       break;
     }
     radio.read(buf, len);
-    if (len >= sizeof(ReceiverOtaStatusMessage) &&
+    if (len >= LEGACY_RECEIVER_OTA_STATUS_SIZE &&
         buf[0] == RECEIVER_OTA_STATUS) {
-      memcpy(outMsg, buf, sizeof(ReceiverOtaStatusMessage));
+      memset(outMsg, 0, sizeof(*outMsg));
+      uint8_t copyLen = len < sizeof(*outMsg) ? len : sizeof(*outMsg);
+      memcpy(outMsg, buf, copyLen);
       found = true;
     }
   }
@@ -2702,7 +2724,7 @@ void processSerialCommand(String inStr) {
     Serial.print(F("CV NID0 ")); Serial.println(ident);
     return;
   }
-  uint8_t targetNodeID = rinfo->nodeID;
+  uint16_t targetNodeID = rinfo->nodeID;
 
   QueuedCommand qc = {0};
   qc.targetNodeID = targetNodeID;

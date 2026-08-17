@@ -98,7 +98,7 @@ partition table puts NVS at `0x9000-0xdfff`, in the gap between the
 partition table (`0x8000-0x8fff`) and `boot_app0` (`0xe000-0xffff`),
 and we don't write anything in that gap.
 
-After the flash, prompts for receiver number 1-254 and sends `SETID
+After the flash, prompts for receiver number 1-65535 and sends `SETID
 <node_id> RX<node_id>` over serial to provision the new identity. (For
 a brand-new chip, NVS is empty after this flash and the receiver boots
 into UNPROVISIONED mode -- which is exactly what `SETID` resolves.)

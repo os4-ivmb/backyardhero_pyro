@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """flash_receiver.py -- flash an os4 receiver. Mirrors the Arduino IDE's
-flash invocation byte-for-byte, with the only addition being post-flash
-NODE_ID provisioning over serial.
+flash invocation byte-for-byte, with post-flash NODE_ID, ident, and hardware
+board-version provisioning over serial.
 
-Three modes:
+Four modes:
 
     flash_receiver.py
         Default. Writes the app at 0x10000 AND re-stamps the OTA
@@ -21,13 +21,19 @@ Three modes:
         0x9000-0xdfff, sandwiched between partitions (0x8000-0x8fff)
         and boot_app0 (0xe000-0xffff), and we don't write anything in
         that gap. Auto-prompts for receiver number and runs SETID over
-        serial afterwards. Use for a brand-new chip or for recovery.
+        serial afterwards, including the hardware board version. Use for a
+        brand-new chip or for recovery.
 
     flash_receiver.py --set-id
         Same flash as default (app + boot_app0), then an interactive
-        SETID. Re-numbers a receiver without wiping anything else in NVS.
+        SETID. Reconfigures a receiver's identity and board version without
+        wiping anything else in NVS.
 
-`--node N` and `--ident NAME` skip the prompts.
+    flash_receiver.py --set-board
+        Does not flash anything. Prompts for the hardware board version, sends
+        SETBOARD over serial, and verifies the value after the receiver restarts.
+
+`--node N`, `--ident NAME`, and `--board-version N` skip the prompts.
 
 Dependencies are installed automatically into devices/utils/.venv on
 first run (pyserial + esptool). No manual pip install needed; macOS
@@ -291,14 +297,14 @@ def prompt_port() -> str:
 
 def prompt_node_id() -> int:
     while True:
-        raw = input("Receiver number (1-254): ").strip()
+        raw = input("Receiver number (1-65535): ").strip()
         if not raw.isdigit():
             print("  must be an integer")
             continue
         n = int(raw)
-        if 1 <= n <= 254:
+        if 1 <= n <= 65535:
             return n
-        print("  out of range (1-254)")
+        print("  out of range (1-65535)")
 
 
 def prompt_ident(default: str) -> str:
@@ -310,6 +316,16 @@ def prompt_ident(default: str) -> str:
     if " " in raw:
         raise SystemExit("[flash_receiver] ident must not contain spaces.")
     return raw
+
+
+def prompt_board_version(default: int = 10) -> int:
+    while True:
+        raw = input(f"Receiver board version [default {default}]: ").strip()
+        if not raw:
+            return default
+        if raw.isdigit() and 1 <= int(raw) <= 255:
+            return int(raw)
+        print("  must be an integer from 1-255")
 
 
 # ---------------------------------------------------------------------------
@@ -534,6 +550,7 @@ def read_until_any(ser: serial.Serial, needles: list[str], timeout_s: float) -> 
 # Match the receiver's boot banner line: "NODE_ID: <n>"
 NODE_ID_BANNER_RE = re.compile(r"NODE_ID:\s*(\d+)")
 IDENT_BANNER_RE   = re.compile(r"Ident:\s*(\S+)")
+BOARD_VERSION_BANNER_RE = re.compile(r"Board Version:\s*(\d+)")
 
 
 def read_boot_banner(ser: serial.Serial, *, timeout_s: float = 12.0) -> tuple[str, int | None, str | None]:
@@ -550,9 +567,16 @@ def read_boot_banner(ser: serial.Serial, *, timeout_s: float = 12.0) -> tuple[st
     return text, node_id, ident
 
 
-def send_setid_and_confirm(ser: serial.Serial, node_id: int, ident: str, port: str) -> None:
-    """Send SETID, wait for OK, wait for restart, confirm new identity."""
-    cmd = f"SETID {node_id} {ident}\n".encode()
+def send_setid_and_confirm(
+    ser: serial.Serial,
+    node_id: int,
+    ident: str,
+    port: str,
+    board_version: int | None = None,
+) -> None:
+    """Send SETID, optionally including board version, then confirm restart."""
+    board_arg = f" {board_version}" if board_version is not None else ""
+    cmd = f"SETID {node_id} {ident}{board_arg}\n".encode()
     log(f"sending: {cmd.decode().strip()}")
     ser.write(cmd)
     ser.flush()
@@ -572,29 +596,71 @@ def send_setid_and_confirm(ser: serial.Serial, node_id: int, ident: str, port: s
     ser2 = open_serial_with_retry(port)
     confirm_text, confirmed_id, confirmed_ident = read_boot_banner(ser2, timeout_s=12.0)
     ser2.close()
+    board_match = BOARD_VERSION_BANNER_RE.search(confirm_text)
+    confirmed_board = int(board_match.group(1)) if board_match else None
 
-    if confirmed_id == node_id and confirmed_ident == ident:
-        log(f"SUCCESS -- receiver is now NODE_ID={node_id} IDENT={ident}")
+    board_matches = board_version is None or confirmed_board == board_version
+    if confirmed_id == node_id and confirmed_ident == ident and board_matches:
+        board_text = f" BOARD_VERSION={confirmed_board}" if confirmed_board is not None else ""
+        log(f"SUCCESS -- receiver is now NODE_ID={node_id} IDENT={ident}{board_text}")
     else:
         log(
-            f"WARNING: post-restart banner didn't fully confirm identity "
-            f"(saw NODE_ID={confirmed_id} IDENT={confirmed_ident}). Verify manually."
+            f"WARNING: post-restart banner didn't fully confirm configuration "
+            f"(saw NODE_ID={confirmed_id} IDENT={confirmed_ident} "
+            f"BOARD_VERSION={confirmed_board}). Verify manually."
         )
 
 
-def post_flash_confirm_identity(port: str) -> tuple[int | None, str | None]:
+def set_board_version_and_confirm(port: str, board_version: int) -> None:
+    """Set only the persisted hardware board version and verify the restart."""
+    log(f"opening {port} to set BOARD_VERSION={board_version}...")
+    ser = open_serial_with_retry(port)
+    cmd = f"\nSETBOARD {board_version}\n".encode()
+    log(f"sending: {cmd.decode().strip()}")
+    ser.write(cmd)
+    ser.flush()
+
+    ack_text, matched = read_until_any(
+        ser, ["OK SETBOARD", "ERR SETBOARD"], timeout_s=5.0
+    )
+    sys.stdout.write(ack_text)
+    sys.stdout.flush()
+    ser.close()
+    if matched != "OK SETBOARD":
+        raise SystemExit("[flash_receiver] receiver did not acknowledge SETBOARD.")
+
+    log("receiver acknowledged SETBOARD, waiting for restart...")
+    time.sleep(1.0)
+    ser2 = open_serial_with_retry(port)
+    confirm_text, _, _ = read_boot_banner(ser2, timeout_s=12.0)
+    ser2.close()
+
+    board_match = BOARD_VERSION_BANNER_RE.search(confirm_text)
+    confirmed_board = int(board_match.group(1)) if board_match else None
+    if confirmed_board == board_version:
+        log(f"SUCCESS -- receiver BOARD_VERSION={board_version}")
+    else:
+        log(
+            f"WARNING: post-restart banner reported BOARD_VERSION={confirmed_board}; "
+            f"expected {board_version}. Verify manually."
+        )
+
+
+def post_flash_confirm_identity(port: str) -> tuple[int | None, str | None, int | None]:
     """Open serial after a default (app-only) flash, read the boot banner,
-    return what NODE_ID/IDENT the receiver claims."""
+    return what NODE_ID/IDENT/board version the receiver claims."""
     log(f"opening {port} to read post-flash boot banner...")
     ser = open_serial_with_retry(port)
     try:
-        _, node_id, ident = read_boot_banner(ser, timeout_s=12.0)
+        text, node_id, ident = read_boot_banner(ser, timeout_s=12.0)
     finally:
         ser.close()
-    return node_id, ident
+    board_match = BOARD_VERSION_BANNER_RE.search(text)
+    board_version = int(board_match.group(1)) if board_match else None
+    return node_id, ident, board_version
 
 
-def post_flash_provision(port: str, node_id: int, ident: str) -> None:
+def post_flash_provision(port: str, node_id: int, ident: str, board_version: int) -> None:
     """Open serial after a --full flash, expect UNPROVISIONED banner, send
     SETID, confirm restart with new identity."""
     log(f"opening {port} to provision NODE_ID={node_id} IDENT={ident}...")
@@ -608,10 +674,10 @@ def post_flash_provision(port: str, node_id: int, ident: str) -> None:
             "Sending SETID anyway."
         )
 
-    send_setid_and_confirm(ser, node_id, ident, port)
+    send_setid_and_confirm(ser, node_id, ident, port, board_version)
 
 
-def post_flash_reprovision(port: str, node_id: int, ident: str) -> None:
+def post_flash_reprovision(port: str, node_id: int, ident: str, board_version: int) -> None:
     """For --set-id without --full. Wait for the boot banner (chip already
     has firmware), then send SETID."""
     log(f"opening {port} to re-provision as NODE_ID={node_id} IDENT={ident}...")
@@ -620,7 +686,7 @@ def post_flash_reprovision(port: str, node_id: int, ident: str) -> None:
     log("waiting for receiver boot banner...")
     read_boot_banner(ser, timeout_s=12.0)
 
-    send_setid_and_confirm(ser, node_id, ident, port)
+    send_setid_and_confirm(ser, node_id, ident, port, board_version)
 
 
 # ---------------------------------------------------------------------------
@@ -645,25 +711,40 @@ def parse_args() -> argparse.Namespace:
         "--full", action="store_true",
         help="first-time flash: bootloader + partitions + boot_app0 + app, all "
              "in one esptool call (mirrors the IDE's first upload). Naturally "
-             "preserves NVS. Prompts for receiver number and runs SETID after.",
+             "preserves NVS. Prompts for receiver and board versions, then runs SETID.",
     )
     mode.add_argument(
         "--set-id", dest="set_id", action="store_true",
         help="app-only flash followed by an interactive SETID. Re-provisions "
-             "the receiver without wiping the rest of NVS.",
+             "identity and board version without wiping the rest of NVS.",
+    )
+    mode.add_argument(
+        "--set-board", dest="set_board", action="store_true",
+        help="do not flash; only set the receiver hardware board version in NVS.",
     )
 
-    p.add_argument("--node", type=int, help="receiver NODE_ID (1-254). Skips the prompt for --full / --set-id.")
+    p.add_argument("--node", type=int, help="receiver NODE_ID (1-65535). Skips the prompt for --full / --set-id.")
     p.add_argument("--ident", help="receiver ident string (default: RX<node>). Skips the prompt for --full / --set-id.")
+    p.add_argument(
+        "--board-version", type=int,
+        help="receiver hardware board version (1-255). Skips the prompt for --full / --set-id / --set-board.",
+    )
     return p.parse_args()
 
 
-def collect_identity_prompts(args: argparse.Namespace) -> tuple[int, str]:
+def collect_identity_prompts(args: argparse.Namespace) -> tuple[int, str, int]:
     node_id = args.node if args.node is not None else prompt_node_id()
-    if not (1 <= node_id <= 254):
+    if not (1 <= node_id <= 65535):
         raise SystemExit(f"[flash_receiver] node_id out of range: {node_id}")
     ident = args.ident or prompt_ident(default=f"RX{node_id}")
-    return node_id, ident
+    board_version = (
+        args.board_version
+        if args.board_version is not None
+        else prompt_board_version()
+    )
+    if not (1 <= board_version <= 255):
+        raise SystemExit(f"[flash_receiver] board version out of range: {board_version}")
+    return node_id, ident, board_version
 
 
 def _format_bin_label(p: Path) -> str:
@@ -675,6 +756,18 @@ def _format_bin_label(p: Path) -> str:
 
 def main() -> int:
     args = parse_args()
+
+    if args.set_board:
+        board_version = (
+            args.board_version
+            if args.board_version is not None
+            else prompt_board_version()
+        )
+        if not (1 <= board_version <= 255):
+            raise SystemExit(f"[flash_receiver] board version out of range: {board_version}")
+        port = args.port or prompt_port()
+        set_board_version_and_confirm(port, board_version)
+        return 0
 
     if args.full:
         if args.bin is not None:
@@ -723,23 +816,24 @@ def main() -> int:
     log(f"using port: {port}")
 
     if args.full:
-        node_id, ident = collect_identity_prompts(args)
+        node_id, ident, board_version = collect_identity_prompts(args)
         run_esptool_flash(port, flash_pairs)
         # A first-time flash leaves the chip with a fresh (empty) NVS,
-        # so it boots into UNPROVISIONED mode and we send SETID.
-        post_flash_provision(port, node_id, ident)
+        # so it boots into UNPROVISIONED mode and we send SETID with the
+        # hardware board version in one transaction/restart.
+        post_flash_provision(port, node_id, ident, board_version)
         return 0
 
     if args.set_id:
-        node_id, ident = collect_identity_prompts(args)
+        node_id, ident, board_version = collect_identity_prompts(args)
         run_esptool_flash(port, flash_pairs)
-        post_flash_reprovision(port, node_id, ident)
+        post_flash_reprovision(port, node_id, ident, board_version)
         return 0
 
     # Default: app-only flash, no provisioning. Confirm post-flash that
     # the chip's preserved identity is intact.
     run_esptool_flash(port, flash_pairs)
-    seen_id, seen_ident = post_flash_confirm_identity(port)
+    seen_id, seen_ident, seen_board_version = post_flash_confirm_identity(port)
 
     if seen_id is None:
         log(
@@ -757,7 +851,10 @@ def main() -> int:
         )
         return 0
 
-    log(f"SUCCESS -- receiver preserved identity: NODE_ID={seen_id} IDENT={seen_ident}")
+    log(
+        f"SUCCESS -- receiver preserved configuration: NODE_ID={seen_id} "
+        f"IDENT={seen_ident} BOARD_VERSION={seen_board_version}"
+    )
     return 0
 
 
