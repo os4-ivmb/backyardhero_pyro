@@ -24,6 +24,12 @@ BRIDGE_VENV="${BRIDGE_DIR}/venv"
 REQUIREMENTS="${BRIDGE_DIR}/requirements.txt"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose-dev.yml"
 
+# Build with Docker Desktop's native builder so the image lands directly in
+# the local image store. A docker-container builder (e.g. byh-builder from
+# build_and_push_docker.sh) has to export + "sending tarball" the full image
+# on every `up --build`, even when every layer is cached.
+export BUILDX_BUILDER="${BUILDX_BUILDER:-desktop-linux}"
+
 echo "BACKYARD HERO HOST (osx/dev) --- VERSION: ${VERSION}"
 echo "Host dir: ${HOST_DIR}"
 

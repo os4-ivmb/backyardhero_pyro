@@ -79,10 +79,12 @@ fi
 if [[ -n "${PLATFORMS}" ]]; then
   if ! docker buildx inspect byh-builder >/dev/null 2>&1; then
     echo "[build] creating buildx builder 'byh-builder'..."
-    docker buildx create --name byh-builder --use >/dev/null
-  else
-    docker buildx use byh-builder >/dev/null
+    docker buildx create --name byh-builder >/dev/null
   fi
+  # Scoped to this script rather than `buildx use`: a globally selected
+  # docker-container builder makes every `docker compose up --build` export
+  # and load the whole image as a tarball (minutes for a multi-GB image).
+  export BUILDX_BUILDER=byh-builder
   docker buildx inspect --bootstrap >/dev/null
 fi
 
