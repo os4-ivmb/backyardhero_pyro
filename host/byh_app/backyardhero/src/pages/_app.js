@@ -1,5 +1,5 @@
 import "@/styles/globals.css";
-import { Inter, JetBrains_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import { useEffect } from "react";
 import axios from "axios";
 import { BASE_PATH } from "@/util/clientEnv";
@@ -14,15 +14,24 @@ axios.defaults.baseURL = BASE_PATH;
 
 // Inter for UI text (good at small sizes, tabular numerals available),
 // JetBrains Mono for timing/numerics in tables, timeline labels, addrs.
-const sans = Inter({
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
+// Files live in the repo: `next/font/google` downloads CSS at build time,
+// and Google sometimes returns extensionless kit URLs that Next 16's
+// Turbopack loader cannot parse, which fails the host image build.
+const sans = localFont({
+  src: "../fonts/inter-latin-wght-normal.woff2",
+  weight: "100 900",
+  display: "swap",
   variable: "--font-sans",
+  adjustFontFallback: "Arial",
 });
-const mono = JetBrains_Mono({
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
+const mono = localFont({
+  src: "../fonts/jetbrains-mono-latin-wght-normal.woff2",
+  weight: "100 800",
+  display: "swap",
   variable: "--font-mono",
+  // Leave the fallback to the monospace stack in Tailwind. The default
+  // size-adjust fallback is Arial, which reflows numeric columns.
+  adjustFontFallback: false,
 });
 
 export default function App({ Component, pageProps }) {

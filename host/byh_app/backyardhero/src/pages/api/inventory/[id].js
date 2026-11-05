@@ -1,5 +1,6 @@
 import { getRepo } from "@/data";
 import { parseOptionalUnitCost } from "@/util/inventoryUnitCost";
+import { isMissingNonNegative } from "@/util/requiredNumber";
 import { caps } from "@/util/profile";
 import { getBlobStore, localImageKey } from "@/data/blobStore";
 
@@ -63,7 +64,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'All fuse fields are required.' });
     }
 
-    if ( type === "AERIAL_SHELL" && (!fuse_delay || !lift_delay)){
+    if (type === "AERIAL_SHELL" && (isMissingNonNegative(fuse_delay) || isMissingNonNegative(lift_delay))) {
       return res.status(400).json({ error: 'All shell fields are required.' });
     }
 

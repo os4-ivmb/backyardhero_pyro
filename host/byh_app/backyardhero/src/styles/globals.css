@@ -10,8 +10,8 @@
 /* ------------------------------------------------------------------ */
 
 :root {
-  /* Type stack tokens (font families come from next/font; vars are set
-     on the body element by `_app.js` so we only declare fallbacks here). */
+  /* Type stack tokens (font families come from next/font/local in
+     `_app.js`; these are the fallbacks before that class is applied). */
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 
