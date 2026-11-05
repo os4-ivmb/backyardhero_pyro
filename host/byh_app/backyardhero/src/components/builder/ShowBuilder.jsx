@@ -33,7 +33,16 @@ import RacksTab from "./RacksTab";
 import InventoryTab from "./InventoryTab";
 import ControlsTab from "./ControlsTab";
 import HistoryPanel from "./HistoryPanel";
+import SequenceEditor from "./SequenceEditor";
 import { AddInventoryForm } from "../inventory/InventoryManager";
+import {
+  SHOW_TYPE_MANUAL_SEQUENCE,
+  SHOW_TYPE_TIMELINE,
+  groupItemsIntoSteps,
+  newStepId,
+  normalizeShowConfig,
+  stepsFromTimelineItems,
+} from "@/util/showConfig";
 import { normalizeYouTubeUrl } from "@/util/youtube";
 import { parseOptionalUnitCost } from "@/util/inventoryUnitCost";
 import usePersistentState from "@/utils/usePersistentState";
@@ -128,7 +137,9 @@ const MULTIPLE_FIRE_TYPES = new Set([
   "AERIAL_SHELL",
 ]);
 
-const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, items, inventory, availableDevices, receiverLabels, showMetadata, editItem, presetItem, presetTarget }) => {
+// `stepLabel` (e.g. "step 3") switches the copy to manual-sequence wording and
+// hides the timeline-only start time.
+const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, items, inventory, availableDevices, receiverLabels, showMetadata, editItem, presetItem, presetTarget, stepLabel = null }) => {
   // editItem present => the modal is editing an already-placed cue rather than
   // adding a new one. Same UI, but it pre-populates from the cue, keeps the
   // existing start time, excludes the cue itself from occupancy checks, and on
@@ -595,9 +606,11 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
       <Modal
         isOpen={isOpen}
         onClose={onClose}
-        title={isEdit ? "Edit cue" : "Add item to timeline"}
+        title={isEdit ? "Edit cue" : stepLabel ? `Add cue to ${stepLabel}` : "Add item to timeline"}
         eyebrow={
-          isEdit
+          stepLabel
+            ? `Cue · ${stepLabel}`
+            : isEdit
             ? `Cue · effect @ ${formatShowClock(startAtSec)}`
             : `Cue · t = ${Number(startAtSec || 0).toFixed(2)}s`
         }
@@ -612,7 +625,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
               onClick={handleAdd}
               disabled={!canAdd}
             >
-              {isEdit ? "Save changes" : "Add to timeline"}
+              {isEdit ? "Save changes" : stepLabel ? `Add to ${stepLabel}` : "Add to timeline"}
             </Button>
           </>
         }
@@ -848,6 +861,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
             />
           </Field>
 
+          {!stepLabel && (
           <Field
             label="Start at (mm:ss)"
             hint="When the effect appears on the timeline. Optional — defaults to the click position."
@@ -867,6 +881,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
               placeholder="00:00.00"
             />
           </Field>
+          )}
 
           {selectedType === "GENERIC" && (
             <Field
@@ -2846,6 +2861,8 @@ const SAVEABLE_ITEM_ATTRIBUTES = [
   // Per-item movement lock set from the timeline context menu. Persisted so
   // a locked cue stays locked across save/reload.
   "locked",
+  // Manual-sequence step the cue fires in (see util/showConfig).
+  "stepId",
 ];
 // Item fields that MUST persist as real numbers. A few authoring paths
 // (and older imported payloads) can leave these as strings, which then
@@ -2862,7 +2879,7 @@ const coerceNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 const cueName = (it) => (it && it.name ? `“${it.name}”` : "cue");
 // Tracked fields whose change counts as an "edit" (beyond move/lock, handled
 // separately). Kept in sync with the History panel's diff view.
-const DIFF_FIELD_KEYS = ["duration", "zone", "target", "delay", "name", "type", "metaDelaySec"];
+const DIFF_FIELD_KEYS = ["duration", "zone", "target", "delay", "name", "type", "metaDelaySec", "stepId"];
 const itemFieldsDiffer = (p, n) =>
   DIFF_FIELD_KEYS.some((k) => String(p[k] ?? "") !== String(n[k] ?? ""));
 // Whether two item lists differ in a way worth recording as a history step.
@@ -2991,10 +3008,11 @@ const compressItemsForSave = (items) =>
 // string and the auto-save loop converges instantly.
 const computeSaveFingerprint = ({
   name, protocol, authorization_code, audioOffsetMs,
-  items, showReceivers, audioTracks, receiverLocations, receiverLabels,
+  items, showReceivers, audioTracks, receiverLocations, receiverLabels, showConfig,
 }) => {
   try {
     return JSON.stringify({
+      showConfig: normalizeShowConfig(showConfig),
       name: name ?? "",
       protocol: protocol ?? "",
       authorization_code: authorization_code ?? "",
@@ -3385,6 +3403,117 @@ const ShowBuilder = (props) => {
   );
   const hasShowReceivers = showReceivers.some((entry) => entry?.id);
 
+  // ---- Show type / manual sequence ---------------------------------------
+  // The config lives on showMetadata so it hydrates and saves with the rest of
+  // the show. Steps are an ordered id list; each cue points at one via stepId.
+  const showConfig = useMemo(
+    () => normalizeShowConfig(showMetadata.showConfig),
+    [showMetadata.showConfig]
+  );
+  const isSequence = showConfig.showType === SHOW_TYPE_MANUAL_SEQUENCE;
+  const sequenceSteps = useMemo(
+    () => groupItemsIntoSteps(showConfig.steps, items),
+    [showConfig.steps, items]
+  );
+  const updateShowConfig = (updater) =>
+    setShowMetadata((md) => ({
+      ...md,
+      showConfig: updater(normalizeShowConfig(md.showConfig)),
+    }));
+
+  // Step the pending add lands in: an existing step id, or null for a new
+  // step appended at the end. Only consulted for manual-sequence shows.
+  const [addStepTarget, setAddStepTarget] = useState(null);
+
+  const handleShowTypeChange = async (nextType) => {
+    if (nextType === showConfig.showType) return;
+    if (nextType === SHOW_TYPE_MANUAL_SEQUENCE) {
+      const stepIds = new Set(showConfig.steps.map((s) => s.id));
+      const allAssigned = items.every((it) => it.stepId != null && stepIds.has(String(it.stepId)));
+      if (items.length > 0 && !allAssigned) {
+        const ok = await asyncConfirm({
+          message:
+            `Convert to a manual sequence? Cues that fire at the same time become one step ` +
+            `(${items.length} cue${items.length === 1 ? "" : "s"}). Timeline start times are kept ` +
+            `if you switch back.`,
+        });
+        if (!ok) return;
+        const converted = stepsFromTimelineItems(items);
+        setItems(converted.items);
+        updateShowConfig((cfg) => ({ ...cfg, showType: nextType, steps: converted.steps }));
+        return;
+      }
+      updateShowConfig((cfg) => ({ ...cfg, showType: nextType }));
+      return;
+    }
+    if (items.length > 0) {
+      const ok = await asyncConfirm({
+        message:
+          "Switch to a timeline show? Steps are removed. Cues keep their timeline start " +
+          "times; cues added as sequence steps all start at 0:00.",
+      });
+      if (!ok) return;
+    }
+    setItems((prev) =>
+      prev.map((it) => {
+        if (it.stepId == null) return it;
+        const { stepId, ...rest } = it;
+        return rest;
+      })
+    );
+    updateShowConfig((cfg) => ({ ...cfg, showType: SHOW_TYPE_TIMELINE, steps: [] }));
+  };
+
+  const handleFireKeyChange = (fireKey) =>
+    updateShowConfig((cfg) => ({ ...cfg, fireKey }));
+
+  const handleRemoveStep = async (stepId) => {
+    const step = sequenceSteps.find((s) => s.id === stepId);
+    if (!step) return;
+    if (step.items.length > 0) {
+      const ok = await asyncConfirm({
+        message: `Remove step ${step.number} and its ${step.items.length} cue${step.items.length === 1 ? "" : "s"}?`,
+        destructive: true,
+      });
+      if (!ok) return;
+      setItems((prev) => prev.filter((it) => String(it.stepId) !== stepId));
+    }
+    updateShowConfig((cfg) => ({ ...cfg, steps: cfg.steps.filter((s) => s.id !== stepId) }));
+    clearSelection();
+  };
+
+  const handleMoveStep = (stepId, toIndex) =>
+    updateShowConfig((cfg) => {
+      const from = cfg.steps.findIndex((s) => s.id === stepId);
+      if (from < 0 || from === toIndex) return cfg;
+      const steps = cfg.steps.slice();
+      const [moved] = steps.splice(from, 1);
+      steps.splice(Math.max(0, Math.min(steps.length, toIndex)), 0, moved);
+      return { ...cfg, steps };
+    });
+
+  // Drag a cue onto another step (or the new-step box, stepId null).
+  const handleMoveItemToStep = (itemId, stepId) => {
+    let targetId = stepId;
+    if (targetId == null) {
+      targetId = newStepId();
+      updateShowConfig((cfg) => ({ ...cfg, steps: [...cfg.steps, { id: targetId }] }));
+    }
+    setItems((prev) =>
+      prev.map((it) => (it.id === itemId ? { ...it, stepId: targetId } : it))
+    );
+  };
+
+  const openAddModalForStep = (stepId) => {
+    setAddStepTarget(stepId);
+    openAddModal(0);
+  };
+
+  const handleDropInventoryOnStep = (inventoryId, stepId) => {
+    setAddStepTarget(stepId);
+    handleDropInventory(inventoryId, 0);
+  };
+
   const handleTabChange = (tabName) => {
     // Save current scroll position
     const scrollY = window.scrollY;
@@ -3700,6 +3829,7 @@ const ShowBuilder = (props) => {
     setAddItemInsertMode(false);
     setAddPresetItem(null);
     setAddPresetTarget(null);
+    setAddStepTarget(null);
   };
 
   // An inventory item was dragged from the Inventory tab onto the timeline at
@@ -3730,6 +3860,18 @@ const ShowBuilder = (props) => {
   const addItemToTimeline = (item) => {
     item.id = currentIndex;
     setCurrentIndex((currentIndex) => currentIndex + 1);
+
+    if (isSequence) {
+      let stepId = addStepTarget;
+      if (stepId == null || !showConfig.steps.some((s) => s.id === stepId)) {
+        stepId = newStepId();
+        updateShowConfig((cfg) => ({ ...cfg, steps: [...cfg.steps, { id: stepId }] }));
+      }
+      item.stepId = stepId;
+      setItems((prevItems) => [...prevItems, item]);
+      setAddItemInsertMode(false);
+      return;
+    }
 
     // Insert mode (Shift + double-click): make room for the new cue by
     // shifting every existing cue at/after the insertion point back by the
@@ -3997,8 +4139,14 @@ const ShowBuilder = (props) => {
   };
 
   const handleItemUpdate = (updated) => {
+    // The modal rebuilds the cue from the inventory item, so carry the
+    // sequence step over from the cue being replaced.
     setItems((prevItems) =>
-      prevItems.map((it) => (it.id === updated.id ? updated : it))
+      prevItems.map((it) =>
+        it.id === updated.id
+          ? (it.stepId != null && updated.stepId == null ? { ...updated, stepId: it.stepId } : updated)
+          : it
+      )
     );
     // Keep the panel in sync with the edited values, but don't let this
     // programmatic re-selection trigger the YouTube preview popup.
@@ -4237,13 +4385,13 @@ const ShowBuilder = (props) => {
       ) {
         return;
       }
-      if (!audioTracks || audioTracks.length === 0) return;
+      if (!audioTracks || audioTracks.length === 0 || isSequence) return;
       e.preventDefault();
       setIsAudioPlaying((v) => !v);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [audioTracks]);
+  }, [audioTracks, isSequence]);
 
   // Local-time emit from the active track's wavesurfer -> show-time.
   const handleLocalTimeUpdate = (localSec) => {
@@ -4377,6 +4525,11 @@ const ShowBuilder = (props) => {
       show_receivers: showReceivers.length > 0
         ? JSON.stringify(showReceivers)
         : null,
+      // Timeline shows that never had a config stay NULL; once a show has
+      // been a sequence we keep writing it so switching back is persisted.
+      show_config: isSequence || showMetadata.show_config
+        ? JSON.stringify(showConfig)
+        : null,
     };
 
     const stateShape = {
@@ -4386,6 +4539,7 @@ const ShowBuilder = (props) => {
       audioOffsetMs: audioOffsetMsForState,
       showReceivers,
       receiverLocations,
+      showConfig,
     };
 
     setSaveStatus("saving");
@@ -4415,6 +4569,7 @@ const ShowBuilder = (props) => {
         audioTracks: tracksForState,
         receiverLocations,
         receiverLabels,
+        showConfig,
       });
       dirtyRef.current = false;
       setSaveStatus("saved");
@@ -4547,6 +4702,7 @@ const ShowBuilder = (props) => {
         audioTracks,
         receiverLocations,
         receiverLabels,
+        showConfig,
       }),
     [
       showMetadata.name,
@@ -4558,6 +4714,7 @@ const ShowBuilder = (props) => {
       audioTracks,
       receiverLocations,
       receiverLabels,
+      showConfig,
     ],
   );
 
@@ -4643,7 +4800,13 @@ const ShowBuilder = (props) => {
   // Handle test show generation
   const handleTestShowGenerate = (newItems) => {
     // Clear existing items and set new ones
-    setItems(newItems);
+    if (isSequence) {
+      const converted = stepsFromTimelineItems(newItems);
+      setItems(converted.items);
+      updateShowConfig((cfg) => ({ ...cfg, steps: converted.steps }));
+    } else {
+      setItems(newItems);
+    }
     setItemsFixed(false); // Allow ID reassignment
   };
 
@@ -4774,8 +4937,9 @@ const ShowBuilder = (props) => {
     <div className={cn("h-full flex flex-col min-h-0", tabsCollapsed ? "px-4 pt-4 pb-0" : "p-4")}>
       <div className="flex-1 min-h-0 flex flex-col">
           {/* Audio editor: tab strip + per-track waveform/BPM card. The
-              waveform body collapses (tabs stay) to give the timeline room. */}
-          <div className="mb-4 shrink-0">
+              waveform body collapses (tabs stay) to give the timeline room.
+              Manual sequences have no clock to sync audio to. */}
+          <div className={cn("mb-4 shrink-0", isSequence && "hidden")}>
             <div className="flex items-end justify-between gap-2">
               <div className="min-w-0 overflow-x-auto overflow-y-hidden">
                 <AudioTrackTabs
@@ -4878,6 +5042,19 @@ const ShowBuilder = (props) => {
 
           <div className="relative flex-1 min-h-0 flex flex-col">
             <div className={cn("flex-1 min-h-0 flex flex-col", !hasShowReceivers && "opacity-35 grayscale pointer-events-none")}>
+              {isSequence ? (
+                <SequenceEditor
+                  steps={sequenceSteps}
+                  receiverLabels={receiverLabels}
+                  onAddToStep={openAddModalForStep}
+                  onDropInventory={handleDropInventoryOnStep}
+                  onEditItem={openEditModal}
+                  onRemoveItem={handleItemDelete}
+                  onRemoveStep={handleRemoveStep}
+                  onMoveStep={handleMoveStep}
+                  onMoveItem={handleMoveItemToStep}
+                />
+              ) : (
               <Timeline
                 persistKey="editor"
                 items={items}
@@ -4909,11 +5086,12 @@ const ShowBuilder = (props) => {
                 audioTracks={audioTracks}
                 audioDurationSec={totalAudioDuration}
               />
+              )}
             </div>
 
             {/* Multi-selection popup: count + Chain timing, as the same
                 translucent strip pinned to the bottom of the timeline. */}
-            {selectedItems.length >= 2 && !copyMode && (
+            {selectedItems.length >= 2 && !copyMode && !isSequence && (
               <div className="absolute bottom-3 left-3 right-3 z-20 rounded-md border border-border-subtle bg-surface-2/80 backdrop-blur-sm shadow-e3 px-3 py-2">
                 <div className="flex items-center justify-between gap-3">
                   <div className="text-sm text-fg-secondary min-w-0">
@@ -4949,7 +5127,7 @@ const ShowBuilder = (props) => {
                 Delete, as a translucent strip pinned to the bottom of the
                 timeline. Hidden during a multi-select (its own panel) or a
                 copy flow. */}
-            {selectedItem && selectedItems.length < 2 && !copyMode && (
+            {selectedItem && selectedItems.length < 2 && !copyMode && !isSequence && (
               <div className="absolute bottom-3 left-3 right-3 z-20 rounded-md border border-border-subtle bg-surface-2/80 backdrop-blur-sm shadow-e3 px-3 py-2">
                 <div className="flex items-center justify-between gap-3">
                   <div className="text-sm text-fg-secondary min-w-0 flex items-center gap-x-4 gap-y-1 flex-wrap">
@@ -5219,6 +5397,9 @@ const ShowBuilder = (props) => {
                   onSaveShow={handleSaveShow}
                   saveStatus={saveStatus}
                   lastSavedAt={lastSavedAt}
+                  showConfig={showConfig}
+                  onShowTypeChange={handleShowTypeChange}
+                  onFireKeyChange={handleFireKeyChange}
                 />
               )}
 
@@ -5305,6 +5486,11 @@ const ShowBuilder = (props) => {
             availableDevices={availableDevices}
             receiverLabels={receiverLabels}
             showMetadata={showMetadata}
+            stepLabel={
+              isSequence
+                ? `step ${(sequenceSteps.find((s) => s.id === addStepTarget)?.number) ?? sequenceSteps.length + 1}`
+                : null
+            }
           />
           <AddItemModal
             isOpen={isEditModalOpen}
@@ -5317,6 +5503,11 @@ const ShowBuilder = (props) => {
             availableDevices={availableDevices}
             receiverLabels={receiverLabels}
             showMetadata={showMetadata}
+            stepLabel={
+              isSequence && editingItem
+                ? `step ${sequenceSteps.find((s) => s.id === String(editingItem.stepId))?.number ?? "?"}`
+                : null
+            }
           />
           <ChainTimingModal
             isOpen={isChainTimingModalOpen}

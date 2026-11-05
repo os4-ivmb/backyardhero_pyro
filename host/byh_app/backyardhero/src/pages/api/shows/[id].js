@@ -39,7 +39,7 @@ export default async function handler(req, res) {
       name, duration, version, runtime_version,
       display_payload, runtime_payload,
       authorization_code, protocol, audioFile,
-      receiver_locations, receiver_labels, show_receivers,
+      receiver_locations, receiver_labels, show_receivers, show_config,
     } = req.body;
 
     // `duration` is allowed to be 0 (an empty show with no items still has a
@@ -71,6 +71,7 @@ export default async function handler(req, res) {
         receiver_locations,
         receiver_labels,
         show_receivers,
+        show_config,
       });
       if (result.changes === 0) return res.status(404).json({ error: "Show not found." });
       return res.status(200).json({ message: "Show updated successfully." });

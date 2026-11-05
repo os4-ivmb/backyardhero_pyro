@@ -39,7 +39,9 @@ function Metric({ label, current, total, failing }) {
   );
 }
 
-export default function ShowHealthStrip() {
+// `connectivityOnly` drops the load/ready metrics, which don't apply to
+// manual-sequence shows (they're never loaded onto receivers).
+export default function ShowHealthStrip({ connectivityOnly = false } = {}) {
   const { stagedShow, systemConfig } = useAppStore();
   const { stateData } = useStateAppStore();
 
@@ -125,11 +127,15 @@ export default function ShowHealthStrip() {
 
   return (
     <div className="flex items-stretch gap-2">
-      <div className="flex-1 grid grid-cols-2 md:grid-cols-4 gap-2">
+      <div className={cn("flex-1 grid grid-cols-2 gap-2", !connectivityOnly && "md:grid-cols-4")}>
         <Metric label="Receivers connected" {...metrics.receiversConnected} />
         <Metric label="Cues continuity" {...metrics.cuesConnected} />
-        <Metric label="Receivers loaded" {...metrics.receiversLoaded} />
-        <Metric label="Receivers ready" {...metrics.receiversReady} />
+        {!connectivityOnly ? (
+          <>
+            <Metric label="Receivers loaded" {...metrics.receiversLoaded} />
+            <Metric label="Receivers ready" {...metrics.receiversReady} />
+          </>
+        ) : null}
       </div>
     </div>
   );

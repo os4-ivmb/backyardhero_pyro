@@ -391,6 +391,9 @@ export async function runPush() {
       receiver_locations: row.receiver_locations,
       receiver_labels: row.receiver_labels,
       show_receivers: row.show_receivers,
+      // Only hashed/pushed when set, so timeline shows keep their existing
+      // hashes and never depend on the cloud show_config column.
+      ...(row.show_config ? { show_config: row.show_config } : {}),
     });
     const st = getSyncState('show', row.id);
     try {
@@ -414,6 +417,7 @@ export async function runPush() {
         receiver_locations: parseJsonOrNull(row.receiver_locations),
         receiver_labels: parseJsonOrNull(row.receiver_labels),
         show_receivers: parseJsonOrNull(row.show_receivers),
+        ...(row.show_config ? { show_config: parseJsonOrNull(row.show_config) } : {}),
       };
 
       let cloudId = st?.cloud_id || null;

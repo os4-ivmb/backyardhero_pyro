@@ -26,7 +26,7 @@ export default async function handler(req, res) {
       name, duration, version, runtime_version,
       display_payload, runtime_payload,
       authorization_code, protocol, audioFile,
-      receiver_locations, receiver_labels, show_receivers,
+      receiver_locations, receiver_labels, show_receivers, show_config,
     } = req.body;
 
     // `duration` is allowed to be 0 (an empty show with no items still has a
@@ -48,7 +48,7 @@ export default async function handler(req, res) {
         name, duration, version, runtime_version,
         display_payload, runtime_payload,
         authorization_code, protocol, audio_file,
-        receiver_locations, receiver_labels, show_receivers,
+        receiver_locations, receiver_labels, show_receivers, show_config,
       });
       return res.status(201).json({ id: result.id });
     } catch (error) {

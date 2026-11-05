@@ -3,6 +3,7 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import axios from 'axios';
 import { parseAudioField } from '@/utils/audioTracks';
+import { parseShowConfig } from '@/util/showConfig';
 
 const receiverRowToStoreEntry = (row) => ({
   label: row.label,
@@ -92,6 +93,8 @@ const normalizeShowRow = (show) => {
   } else {
     show.showReceivers = [];
   }
+
+  show.showConfig = parseShowConfig(show.show_config);
 
   return show;
 };

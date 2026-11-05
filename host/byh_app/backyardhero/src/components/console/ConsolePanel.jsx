@@ -8,11 +8,13 @@ import ShowPicker from "./ShowPicker";
 import ShowControl from "./ShowControl";
 import ShowHealthStrip from "./ShowHealthStrip";
 import ShowDetails from "./ShowDetails";
+import ManualSequenceConsole from "./ManualSequenceConsole";
 import Timeline from "../common/Timeline";
 import VideoPreviewPopup from "../common/VideoPreviewPopup";
 import { Card } from "@/design";
 import { isPollableReceiver } from "@/util/receivers";
 import { parseAudioField } from "@/utils/audioTracks";
+import { isManualSequenceShow } from "@/util/showConfig";
 
 // ---------------------------------------------------------------------------
 // ConsolePanel — the operational console (replaces homepanel/StatusPanel.jsx).
@@ -319,6 +321,7 @@ export default function ConsolePanel() {
   // Render
   // -------------------------------------------------------------------------
   if (!stagedShow?.items) return <ShowPicker />;
+  if (isManualSequenceShow(stagedShow)) return <ManualSequenceConsole key={stagedShow.id} />;
 
   return (
     <div className="w-full max-w-7xl mx-auto px-4 sm:px-6 py-4 flex flex-col gap-3">

@@ -128,7 +128,8 @@ function initializeDatabase(db) {
       audio_file TEXT, -- To store audio file path and metadata as JSON
       receiver_locations TEXT, -- To store receiver positions as JSON
       receiver_labels TEXT, -- To store receiver labels as JSON
-      show_receivers TEXT -- Per-show receiver list as JSON: [{ id, kind: 'native'|'bilusocn', cues, label? }]. Bilusocn entries have no DB receiver row -- the daemon synthesizes 4-cue shadows on stage.
+      show_receivers TEXT, -- Per-show receiver list as JSON: [{ id, kind: 'native'|'bilusocn', cues, label? }]. Bilusocn entries have no DB receiver row -- the daemon synthesizes 4-cue shadows on stage.
+      show_config TEXT -- Show type + manual-sequence config as JSON (see util/showConfig.js). NULL = timeline show.
     );
   `;
 
@@ -242,6 +243,17 @@ function initializeDatabase(db) {
     } catch (err) {
       if (!err.message.includes('duplicate column name')) {
         console.error("Error adding show_receivers column:", err.message);
+      }
+    }
+
+    // Show type / manual-sequence config (JSON). NULL for every show that
+    // predates it, which reads as a timeline show.
+    try {
+      db.exec(`ALTER TABLE Show ADD COLUMN show_config TEXT`);
+      console.log("Added show_config column to Show table.");
+    } catch (err) {
+      if (!err.message.includes('duplicate column name')) {
+        console.error("Error adding show_config column:", err.message);
       }
     }
     
@@ -402,10 +414,10 @@ export function getQueries() {
   const db = getDb();
 
   const showQueries = {
-    insert: db.prepare(`INSERT INTO Show (name, duration, version, runtime_version, display_payload, runtime_payload, authorization_code, protocol, audio_file, receiver_locations, receiver_labels, show_receivers)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+    insert: db.prepare(`INSERT INTO Show (name, duration, version, runtime_version, display_payload, runtime_payload, authorization_code, protocol, audio_file, receiver_locations, receiver_labels, show_receivers, show_config)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     getAll: db.prepare(`SELECT * FROM Show`),
-    update: db.prepare(`UPDATE Show SET name = ?, duration = ?, version = ?, runtime_version = ?, display_payload = ?, runtime_payload = ?, authorization_code = ?, protocol = ?, audio_file = ?, receiver_locations = ?, receiver_labels = ?, show_receivers = ? WHERE id = ?`),
+    update: db.prepare(`UPDATE Show SET name = ?, duration = ?, version = ?, runtime_version = ?, display_payload = ?, runtime_payload = ?, authorization_code = ?, protocol = ?, audio_file = ?, receiver_locations = ?, receiver_labels = ?, show_receivers = ?, show_config = ? WHERE id = ?`),
     delete: db.prepare(`DELETE FROM Show WHERE id = ?`), // Delete query
   };
 

@@ -24,7 +24,7 @@ const T_RACKS = 'builder_racks';
 const T_RECEIVERS = 'builder_receivers';
 
 // jsonb columns per table — read as text (stringify), written from text (parse).
-const SHOW_JSON = ['display_payload', 'runtime_payload', 'audio_file', 'receiver_locations', 'receiver_labels', 'show_receivers'];
+const SHOW_JSON = ['display_payload', 'runtime_payload', 'audio_file', 'receiver_locations', 'receiver_labels', 'show_receivers', 'show_config'];
 const INVENTORY_JSON = ['metadata'];
 const PROFILE_JSON = ['shot_timestamps'];
 const RACK_JSON = ['cells', 'fuses'];
@@ -59,6 +59,9 @@ function rowToJsonb(row, jsonCols) {
   const out = {};
   for (const [k, v] of Object.entries(row)) {
     if (v === undefined) continue;
+    // Timeline shows always send a null show_config; skipping it keeps their
+    // writes independent of the builder_shows.show_config migration.
+    if (k === 'show_config' && v === null) continue;
     out[k] = jsonCols.includes(k) ? parseJson(v) : v;
   }
   return out;

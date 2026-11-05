@@ -9,6 +9,7 @@ import { computeShowStats, formatShowCreatedAt } from "@/util/showStats";
 import { parseAudioField } from "@/utils/audioTracks";
 import { asyncConfirm } from "@/components/common/AsyncPrompt";
 import { isImportedShow } from "@/util/showImport/isImportedShow";
+import { isManualSequenceShow } from "@/util/showConfig";
 import ImportShowModal from "@/components/console/import/ImportShowModal";
 
 // Empty-state surface for the console: a clean picker for staging shows.
@@ -119,7 +120,11 @@ export default function ShowPicker({
                         {show.name || "Untitled show"}
                       </h3>
                       <div className="flex items-center gap-2 mt-1 text-2xs text-fg-muted">
-                        <span className="num">{formatDuration(show.duration)}</span>
+                        {isManualSequenceShow(show) ? (
+                          <span className="text-accent">Manual sequence</span>
+                        ) : (
+                          <span className="num">{formatDuration(show.duration)}</span>
+                        )}
                         {show.audio_file ? (
                           <>
                             <span>·</span>

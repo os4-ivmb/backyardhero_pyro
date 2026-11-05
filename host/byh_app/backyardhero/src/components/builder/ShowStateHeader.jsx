@@ -1,7 +1,82 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { FiEye, FiEyeOff, FiEdit2, FiCheck } from "react-icons/fi";
 import useAppStore from '@/store/useAppStore';
-import { Button, IconButton, Card, CardHeader, Stat, cn, inputClass, fieldLabelClass } from "@/design";
+import { Button, IconButton, Card, CardHeader, Stat, cn, inputClass, selectClass, fieldLabelClass } from "@/design";
+import {
+  RESERVED_FIRE_KEYS,
+  SHOW_TYPE_MANUAL_SEQUENCE,
+  SHOW_TYPE_OPTIONS,
+  fireKeyFromEvent,
+} from "@/util/showConfig";
+
+// Fire key binding for manual-sequence shows. Clicking "Set" listens for the
+// next key press and stores it; Escape cancels. Reserved keys (the console's
+// jog arrows, Tab, Escape) are rejected with a hint.
+function FireKeyField({ value, onChange }) {
+  const [capturing, setCapturing] = useState(false);
+  const [rejected, setRejected] = useState(null);
+
+  useEffect(() => {
+    if (!capturing) return;
+    const onKey = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        setCapturing(false);
+        return;
+      }
+      if (["Shift", "Control", "Alt", "Meta"].includes(e.key)) return;
+      if (RESERVED_FIRE_KEYS.has(e.key)) {
+        setRejected(e.key);
+        return;
+      }
+      onChange(fireKeyFromEvent(e));
+      setRejected(null);
+      setCapturing(false);
+    };
+    // Capture phase so editor shortcuts (Space, ⌘S, ...) don't also react.
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [capturing, onChange]);
+
+  return (
+    <div className="min-w-0">
+      <span className={fieldLabelClass}>Fire key</span>
+      <div className="mt-1 flex items-center gap-2">
+        <span
+          className={cn(
+            "font-mono text-sm px-3 h-9 inline-flex items-center rounded border min-w-[8rem]",
+            capturing
+              ? "border-accent bg-accent-muted/30 text-accent-fg animate-livePulse"
+              : "border-border bg-surface-1",
+            !capturing && !value && "text-fg-muted",
+          )}
+          aria-live="polite"
+        >
+          {capturing ? "Press a key…" : value?.label || "Not set"}
+        </span>
+        <Button
+          size="sm"
+          variant={capturing ? "ghost" : "outline"}
+          onClick={(e) => {
+            e.currentTarget.blur();
+            setRejected(null);
+            setCapturing((v) => !v);
+          }}
+        >
+          {capturing ? "Cancel" : value ? "Change" : "Set"}
+        </Button>
+      </div>
+      {rejected ? (
+        <div className="mt-1 text-2xs text-warn-fg">
+          {rejected === "ArrowLeft" || rejected === "ArrowRight"
+            ? "Arrow keys are reserved for jogging between steps."
+            : `${rejected} can't be used as the fire key.`}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 // Arm code field for the Show Details tab. Hidden (masked) by default with a
 // click-to-reveal toggle and an edit button; editing writes straight to
@@ -219,6 +294,9 @@ export default function ShowStateHeader({
   onSaveShow,
   saveStatus = "idle",
   lastSavedAt = null,
+  showConfig,
+  onShowTypeChange,
+  onFireKeyChange,
 }) {
   const { inventoryById } = useAppStore();
 
@@ -344,6 +422,28 @@ export default function ShowStateHeader({
                 setShowMetadata((showmd) => ({ ...showmd, authorization_code: v }))
               }
             />
+            {showConfig ? (
+              <div className="min-w-0">
+                <label htmlFor="show-type" className={fieldLabelClass}>
+                  Show type
+                </label>
+                <select
+                  id="show-type"
+                  value={showConfig.showType}
+                  onChange={(e) => onShowTypeChange?.(e.target.value)}
+                  className={cn(selectClass, "mt-1 w-48")}
+                >
+                  {SHOW_TYPE_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+            {showConfig?.showType === SHOW_TYPE_MANUAL_SEQUENCE ? (
+              <FireKeyField value={showConfig.fireKey} onChange={onFireKeyChange} />
+            ) : null}
           </div>
           <div className="flex items-center gap-2">
             <SaveStatusBadge

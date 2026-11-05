@@ -28,6 +28,7 @@ export function createSqliteRepo(/* ctx */) {
           row.display_payload, row.runtime_payload,
           row.authorization_code, row.protocol, row.audio_file,
           row.receiver_locations, row.receiver_labels, row.show_receivers,
+          row.show_config ?? null,
         );
         return { id: r.lastInsertRowid };
       },
@@ -37,6 +38,7 @@ export function createSqliteRepo(/* ctx */) {
           row.display_payload, row.runtime_payload,
           row.authorization_code, row.protocol, row.audio_file,
           row.receiver_locations, row.receiver_labels, row.show_receivers,
+          row.show_config ?? null,
           id,
         );
         return { changes: r.changes };

@@ -18,6 +18,8 @@ import { computeShowStats, formatShowCreatedAt } from "@/util/showStats";
 import { asyncPrompt, asyncAlert } from "@/components/common/AsyncPrompt";
 
 import ShowHealthStrip from "../../console/ShowHealthStrip";
+import ManualSequenceConsole from "../../console/ManualSequenceConsole";
+import { isManualSequenceShow } from "@/util/showConfig";
 
 // ---------------------------------------------------------------------------
 // MobileConsolePanel -- mobile-tuned console.
@@ -578,6 +580,7 @@ export default function MobileConsolePanel() {
   const isReadyToFire = isShowLoaded && !hasErrors;
 
   if (!stagedShow?.items) return <MobileShowPicker />;
+  if (isManualSequenceShow(stagedShow)) return <ManualSequenceConsole key={stagedShow.id} />;
 
   return (
     <div className="px-3 py-3 flex flex-col gap-3">
