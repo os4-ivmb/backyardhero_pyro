@@ -20,6 +20,7 @@ import {
 import {
   eventMatchesFireKey,
   groupItemsIntoSteps,
+  reconcileSequence,
   showConfigOf,
 } from "@/util/showConfig";
 import ShowHealthStrip from "./ShowHealthStrip";
@@ -116,10 +117,10 @@ export default function ManualSequenceConsole() {
   const { wsAlive, daemonActive, isArmed, startSwActive, isManualFire, isShowLoaded } = useAppMode();
 
   const config = useMemo(() => showConfigOf(stagedShow), [stagedShow]);
-  const steps = useMemo(
-    () => groupItemsIntoSteps(config.steps, stagedShow?.items),
-    [config.steps, stagedShow?.items]
-  );
+  const steps = useMemo(() => {
+    const r = reconcileSequence(config.steps, stagedShow?.items);
+    return groupItemsIntoSteps(r.steps, r.items);
+  }, [config.steps, stagedShow?.items]);
   const fireKey = config.fireKey;
 
   // Position survives a page reload mid-show. `steps.length` means "past the

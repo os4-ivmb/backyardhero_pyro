@@ -39,6 +39,7 @@ import {
   SHOW_TYPE_MANUAL_SEQUENCE,
   SHOW_TYPE_TIMELINE,
   groupItemsIntoSteps,
+  reconcileSequence,
   newStepId,
   normalizeShowConfig,
   stepsFromTimelineItems,
@@ -3420,6 +3421,15 @@ const ShowBuilder = (props) => {
       ...md,
       showConfig: updater(normalizeShowConfig(md.showConfig)),
     }));
+
+  useEffect(() => {
+    if (!isSequence) return;
+    const r = reconcileSequence(showConfig.steps, items);
+    if (!r.changed) return;
+    setItems(r.items);
+    updateShowConfig((cfg) => ({ ...cfg, steps: r.steps }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSequence, showConfig.steps, items]);
 
   // Step the pending add lands in: an existing step id, or null for a new
   // step appended at the end. Only consulted for manual-sequence shows.

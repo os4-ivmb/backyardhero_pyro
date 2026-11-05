@@ -104,6 +104,35 @@ export function stepsFromTimelineItems(items) {
   };
 }
 
+// Makes every cue belong to a listed step so none are hidden: unknown stepIds
+// get appended as steps, and cues with no stepId are grouped by fire time into
+// new trailing steps. `changed` is false when the input was already consistent.
+export function reconcileSequence(steps, items) {
+  const outSteps = (steps || []).map((s) => ({ id: String(s.id) }));
+  const known = new Set(outSteps.map((s) => s.id));
+  const list = items || [];
+  let changed = false;
+
+  for (const it of list) {
+    if (it?.stepId == null) continue;
+    const id = String(it.stepId);
+    if (!known.has(id)) {
+      known.add(id);
+      outSteps.push({ id });
+      changed = true;
+    }
+  }
+
+  const unassignedIdx = [];
+  list.forEach((it, i) => { if (it?.stepId == null) unassignedIdx.push(i); });
+  if (unassignedIdx.length === 0) return { steps: outSteps, items: list, changed };
+
+  const converted = stepsFromTimelineItems(unassignedIdx.map((i) => list[i]));
+  const outItems = list.slice();
+  unassignedIdx.forEach((i, k) => { outItems[i] = converted.items[k]; });
+  return { steps: [...outSteps, ...converted.steps], items: outItems, changed: true };
+}
+
 // ---- Fire key ---------------------------------------------------------------
 
 // Keys we refuse as a fire key: Escape cancels capture, and the arrows are
