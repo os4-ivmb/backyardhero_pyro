@@ -2883,6 +2883,10 @@ const cueName = (it) => (it && it.name ? `“${it.name}”` : "cue");
 const DIFF_FIELD_KEYS = ["duration", "zone", "target", "delay", "name", "type", "metaDelaySec", "stepId"];
 const itemFieldsDiffer = (p, n) =>
   DIFF_FIELD_KEYS.some((k) => String(p[k] ?? "") !== String(n[k] ?? ""));
+// Firing order within manual-sequence steps (items-array order of cues that
+// carry a stepId). Timeline cues have no stepId, so their order never counts.
+const stepOrderKey = (arr) =>
+  arr.filter((i) => i.stepId != null).map((i) => `${i.stepId}:${i.id}`).join("|");
 // Whether two item lists differ in a way worth recording as a history step.
 // A pure object-reference churn with identical ids/placement/fields (e.g. a
 // no-op inventory refresh) is NOT a change; an id remap (new ids) IS -- that
@@ -2900,7 +2904,7 @@ const itemsDiffer = (prev, next) => {
     if (!!p.locked !== !!n.locked) return true;
     if (itemFieldsDiffer(p, n)) return true;
   }
-  return false;
+  return stepOrderKey(prev) !== stepOrderKey(next);
 };
 const describeItemsChange = (prev, next) => {
   prev = prev || [];
@@ -2934,6 +2938,7 @@ const describeItemsChange = (prev, next) => {
   if (edited.length && !moved.length && !locked.length)
     return edited.length === 1 ? `Edited ${cueName(edited[0])}` : `Edited ${edited.length} cues`;
   if (moved.length || edited.length || locked.length) return "Changed cues";
+  if (stepOrderKey(prev) !== stepOrderKey(next)) return "Reordered cues in step";
   return "Change";
 };
 
@@ -3502,16 +3507,38 @@ const ShowBuilder = (props) => {
       return { ...cfg, steps };
     });
 
-  // Drag a cue onto another step (or the new-step box, stepId null).
-  const handleMoveItemToStep = (itemId, stepId) => {
+  const handleUpdateStep = (stepId, patch) =>
+    updateShowConfig((cfg) => ({
+      ...cfg,
+      steps: cfg.steps.map((s) => (s.id === stepId ? { ...s, ...patch } : s)),
+    }));
+
+  // Drag a cue onto a step (or the new-step box, stepId null). A step's cue
+  // order is the items-array order, so the cue is re-inserted just before
+  // `beforeItemId`, or after the step's last cue when that is null.
+  const handleMoveItemToStep = (itemId, stepId, beforeItemId = null) => {
+    if (itemId === beforeItemId) return;
     let targetId = stepId;
     if (targetId == null) {
       targetId = newStepId();
       updateShowConfig((cfg) => ({ ...cfg, steps: [...cfg.steps, { id: targetId }] }));
     }
-    setItems((prev) =>
-      prev.map((it) => (it.id === itemId ? { ...it, stepId: targetId } : it))
-    );
+    setItems((prev) => {
+      const moving = prev.find((it) => it.id === itemId);
+      if (!moving) return prev;
+      const rest = prev.filter((it) => it.id !== itemId);
+      let at = beforeItemId == null ? -1 : rest.findIndex((it) => it.id === beforeItemId);
+      if (at < 0) {
+        const lastInStep = rest.reduce(
+          (last, it, i) => (String(it.stepId) === String(targetId) ? i : last),
+          -1
+        );
+        at = lastInStep < 0 ? rest.length : lastInStep + 1;
+      }
+      const next = rest.slice();
+      next.splice(at, 0, { ...moving, stepId: targetId });
+      return next;
+    });
   };
 
   const openAddModalForStep = (stepId) => {
@@ -5063,6 +5090,7 @@ const ShowBuilder = (props) => {
                   onRemoveStep={handleRemoveStep}
                   onMoveStep={handleMoveStep}
                   onMoveItem={handleMoveItemToStep}
+                  onUpdateStep={handleUpdateStep}
                 />
               ) : (
               <Timeline

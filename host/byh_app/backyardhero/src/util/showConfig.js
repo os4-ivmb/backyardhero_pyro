@@ -4,13 +4,15 @@
 //   {
 //     showType: 'timeline' | 'manual_sequence',
 //     fireKey:  { code, key, label } | null,   // manual_sequence only
-//     steps:    [{ id }],                      // manual_sequence only, in order
+//     steps:    [{ id, fireMode, intervalMs }], // manual_sequence only, in order
 //   }
 //
 // Shows saved before this column existed have it NULL and are timeline shows.
 // In a manual-sequence show every cue carries a `stepId` pointing at one of
-// `steps`; the console fires a step's cues together via manual fire, so the
-// cues' `startTime` is irrelevant there.
+// `steps`; the console fires a step's cues via manual fire, so the cues'
+// `startTime` is irrelevant there. A step's `fireMode` is either
+// simultaneous (all cues at once) or staggered (cues in list order, i.e. their
+// order in the show's items array, `intervalMs` apart).
 
 export const SHOW_TYPE_TIMELINE = 'timeline';
 export const SHOW_TYPE_MANUAL_SEQUENCE = 'manual_sequence';
@@ -19,6 +21,25 @@ export const SHOW_TYPE_OPTIONS = [
   { value: SHOW_TYPE_TIMELINE, label: 'Timeline show' },
   { value: SHOW_TYPE_MANUAL_SEQUENCE, label: 'Manual sequence' },
 ];
+
+export const STEP_FIRE_SIMULTANEOUS = 'simultaneous';
+export const STEP_FIRE_STAGGERED = 'staggered';
+export const DEFAULT_STEP_INTERVAL_MS = 100;
+export const MAX_STEP_INTERVAL_MS = 60_000;
+
+export function clampStepInterval(value) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n) || n < 1) return DEFAULT_STEP_INTERVAL_MS;
+  return Math.min(n, MAX_STEP_INTERVAL_MS);
+}
+
+export function normalizeStep(s) {
+  return {
+    id: String(s.id),
+    fireMode: s.fireMode === STEP_FIRE_STAGGERED ? STEP_FIRE_STAGGERED : STEP_FIRE_SIMULTANEOUS,
+    intervalMs: clampStepInterval(s.intervalMs ?? DEFAULT_STEP_INTERVAL_MS),
+  };
+}
 
 export function normalizeShowConfig(raw) {
   const cfg = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
@@ -33,7 +54,7 @@ export function normalizeShowConfig(raw) {
       }
     : null;
   const steps = Array.isArray(cfg.steps)
-    ? cfg.steps.filter((s) => s && s.id != null).map((s) => ({ id: String(s.id) }))
+    ? cfg.steps.filter((s) => s && s.id != null).map(normalizeStep)
     : [];
   return { showType, fireKey, steps };
 }
@@ -64,8 +85,9 @@ export function newStepId() {
   return `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 }
 
-// Ordered [{ id, number, items }] for the configured steps. Cues whose
-// stepId doesn't match a step are ignored (they can't be fired).
+// Ordered [{ id, number, fireMode, intervalMs, items }] for the configured
+// steps; each step's items keep their order in `items`. Cues whose stepId
+// doesn't match a step are ignored (they can't be fired).
 export function groupItemsIntoSteps(steps, items) {
   const byStep = new Map((steps || []).map((s) => [String(s.id), []]));
   for (const it of items || []) {
@@ -74,7 +96,7 @@ export function groupItemsIntoSteps(steps, items) {
     if (bucket) bucket.push(it);
   }
   return (steps || []).map((s, i) => ({
-    id: String(s.id),
+    ...normalizeStep(s),
     number: i + 1,
     items: byStep.get(String(s.id)) || [],
   }));
@@ -95,7 +117,7 @@ export function stepsFromTimelineItems(items) {
   const stepIdByIndex = [];
   for (const [, indexes] of ordered) {
     const id = newStepId();
-    steps.push({ id });
+    steps.push(normalizeStep({ id }));
     indexes.forEach((i) => { stepIdByIndex[i] = id; });
   }
   return {
@@ -108,7 +130,7 @@ export function stepsFromTimelineItems(items) {
 // get appended as steps, and cues with no stepId are grouped by fire time into
 // new trailing steps. `changed` is false when the input was already consistent.
 export function reconcileSequence(steps, items) {
-  const outSteps = (steps || []).map((s) => ({ id: String(s.id) }));
+  const outSteps = (steps || []).map(normalizeStep);
   const known = new Set(outSteps.map((s) => s.id));
   const list = items || [];
   let changed = false;
@@ -118,7 +140,7 @@ export function reconcileSequence(steps, items) {
     const id = String(it.stepId);
     if (!known.has(id)) {
       known.add(id);
-      outSteps.push({ id });
+      outSteps.push(normalizeStep({ id }));
       changed = true;
     }
   }

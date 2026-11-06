@@ -18,6 +18,7 @@ import {
   isBilusocnEntry,
 } from "@/util/showReceivers";
 import {
+  STEP_FIRE_STAGGERED,
   eventMatchesFireKey,
   groupItemsIntoSteps,
   reconcileSequence,
@@ -32,7 +33,9 @@ import ShowHealthStrip from "./ShowHealthStrip";
 // switch and manual-fire key all on.
 //
 //   Start  arms the operator's fire key. Each press fires the current step
-//          and advances the carousel.
+//          and advances the carousel. Interval steps send their cues top
+//          to bottom, `intervalMs` apart; Stop, a lost precondition or
+//          leaving the console cancels any cues not yet sent.
 //   Jog    always available. Disarms the fire key and lets ←/→ pick a step;
 //          Start must be pressed again before the fire key is live.
 // ---------------------------------------------------------------------------
@@ -48,6 +51,7 @@ function isEditableTarget(el) {
 
 function StepCard({ step, variant, itemStatus, receiverLabels, fired }) {
   const current = variant === "current";
+  const staggered = step.fireMode === STEP_FIRE_STAGGERED && step.items.length > 1;
   return (
     <div
       className={cn(
@@ -68,14 +72,17 @@ function StepCard({ step, variant, itemStatus, receiverLabels, fired }) {
       >
         {step.number}
       </span>
-      <div className={cn("eyebrow", current ? "mb-3" : "mb-2")}>
+      <div className={cn("eyebrow", current ? "mb-1" : "mb-0.5")}>
         {variant === "prev" ? (fired?.prev ? "Fired" : "Previous") : current ? "Current step" : "Up next"}
+      </div>
+      <div className={cn("text-2xs text-fg-muted pr-10", current ? "mb-3" : "mb-2")}>
+        {staggered ? `Interval · ${step.intervalMs}ms apart` : "Fire All"}
       </div>
       <div className={cn("flex flex-col pr-10", current ? "gap-2" : "gap-1")}>
         {step.items.length === 0 ? (
           <div className="text-xs text-fg-muted">No cues in this step</div>
         ) : null}
-        {step.items.map((item) => {
+        {step.items.map((item, itemIndex) => {
           const status = itemStatus(item);
           return (
             <div
@@ -100,6 +107,11 @@ function StepCard({ step, variant, itemStatus, receiverLabels, fired }) {
                   </div>
                 ) : null}
               </div>
+              {staggered && current ? (
+                <span className="self-center num text-2xs tabular-nums text-fg-muted">
+                  +{itemIndex * step.intervalMs}ms
+                </span>
+              ) : null}
               <span className="self-center" title={status.title}>
                 <Dot tone={status.tone} />
               </span>
@@ -185,11 +197,27 @@ export default function ManualSequenceConsole() {
   const ready = !blocker;
   const canStart = ready && !complete;
 
+  // Interval-step cues still waiting for their slot: timeout id -> resolver
+  // that settles the cue as cancelled.
+  const pendingFiresRef = useRef(new Map());
+  const cancelPendingFires = useCallback(() => {
+    for (const [t, cancel] of pendingFiresRef.current) {
+      clearTimeout(t);
+      cancel();
+    }
+    pendingFiresRef.current.clear();
+  }, []);
+  useEffect(() => cancelPendingFires, [cancelPendingFires]);
+
   // Losing any precondition (key turned off, link drop, ...) disarms the
-  // fire key; the operator has to press Start again.
+  // fire key and drops unsent interval cues; the operator has to press
+  // Start again.
   useEffect(() => {
     if (started && !canStart) setStarted(false);
   }, [started, canStart]);
+  useEffect(() => {
+    if (!ready) cancelPendingFires();
+  }, [ready, cancelPendingFires]);
 
   const fireLockRef = useRef(0);
   const fireCurrent = useCallback(async () => {
@@ -202,30 +230,47 @@ export default function ManualSequenceConsole() {
     setCursor(next);
     if (next >= steps.length) setStarted(false);
     setFireError(null);
-    const results = await Promise.allSettled(
-      step.items.map((item) => {
-        const kind = kindByZone[String(item.zone)] || RECEIVER_KIND_NATIVE;
-        return axios.post(
-          "/api/system/cmd_daemon",
-          {
-            type: "manual_fire",
-            data: {
-              zone: kind === RECEIVER_KIND_BILUSOCN ? String(item.zone) : item.zone,
-              target: Number(item.target),
-              kind,
-            },
+
+    const sendFire = (item) => {
+      const kind = kindByZone[String(item.zone)] || RECEIVER_KIND_NATIVE;
+      return axios.post(
+        "/api/system/cmd_daemon",
+        {
+          type: "manual_fire",
+          data: {
+            zone: kind === RECEIVER_KIND_BILUSOCN ? String(item.zone) : item.zone,
+            target: Number(item.target),
+            kind,
           },
-          { headers: { "Content-Type": "application/json" } },
-        );
+        },
+        { headers: { "Content-Type": "application/json" } },
+      );
+    };
+    const CANCELLED = Symbol("cancelled");
+    const spacingMs = step.fireMode === STEP_FIRE_STAGGERED ? step.intervalMs : 0;
+    const results = await Promise.allSettled(
+      step.items.map((item, i) => {
+        if (i === 0 || !spacingMs) return sendFire(item);
+        return new Promise((resolve, reject) => {
+          const t = setTimeout(() => {
+            pendingFiresRef.current.delete(t);
+            sendFire(item).then(resolve, reject);
+          }, i * spacingMs);
+          pendingFiresRef.current.set(t, () => resolve(CANCELLED));
+        });
       })
     );
     const failed = results.filter((r) => r.status === "rejected").length;
+    const cancelled = results.filter((r) => r.status === "fulfilled" && r.value === CANCELLED).length;
     setLastFired({ number: step.number, at: now, failed });
+    const problems = [];
     if (failed) {
-      setFireError(
-        `Step ${step.number}: ${failed} of ${step.items.length} fire command${step.items.length === 1 ? "" : "s"} failed to send.`
-      );
+      problems.push(`${failed} of ${step.items.length} fire command${step.items.length === 1 ? "" : "s"} failed to send`);
     }
+    if (cancelled) {
+      problems.push(`${cancelled} cue${cancelled === 1 ? " was" : "s were"} cancelled before firing`);
+    }
+    if (problems.length) setFireError(`Step ${step.number}: ${problems.join("; ")}.`);
   }, [steps, index, kindByZone, setCursor]);
 
   const jog = useCallback(
@@ -266,16 +311,19 @@ export default function ManualSequenceConsole() {
   const handleStart = () => {
     blurActive();
     setJogging(false);
+    if (started) cancelPendingFires();
     setStarted((v) => !v);
   };
 
   const handleJog = () => {
     blurActive();
+    cancelPendingFires();
     setStarted(false);
     setJogging((v) => !v);
   };
 
   const handleUnstage = () => {
+    cancelPendingFires();
     setStarted(false);
     setStagedShow({});
   };

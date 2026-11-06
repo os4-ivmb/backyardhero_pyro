@@ -1,15 +1,23 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { FiPlus, FiX, FiTrash2 } from "react-icons/fi";
 import { MdDragIndicator } from "react-icons/md";
 
 import { itemColorOf, getTypeLabel } from "@/constants";
 import { cn } from "@/design";
+import {
+  STEP_FIRE_SIMULTANEOUS,
+  STEP_FIRE_STAGGERED,
+  MAX_STEP_INTERVAL_MS,
+  clampStepInterval,
+} from "@/util/showConfig";
 
 // Manual-sequence replacement for the editor Timeline. Steps scroll
 // horizontally in firing order with an always-present "new step" box at the
-// end. Each step stacks the cues it fires. Steps are dragged by their header
-// to reorder; cues can be dragged between steps; inventory rows dropped on a
-// step (or the new-step box) open the normal add flow for that step.
+// end. Each step stacks the cues it fires, top to bottom in firing order for
+// interval steps. Steps are dragged by their header to reorder; cues can be
+// dragged within a step to reorder or onto another step; inventory rows
+// dropped on a step (or the new-step box) open the normal add flow for that
+// step.
 
 const STEP_MIME = "application/x-byh-step";
 const ITEM_MIME = "application/x-byh-item";
@@ -19,23 +27,102 @@ const hasType = (e, type) => Array.from(e.dataTransfer?.types || []).includes(ty
 const acceptsDrop = (e) =>
   hasType(e, STEP_MIME) || hasType(e, ITEM_MIME) || hasType(e, INVENTORY_MIME);
 
-function StepItem({ item, receiverLabels, onEdit, onRemove }) {
+// Id of the cue a dragged cue would land in front of, from the pointer's
+// height over the step's cue rows; null means after the last cue.
+function insertBeforeId(stepEl, clientY) {
+  for (const row of stepEl.querySelectorAll("[data-seq-item-id]")) {
+    const r = row.getBoundingClientRect();
+    if (clientY < r.top + r.height / 2) return Number(row.dataset.seqItemId);
+  }
+  return null;
+}
+
+function StepModeBar({ step, onUpdateStep }) {
+  const staggered = step.fireMode === STEP_FIRE_STAGGERED;
+  const [draft, setDraft] = useState(String(step.intervalMs));
+  useEffect(() => setDraft(String(step.intervalMs)), [step.intervalMs]);
+
+  const commit = () => {
+    const ms = clampStepInterval(draft);
+    setDraft(String(ms));
+    if (ms !== step.intervalMs) onUpdateStep(step.id, { intervalMs: ms });
+  };
+
+  const modeButton = (mode, label) => {
+    const active = step.fireMode === mode;
+    return (
+      <button
+        type="button"
+        onClick={() => !active && onUpdateStep(step.id, { fireMode: mode })}
+        aria-pressed={active}
+        className={cn(
+          "rounded-sm px-1.5 py-0.5 text-2xs font-medium transition-colors",
+          active ? "bg-accent text-accent-fg" : "text-fg-muted hover:bg-surface-3 hover:text-fg-primary"
+        )}
+      >
+        {label}
+      </button>
+    );
+  };
+
+  return (
+    <div
+      onDoubleClick={(e) => e.stopPropagation()}
+      className="flex items-center gap-1 px-2 py-1 border-b border-border-subtle bg-surface-inset"
+    >
+      <div className="flex items-center gap-0.5 rounded-sm border border-border-subtle bg-surface-2 p-0.5">
+        {modeButton(STEP_FIRE_SIMULTANEOUS, "Fire All")}
+        {modeButton(STEP_FIRE_STAGGERED, "Interval")}
+      </div>
+      {staggered ? (
+        <label className="ml-auto flex items-center gap-1 text-2xs text-fg-muted">
+          <input
+            type="number"
+            min={1}
+            max={MAX_STEP_INTERVAL_MS}
+            step={10}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commit}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.currentTarget.blur();
+            }}
+            aria-label={`Interval between cues in step ${step.number}, in milliseconds`}
+            className="w-14 rounded-sm border border-border bg-surface-1 px-1 py-0.5 text-right text-2xs tabular-nums text-fg-primary focus:border-accent focus:outline-none"
+          />
+          ms
+        </label>
+      ) : null}
+    </div>
+  );
+}
+
+function StepItem({ item, receiverLabels, offsetMs, dropBefore, dragging, onDragState, onEdit, onRemove }) {
   const zoneLabel = receiverLabels?.[item.zone] || item.zone;
   return (
     <div
       draggable
+      data-seq-item-id={item.id}
       onDragStart={(e) => {
         e.stopPropagation();
         e.dataTransfer.setData(ITEM_MIME, String(item.id));
         e.dataTransfer.effectAllowed = "move";
+        onDragState(item.id);
       }}
+      onDragEnd={() => onDragState(null)}
       onDoubleClick={(e) => {
         e.stopPropagation();
         onEdit(item);
       }}
-      title="Double-click to edit · drag to another step"
-      className="group relative flex items-stretch gap-2 rounded-sm border border-border-subtle bg-surface-2 pr-1 cursor-grab active:cursor-grabbing"
+      title="Double-click to edit · drag to reorder or move to another step"
+      className={cn(
+        "group relative flex items-stretch gap-2 rounded-sm border border-border-subtle bg-surface-2 pr-1 cursor-grab active:cursor-grabbing",
+        dragging && "opacity-40"
+      )}
     >
+      {dropBefore ? (
+        <span className="pointer-events-none absolute -top-1 left-0 right-0 h-0.5 rounded-full bg-accent" aria-hidden />
+      ) : null}
       <span
         className="w-1.5 shrink-0 rounded-l-sm"
         style={{ backgroundColor: itemColorOf(item) }}
@@ -49,6 +136,11 @@ function StepItem({ item, receiverLabels, onEdit, onRemove }) {
           {getTypeLabel(item.type)} · {zoneLabel}:{item.target}
         </div>
       </div>
+      {offsetMs != null ? (
+        <span className="self-center num text-2xs tabular-nums text-fg-muted group-hover:hidden">
+          +{offsetMs}ms
+        </span>
+      ) : null}
       <button
         type="button"
         onClick={(e) => {
@@ -74,13 +166,26 @@ export default function SequenceEditor({
   onRemoveStep,
   onMoveStep,
   onMoveItem,
+  onUpdateStep,
 }) {
   // Step id (or "new") currently under a drag, for the drop highlight.
   const [dragOver, setDragOver] = useState(null);
+  // Where a dragged cue would be inserted: { stepId, beforeId }.
+  const [cueDrop, setCueDrop] = useState(null);
+  const [draggingItemId, setDraggingItemId] = useState(null);
+
+  const handleDragState = (itemId) => {
+    setDraggingItemId(itemId);
+    if (itemId == null) {
+      setCueDrop(null);
+      setDragOver(null);
+    }
+  };
 
   const handleDrop = (e, stepId, stepIndex) => {
     e.preventDefault();
     setDragOver(null);
+    setCueDrop(null);
     const draggedStep = e.dataTransfer.getData(STEP_MIME);
     if (draggedStep) {
       const toIndex = stepIndex == null ? steps.length - 1 : stepIndex;
@@ -89,7 +194,8 @@ export default function SequenceEditor({
     }
     const draggedItem = e.dataTransfer.getData(ITEM_MIME);
     if (draggedItem) {
-      onMoveItem(Number(draggedItem), stepId);
+      const beforeId = stepId == null ? null : insertBeforeId(e.currentTarget, e.clientY);
+      onMoveItem(Number(draggedItem), stepId, beforeId);
       return;
     }
     const invId = e.dataTransfer.getData("newInventoryId");
@@ -101,10 +207,19 @@ export default function SequenceEditor({
       if (!acceptsDrop(e)) return;
       e.preventDefault();
       if (dragOver !== key) setDragOver(key);
+      if (stepId != null && hasType(e, ITEM_MIME)) {
+        const beforeId = insertBeforeId(e.currentTarget, e.clientY);
+        if (cueDrop?.stepId !== stepId || cueDrop?.beforeId !== beforeId) {
+          setCueDrop({ stepId, beforeId });
+        }
+      } else if (cueDrop) {
+        setCueDrop(null);
+      }
     },
     onDragLeave: (e) => {
       if (e.currentTarget.contains(e.relatedTarget)) return;
       setDragOver((cur) => (cur === key ? null : cur));
+      setCueDrop((cur) => (cur?.stepId === stepId ? null : cur));
     },
     onDrop: (e) => handleDrop(e, stepId, stepIndex),
   });
@@ -119,7 +234,7 @@ export default function SequenceEditor({
           </span>
         </div>
         <div className="text-2xs text-fg-muted hidden md:block">
-          Double-click a step to add a cue · drag headers to reorder · drag cues between steps
+          Double-click a step to add a cue · drag headers to reorder steps · drag cues to reorder or move
         </div>
       </div>
 
@@ -169,12 +284,22 @@ export default function SequenceEditor({
                 </span>
               </div>
 
+              <StepModeBar step={step} onUpdateStep={onUpdateStep} />
+
               <div className="flex-1 min-h-0 overflow-y-auto p-2 flex flex-col gap-1.5">
-                {step.items.map((item) => (
+                {step.items.map((item, itemIndex) => (
                   <StepItem
                     key={item.id}
                     item={item}
                     receiverLabels={receiverLabels}
+                    offsetMs={
+                      step.fireMode === STEP_FIRE_STAGGERED && step.items.length > 1
+                        ? itemIndex * step.intervalMs
+                        : null
+                    }
+                    dropBefore={cueDrop?.stepId === step.id && cueDrop.beforeId === item.id}
+                    dragging={draggingItemId === item.id}
+                    onDragState={handleDragState}
                     onEdit={onEditItem}
                     onRemove={onRemoveItem}
                   />
@@ -186,8 +311,11 @@ export default function SequenceEditor({
                     onAddToStep(step.id);
                   }}
                   onDoubleClick={(e) => e.stopPropagation()}
-                  className="inline-flex items-center justify-center gap-1.5 rounded-sm border border-dashed border-border px-2 py-1.5 text-xs text-fg-muted hover:border-accent hover:text-fg-primary"
+                  className="relative inline-flex items-center justify-center gap-1.5 rounded-sm border border-dashed border-border px-2 py-1.5 text-xs text-fg-muted hover:border-accent hover:text-fg-primary"
                 >
+                  {cueDrop?.stepId === step.id && cueDrop.beforeId == null ? (
+                    <span className="pointer-events-none absolute -top-1 left-0 right-0 h-0.5 rounded-full bg-accent" aria-hidden />
+                  ) : null}
                   <FiPlus aria-hidden /> Add cue
                 </button>
               </div>
