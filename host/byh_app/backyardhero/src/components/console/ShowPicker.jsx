@@ -1,13 +1,13 @@
 import React, { useState, useMemo } from "react";
 import axios from "axios";
 import { FaMusic, FaTrashAlt, FaArrowDown } from "react-icons/fa";
-import { FiPlay, FiDownload } from "react-icons/fi";
+import { FiPlay, FiDownload, FiChevronDown, FiRotateCcw } from "react-icons/fi";
 
 import useAppStore from "@/store/useAppStore";
-import { Section, Card, Button, IconButton, Badge } from "@/design";
+import { Section, Card, Button, IconButton, Badge, cn } from "@/design";
 import { computeShowStats, formatShowCreatedAt } from "@/util/showStats";
 import { parseAudioField } from "@/utils/audioTracks";
-import { asyncConfirm } from "@/components/common/AsyncPrompt";
+import { asyncAlert, asyncConfirm } from "@/components/common/AsyncPrompt";
 import { isImportedShow } from "@/util/showImport/isImportedShow";
 import { isManualSequenceShow } from "@/util/showConfig";
 import ImportShowModal from "@/components/console/import/ImportShowModal";
@@ -33,15 +33,18 @@ export default function ShowPicker({
   stageLabel = "Stage",
   emptyHint = "No shows yet. Build one in the Editor.",
 } = {}) {
-  const { shows, deleteShow, setStagedShow, inventoryById, loadedShow } = useAppStore();
+  const { shows, deleteShow, unarchiveShow, setStagedShow, inventoryById, loadedShow } = useAppStore();
   const [filter, setFilter] = useState("");
   const [importOpen, setImportOpen] = useState(false);
+  const [archivedOpen, setArchivedOpen] = useState(false);
 
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
     if (!q) return shows;
     return shows.filter((s) => (s.name || "").toLowerCase().includes(q));
   }, [shows, filter]);
+  const activeShows = useMemo(() => filtered.filter((s) => !s.archived_at), [filtered]);
+  const archivedShows = useMemo(() => filtered.filter((s) => s.archived_at), [filtered]);
 
   const handleStage = (show) => {
     const items = JSON.parse(show.display_payload || "[]").map((pi) => ({
@@ -68,6 +71,25 @@ export default function ShowPicker({
     if (!(await asyncConfirm({ message: `Delete show "${show.name}"?`, destructive: true }))) return;
     deleteShow(show.id);
   };
+
+  const handleUnarchive = async (e, show) => {
+    e.stopPropagation();
+    const r = await unarchiveShow(show.id);
+    if (!r.ok) await asyncAlert({ title: "Un-archive failed", message: r.error });
+  };
+
+  const renderTile = (show) => (
+    <ShowTile
+      key={show.id}
+      show={show}
+      stats={computeShowStats(show, inventoryById)}
+      isLoaded={loadedShow?.id === show.id}
+      stageLabel={stageLabel}
+      onStage={() => handleStage(show)}
+      onDelete={(e) => handleDelete(e, show)}
+      onUnarchive={show.archived_at ? (e) => handleUnarchive(e, show) : null}
+    />
+  );
 
   return (
     <div className="w-full max-w-5xl mx-auto px-4 sm:px-6 py-8">
@@ -103,80 +125,38 @@ export default function ShowPicker({
             </p>
           </Card>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            {filtered.map((show) => {
-              const isLoaded = loadedShow?.id === show.id;
-              const stats = computeShowStats(show, inventoryById);
-              return (
-                <Card
-                  key={show.id}
-                  padding="md"
-                  tone="neutral"
-                  className="group hover:border-border-strong transition-colors flex flex-col gap-3"
+          <div className="flex flex-col gap-4">
+            {activeShows.length > 0 ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {activeShows.map(renderTile)}
+              </div>
+            ) : (
+              <Card padding="lg" tone="neutral" className="text-center">
+                <p className="text-fg-secondary">
+                  {filter.trim() ? "No active shows match your search." : "All shows are archived."}
+                </p>
+              </Card>
+            )}
+
+            {archivedShows.length > 0 ? (
+              <div className="flex flex-col gap-3">
+                <button
+                  type="button"
+                  onClick={() => setArchivedOpen((v) => !v)}
+                  className="flex items-center gap-2 text-left text-fg-secondary hover:text-fg-primary transition-colors"
+                  aria-expanded={archivedOpen}
                 >
-                  <div className="flex items-start justify-between gap-2 min-w-0">
-                    <div className="min-w-0">
-                      <h3 className="text-base font-semibold text-fg-primary truncate">
-                        {show.name || "Untitled show"}
-                      </h3>
-                      <div className="flex items-center gap-2 mt-1 text-2xs text-fg-muted">
-                        {isManualSequenceShow(show) ? (
-                          <span className="text-accent">Manual sequence</span>
-                        ) : (
-                          <span className="num">{formatDuration(show.duration)}</span>
-                        )}
-                        {show.audio_file ? (
-                          <>
-                            <span>·</span>
-                            <span className="inline-flex items-center gap-1 text-accent">
-                              <FaMusic aria-hidden /> Audio
-                            </span>
-                          </>
-                        ) : null}
-                        {isImportedShow(show) ? (
-                          <>
-                            <span>·</span>
-                            <span
-                              className="inline-flex items-center gap-1 text-fg-secondary"
-                              title="Imported show"
-                            >
-                              <FaArrowDown aria-hidden /> Imported
-                            </span>
-                          </>
-                        ) : null}
-                      </div>
-                    </div>
-                    {isLoaded ? <Badge tone="ok">Loaded</Badge> : null}
+                  <FiChevronDown className={cn("transition-transform", !archivedOpen && "-rotate-90")} />
+                  <span className="eyebrow">Archived</span>
+                  <span className="num text-2xs text-fg-muted">{archivedShows.length}</span>
+                </button>
+                {archivedOpen ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {archivedShows.map(renderTile)}
                   </div>
-
-                  <ShowStatGrid stats={stats} />
-
-                  <div className="flex items-center justify-between gap-2 mt-auto pt-2 border-t border-border-subtle">
-                    <span className="text-2xs text-fg-muted">
-                      Created {formatShowCreatedAt(stats.createdAt)}
-                    </span>
-                    <div className="flex items-center gap-1.5">
-                      <IconButton
-                        label="Delete show"
-                        variant="danger"
-                        size="sm"
-                        onClick={(e) => handleDelete(e, show)}
-                      >
-                        <FaTrashAlt />
-                      </IconButton>
-                      <Button
-                        size="sm"
-                        variant="primary"
-                        leading={<FiPlay />}
-                        onClick={() => handleStage(show)}
-                      >
-                        {stageLabel}
-                      </Button>
-                    </div>
-                  </div>
-                </Card>
-              );
-            })}
+                ) : null}
+              </div>
+            ) : null}
           </div>
         )}
       </Section>
@@ -186,6 +166,89 @@ export default function ShowPicker({
         onClose={() => setImportOpen(false)}
       />
     </div>
+  );
+}
+
+function ShowTile({ show, stats, isLoaded, stageLabel, onStage, onDelete, onUnarchive }) {
+  return (
+    <Card
+      padding="md"
+      tone="neutral"
+      className="group hover:border-border-strong transition-colors flex flex-col gap-3"
+    >
+      <div className="flex items-start justify-between gap-2 min-w-0">
+        <div className="min-w-0">
+          <h3 className="text-base font-semibold text-fg-primary truncate">
+            {show.name || "Untitled show"}
+          </h3>
+          <div className="flex items-center gap-2 mt-1 text-2xs text-fg-muted">
+            {isManualSequenceShow(show) ? (
+              <span className="text-accent">Manual sequence</span>
+            ) : (
+              <span className="num">{formatDuration(show.duration)}</span>
+            )}
+            {show.audio_file ? (
+              <>
+                <span>·</span>
+                <span className="inline-flex items-center gap-1 text-accent">
+                  <FaMusic aria-hidden /> Audio
+                </span>
+              </>
+            ) : null}
+            {isImportedShow(show) ? (
+              <>
+                <span>·</span>
+                <span
+                  className="inline-flex items-center gap-1 text-fg-secondary"
+                  title="Imported show"
+                >
+                  <FaArrowDown aria-hidden /> Imported
+                </span>
+              </>
+            ) : null}
+          </div>
+        </div>
+        {isLoaded ? <Badge tone="ok">Loaded</Badge> : null}
+      </div>
+
+      <ShowStatGrid stats={stats} />
+
+      <div className="flex items-center justify-between gap-2 mt-auto pt-2 border-t border-border-subtle">
+        <span className="text-2xs text-fg-muted">
+          {show.archived_at
+            ? `Archived ${formatShowCreatedAt(show.archived_at)}`
+            : `Created ${formatShowCreatedAt(stats.createdAt)}`}
+        </span>
+        <div className="flex items-center gap-1.5">
+          <IconButton
+            label="Delete show"
+            variant="danger"
+            size="sm"
+            onClick={onDelete}
+          >
+            <FaTrashAlt />
+          </IconButton>
+          {onUnarchive ? (
+            <Button
+              size="sm"
+              variant="outline"
+              leading={<FiRotateCcw />}
+              onClick={onUnarchive}
+            >
+              Un-archive
+            </Button>
+          ) : null}
+          <Button
+            size="sm"
+            variant="primary"
+            leading={<FiPlay />}
+            onClick={onStage}
+          >
+            {stageLabel}
+          </Button>
+        </div>
+      </div>
+    </Card>
   );
 }
 

@@ -108,6 +108,26 @@ export function createSupabaseRepo(ctx, req, res) {
         if (error) raise(error, 'Failed to list shows.');
         return (data || []).map((r) => rowToText(r, SHOW_JSON));
       },
+      async getById(id) {
+        const { data, error } = await sb
+          .from(T_SHOWS)
+          .select('*')
+          .eq('id', id)
+          .eq('user_id', uid)
+          .maybeSingle();
+        if (error) raise(error, 'Failed to load show.');
+        return data ? rowToText(data, SHOW_JSON) : undefined;
+      },
+      async setArchivedAt(id, archivedAt) {
+        const { data, error } = await sb
+          .from(T_SHOWS)
+          .update({ archived_at: archivedAt })
+          .eq('id', id)
+          .eq('user_id', uid)
+          .select('id');
+        if (error) raise(error, 'Failed to update show archive status.');
+        return { changes: data?.length || 0 };
+      },
       async create(row) {
         const { data, error } = await sb
           .from(T_SHOWS)
@@ -182,6 +202,16 @@ export function createSupabaseRepo(ctx, req, res) {
           .eq('user_id', uid)
           .select('id');
         if (error) raise(error, 'Failed to delete inventory item.');
+        return { changes: data?.length || 0 };
+      },
+      async setAvailableCount(id, count) {
+        const { data, error } = await sb
+          .from(T_INVENTORY)
+          .update({ available_ct: count })
+          .eq('id', id)
+          .eq('user_id', uid)
+          .select('id');
+        if (error) raise(error, 'Failed to update inventory count.');
         return { changes: data?.length || 0 };
       },
     },

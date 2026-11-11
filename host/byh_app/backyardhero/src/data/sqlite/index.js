@@ -22,6 +22,13 @@ export function createSqliteRepo(/* ctx */) {
       async list() {
         return showQueries.getAll.all();
       },
+      async getById(id) {
+        return showQueries.getById.get(id);
+      },
+      async setArchivedAt(id, archivedAt) {
+        const r = showQueries.setArchivedAt.run(archivedAt, id);
+        return { changes: r.changes };
+      },
       async create(row) {
         const r = showQueries.insert.run(
           row.name, row.duration, row.version, row.runtime_version,
@@ -76,6 +83,10 @@ export function createSqliteRepo(/* ctx */) {
       },
       async remove(id) {
         const r = inventoryQueries.delete.run(id);
+        return { changes: r.changes };
+      },
+      async setAvailableCount(id, count) {
+        const r = inventoryQueries.setAvailableCount.run(count, id);
         return { changes: r.changes };
       },
     },

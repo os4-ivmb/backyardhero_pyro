@@ -11,12 +11,15 @@
 //
 // Adapter contract (all methods async, return plain JS):
 //   shows.list()                       -> rows[]
+//   shows.getById(id)                  -> row | undefined
 //   shows.create(row)                  -> { id }
 //   shows.update(id, row)              -> { changes }
+//   shows.setArchivedAt(id, ts|null)   -> { changes }
 //   shows.remove(id)                   -> { changes }
 //   inventory.list()                   -> rows[]
 //   inventory.create(row)              -> { id }
 //   inventory.update(id, row)          -> { changes }
+//   inventory.setAvailableCount(id, n) -> { changes }
 //   inventory.remove(id)               -> { changes }
 //   firingProfiles.list()              -> rows[]
 //   firingProfiles.getByInventoryId(id)-> row | undefined

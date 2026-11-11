@@ -256,6 +256,17 @@ function initializeDatabase(db) {
         console.error("Error adding show_config column:", err.message);
       }
     }
+
+    // Archive timestamp. NULL = active show. Deliberately not part of the
+    // general show UPDATE so editor saves never clear it.
+    try {
+      db.exec(`ALTER TABLE Show ADD COLUMN archived_at TIMESTAMP`);
+      console.log("Added archived_at column to Show table.");
+    } catch (err) {
+      if (!err.message.includes('duplicate column name')) {
+        console.error("Error adding archived_at column:", err.message);
+      }
+    }
     
     db.exec(createInventoryTable);
     console.log("Checked/created inventory table.");
@@ -419,6 +430,8 @@ export function getQueries() {
     getAll: db.prepare(`SELECT * FROM Show`),
     update: db.prepare(`UPDATE Show SET name = ?, duration = ?, version = ?, runtime_version = ?, display_payload = ?, runtime_payload = ?, authorization_code = ?, protocol = ?, audio_file = ?, receiver_locations = ?, receiver_labels = ?, show_receivers = ?, show_config = ? WHERE id = ?`),
     delete: db.prepare(`DELETE FROM Show WHERE id = ?`), // Delete query
+    getById: db.prepare(`SELECT * FROM Show WHERE id = ?`),
+    setArchivedAt: db.prepare(`UPDATE Show SET archived_at = ? WHERE id = ?`),
   };
 
   /** INVENTORY TABLE OPERATIONS */
@@ -429,6 +442,7 @@ export function getQueries() {
     getById: db.prepare(`SELECT * FROM inventory WHERE id = ?`),
     update: db.prepare(`UPDATE inventory SET name = ?, type = ?, duration = ?, fuse_delay = ?, lift_delay = ?, burn_rate = ?, color = ?, available_ct = ?, youtube_link = ?, youtube_link_start_sec = ?, image = ?, metadata = ?, unit_cost = ?, source = ? WHERE id = ?`),
     delete: db.prepare(`DELETE FROM inventory WHERE id = ?`),
+    setAvailableCount: db.prepare(`UPDATE inventory SET available_ct = ? WHERE id = ?`),
   };
 
   /** FIRING PROFILE TABLE OPERATIONS */

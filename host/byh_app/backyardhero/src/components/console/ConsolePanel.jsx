@@ -382,6 +382,7 @@ export default function ConsolePanel() {
       <ShowDetails
         errors={errors}
         protoHandlerStatus={stateData.fw_state?.proto_handler_status}
+        show={stagedShow}
       />
 
       {playVideos && vidItems.length ? (

@@ -20,7 +20,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          # macos-14 was retired (jobs fail instantly with "configuration
+          # 'macos-14-arm64-us-default' is not supported"). macos-15 is the
+          # arm64 image; don't use macos-latest, it moves without warning.
+          - os: macos-15
             label: macOS (arm64)
             ebflags: --mac --arm64
           # No macOS x64 (Intel) leg. The only GitHub Intel image left

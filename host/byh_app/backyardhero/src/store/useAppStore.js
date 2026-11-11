@@ -202,6 +202,43 @@ const useAppStore = create(persist((set, get) => ({
     }
   },
 
+  // Archive / un-archive. Like updateShow, these resolve to { ok, error } so
+  // the UI can surface failures. Archiving with updateInventory deducts the
+  // show's non-shell usage server-side, so inventory is re-fetched after.
+  archiveShow: async (id, { updateInventory = false } = {}) => {
+    try {
+      const { data } = await axios.post(`/api/shows/${id}/archive`, { updateInventory });
+      get()._setShowArchivedAt(id, data.archived_at);
+      if (updateInventory) await get().fetchInventory();
+      return { ok: true, inventoryUpdates: data.inventoryUpdates || [] };
+    } catch (error) {
+      console.error('Failed to archive show:', error);
+      return { ok: false, error: error?.response?.data?.error || error?.message || 'Failed to archive show.' };
+    }
+  },
+  unarchiveShow: async (id) => {
+    try {
+      await axios.delete(`/api/shows/${id}/archive`);
+      get()._setShowArchivedAt(id, null);
+      return { ok: true };
+    } catch (error) {
+      console.error('Failed to un-archive show:', error);
+      return { ok: false, error: error?.response?.data?.error || error?.message || 'Failed to un-archive show.' };
+    }
+  },
+  _setShowArchivedAt: (id, archivedAt) => {
+    set((state) => {
+      const patch = (s) => (s && s.id === id ? { ...s, archived_at: archivedAt } : s);
+      return {
+        shows: state.shows.map(patch),
+        showById: state.showById[id]
+          ? { ...state.showById, [id]: patch(state.showById[id]) }
+          : state.showById,
+        stagedShow: patch(state.stagedShow),
+      };
+    });
+  },
+
   // ---------------------------------------------------------------------
   // Staged show.
   //
