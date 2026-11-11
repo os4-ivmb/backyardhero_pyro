@@ -11,6 +11,7 @@ import {
   Table, THead, TH, TBody, TR, TD, cn,
 } from "@/design";
 import { asyncAlert } from "@/components/common/AsyncPrompt";
+import usePersistentState from "@/utils/usePersistentState";
 
 import ShotProfileModal from "./ShotProfileModal";
 import ShellPackEditor from "./ShellPackEditor";
@@ -37,6 +38,12 @@ const TAB_CONFIG = {
   },
 };
 const TAB_KEYS = Object.keys(TAB_CONFIG);
+// Shells and fuses stay visible at zero quantity: shells are tracked per pack
+// and fuse quantity isn't a per-use count.
+const ALWAYS_SHOWN_TYPES = new Set(["AERIAL_SHELL", "FUSE"]);
+const isOutOfStock = (item) =>
+  !ALWAYS_SHOWN_TYPES.has(item.type) && Math.trunc(Number(item.available_ct) || 0) <= 0;
+
 const ATTENTION_TYPES = new Set(
   Object.keys(INV_TYPES).filter((k) => k.startsWith("CAKE_") || k === "COMPOUND_CAKE")
 );
@@ -68,6 +75,7 @@ export default function InventoryList({ inventory, setActiveItem, refreshInvento
   const [shellPackItem, setShellPackItem] = useState(null);
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [isBatchOpen, setIsBatchOpen] = useState(false);
+  const [hideOutOfStock, setHideOutOfStock] = usePersistentState("byh-inventory-hide-out-of-stock", false);
 
   // Batch reprocess state preserved -- the controls remain functionally
   // identical, just relocated to a single collapsible "Tools" panel.
@@ -83,8 +91,13 @@ export default function InventoryList({ inventory, setActiveItem, refreshInvento
   const [isBatchProcessing, setIsBatchProcessing] = useState(false);
   const [batchStatus, setBatchStatus] = useState(null);
 
+  const visibleInventory = useMemo(
+    () => (hideOutOfStock ? inventory.filter((it) => !isOutOfStock(it)) : inventory),
+    [inventory, hideOutOfStock]
+  );
+
   const sorted = useMemo(() => {
-    const arr = [...inventory].sort((a, b) => {
+    const arr = [...visibleInventory].sort((a, b) => {
       if (sortKey === "unit_cost") {
         const av = a.unit_cost == null || a.unit_cost === "" ? null : Number(a.unit_cost);
         const bv = b.unit_cost == null || b.unit_cost === "" ? null : Number(b.unit_cost);
@@ -104,17 +117,17 @@ export default function InventoryList({ inventory, setActiveItem, refreshInvento
       return 0;
     });
     return arr;
-  }, [inventory, sortKey, sortDirection]);
+  }, [visibleInventory, sortKey, sortDirection]);
 
   const tabCounts = useMemo(() => {
     const counts = Object.fromEntries(TAB_KEYS.map((k) => [k, 0]));
-    for (const item of inventory) {
+    for (const item of visibleInventory) {
       for (const t of TAB_KEYS) {
         if (TAB_CONFIG[t].types.includes(item.type)) { counts[t]++; break; }
       }
     }
     return counts;
-  }, [inventory]);
+  }, [visibleInventory]);
 
   const filtered = useMemo(() => {
     const allowed = new Set(TAB_CONFIG[activeTab].types);
@@ -396,7 +409,18 @@ export default function InventoryList({ inventory, setActiveItem, refreshInvento
             );
           })}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
+          <label
+            className="inline-flex items-center gap-1.5 text-sm text-fg-secondary cursor-pointer select-none"
+            title="Hide items with 0 quantity. Shells and fuses are always shown."
+          >
+            <input
+              type="checkbox"
+              checked={!!hideOutOfStock}
+              onChange={(e) => setHideOutOfStock(e.target.checked)}
+            />
+            Hide out of stock
+          </label>
           <Button size="sm" variant="outline" leading={<FaUpload />} onClick={() => setIsImportOpen(true)}>
             Import
           </Button>
@@ -519,7 +543,9 @@ export default function InventoryList({ inventory, setActiveItem, refreshInvento
             <TR>
               <TD className="py-8 text-center text-fg-muted italic"
                   colSpan={activeColumns.length + 1}>
-                No {TAB_CONFIG[activeTab].label.toLowerCase()} items yet.
+                {hideOutOfStock
+                  ? `No in-stock ${TAB_CONFIG[activeTab].label.toLowerCase()} items.`
+                  : `No ${TAB_CONFIG[activeTab].label.toLowerCase()} items yet.`}
               </TD>
             </TR>
           ) : filtered.map((it) => (
