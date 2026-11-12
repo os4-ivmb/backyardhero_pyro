@@ -43,7 +43,7 @@ const SECTIONS = [
   {
     key: "dongle",
     label: "Dongle",
-    description: "Brightness, retransmit, serial connection, debug mode.",
+    description: "Brightness, retransmit, USB or wireless hub, debug mode.",
     icon: <MdOutlineSettingsRemote />,
     visible: () => true,
   },
@@ -102,7 +102,7 @@ function DongleSection() {
       <SettingCard title="Retransmit" eyebrow="Reliability">
         <TransmitRepetitionCount />
       </SettingCard>
-      <SettingCard title="Connection" eyebrow="Serial">
+      <SettingCard title="Connection" eyebrow="USB or hub">
         <TxConfig />
       </SettingCard>
       <SettingCard title="Diagnostics" eyebrow="Logging">

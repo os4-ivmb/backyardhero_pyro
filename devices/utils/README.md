@@ -23,10 +23,13 @@ devices/utils/flash_omni.py --full
 ```
 
 Its firmware lives in `devices/byh_omni/`, emits `byh_omni_v<N>.*`
-artifacts, and stores `NODE_ID` plus ident in the `byh_omni` NVS
-namespace. Routine `flash_omni.py` updates preserve that partition;
-`--full` and `--set-id` provision it with `SETID`, defaulting the ident
-to `O<node_id>`.
+artifacts, and stores `NODE_ID`, ident, and board version in the
+`byh_omni` NVS namespace. An omni is a receiver, so `flash_omni.py`
+mirrors `flash_receiver.py`: routine updates preserve that partition,
+`--full` and `--set-id` provision it with `SETID` (ident defaults to
+`RX<node_id>`), and `--set-board` sets the board version. With the
+dongle host module plugged in the omni boots as a dongle instead, which
+ignores its node ID.
 
 ### One-time setup (host)
 

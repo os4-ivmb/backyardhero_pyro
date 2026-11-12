@@ -10,12 +10,7 @@ import GpioOverrideBar from "./GpioOverrideBar";
 import { isPollableReceiver } from "@/util/receivers";
 import { HARDWARE } from "@/util/clientEnv";
 import { fwOutOfDate } from "@/util/firmwareVersion";
-
-const DONGLE_DEFAULTS = {
-  addr: "/dev/tty.usbmodem01",
-  baud: 115200,
-  protocol: "BKYD_TS_HYBRID",
-};
+import { DONGLE_DEFAULTS, DONGLE_LINK_WIRELESS, selectSerialPayload } from "@/util/dongleLink";
 
 // ---------------------------------------------------------------------------
 // StatusBar — single source of truth for "what is the system doing right now"
@@ -280,24 +275,29 @@ export default function StatusBar() {
     : null;
   const dongleFwStale = fwOutOfDate(dongleFwVersion, latestDongleVersion);
 
-  // Force-restart the dongle's serial connection on the daemon. This is
-  // the same path TxConfig.jsx's "Apply" button takes -- re-issuing
-  // `select_serial` with the current rf settings causes the daemon to
-  // tear down and re-open the USB serial port and re-init the protocol
+  // Force-restart the dongle link on the daemon. This is the same path
+  // TxConfig.jsx's "Apply" button takes -- re-issuing `select_serial`
+  // with the current rf settings causes the daemon to tear down and
+  // re-open the USB port or the hub WebSocket and re-init the protocol
   // (msync, channel sync, etc). Useful when the dongle has gone silent
-  // because USB hiccupped or the firmware crashed and the host hasn't
-  // noticed yet. We surface it inline next to the "Silent" label so the
-  // operator doesn't have to dig into TxConfig and click through Apply.
+  // because the link hiccupped or the firmware crashed and the host
+  // hasn't noticed yet. We surface it inline next to the "Silent" label
+  // so the operator doesn't have to dig into TxConfig and click Apply.
   const rfSettings = stateData.fw_state?.settings?.rf || {};
+  const wirelessLink = rfSettings.link === DONGLE_LINK_WIRELESS;
+  const linkTarget = wirelessLink
+    ? `hub ${rfSettings.hub_host || DONGLE_DEFAULTS.hubHost}`
+    : `${rfSettings.addr || DONGLE_DEFAULTS.addr} @ ${rfSettings.baud || DONGLE_DEFAULTS.baud}`;
   const restartDongle = useCallback(async () => {
     if (restartingDongle) return;
     setRestartingDongle(true);
-    const payload = {
-      type: "select_serial",
-      device: rfSettings.addr || DONGLE_DEFAULTS.addr,
-      baud: parseInt(rfSettings.baud || DONGLE_DEFAULTS.baud, 10),
-      protocol: rfSettings.protocol || DONGLE_DEFAULTS.protocol,
-    };
+    const payload = selectSerialPayload({
+      addr: rfSettings.addr,
+      baud: rfSettings.baud,
+      protocol: rfSettings.protocol,
+      link: rfSettings.link,
+      hubHost: rfSettings.hub_host,
+    });
     try {
       await axios.post("/api/system/cmd_daemon", payload, {
         headers: { "Content-Type": "application/json" },
@@ -311,7 +311,7 @@ export default function StatusBar() {
     } finally {
       setRestartingDongle(false);
     }
-  }, [restartingDongle, rfSettings.addr, rfSettings.baud, rfSettings.protocol]);
+  }, [restartingDongle, rfSettings.addr, rfSettings.baud, rfSettings.protocol, rfSettings.link, rfSettings.hub_host]);
 
   // Dongle command-queue saturation. The dongle reports `q`/`qmax` once
   // per second; we render it next to the dongle stat so an operator can
@@ -441,10 +441,15 @@ export default function StatusBar() {
                   dongleTone === "ok" && "text-fg-primary",
                   dongleTone === "neutral" && "text-fg-muted"
                 )}
-                title={dongleLabel}
+                title={wirelessLink ? `${dongleLabel} · ${linkTarget}` : dongleLabel}
               >
                 {dongleLabel}
               </span>
+              {wirelessLink ? (
+                <Badge tone="neutral" size="xs" title={`Wireless hub at ${rfSettings.hub_host || DONGLE_DEFAULTS.hubHost}`}>
+                  Hub
+                </Badge>
+              ) : null}
               {dongleTone === "danger" && dongleLabel === "Silent" ? (
                 <button
                   type="button"
@@ -455,7 +460,7 @@ export default function StatusBar() {
                     "border-danger/50 text-danger-fg bg-danger-bg hover:bg-danger/20",
                     "disabled:opacity-60 disabled:cursor-not-allowed"
                   )}
-                  title={`Re-issue select_serial on ${rfSettings.addr || DONGLE_DEFAULTS.addr} @ ${rfSettings.baud || DONGLE_DEFAULTS.baud}`}
+                  title={`Re-open the dongle link (${linkTarget})`}
                 >
                   <MdRestartAlt
                     className={cn("text-sm", restartingDongle && "animate-spin")}

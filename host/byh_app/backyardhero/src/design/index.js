@@ -17,6 +17,7 @@ export {
   fieldHintClass,
 } from "./Field";
 export { Slider } from "./Slider";
+export { SegmentedControl } from "./SegmentedControl";
 export { Toggle } from "./Toggle";
 export { default as useAppMode, APP_MODES } from "./useAppMode";
 export { default as useIsMobile } from "./useIsMobile";

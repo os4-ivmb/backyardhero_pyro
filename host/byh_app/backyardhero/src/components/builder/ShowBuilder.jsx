@@ -63,6 +63,7 @@ import {
   Modal,
   Button,
   Field,
+  SegmentedControl,
   inputClass,
   selectClass,
   Card,
@@ -1047,14 +1048,32 @@ export const formatShowClock = (sec) => {
   return `${sign}${m}:${s.toFixed(2).padStart(5, "0")}`;
 };
 
+const SHOW_SETUP_TYPES = [
+  { value: SHOW_TYPE_TIMELINE, label: "Timeline" },
+  { value: SHOW_TYPE_MANUAL_SEQUENCE, label: "Stepped" },
+];
+
 // First-run setup for a brand-new show. Rendered as the whole editor page (not
 // a modal) until the show has a name + arm code and has been saved, so the
 // operator sets identity and persists up front before anything can be added.
-const ShowSetupScreen = ({ onSave, saving, error, initialName = "", initialAuthCode = "" }) => {
+const ShowSetupScreen = ({
+  onSave,
+  saving,
+  error,
+  initialName = "",
+  initialAuthCode = "",
+  initialShowType = SHOW_TYPE_TIMELINE,
+}) => {
   const [name, setName] = useState(initialName);
   const [authCode, setAuthCode] = useState(initialAuthCode);
+  const [showType, setShowType] = useState(
+    initialShowType === SHOW_TYPE_MANUAL_SEQUENCE
+      ? SHOW_TYPE_MANUAL_SEQUENCE
+      : SHOW_TYPE_TIMELINE,
+  );
+  const stepped = showType === SHOW_TYPE_MANUAL_SEQUENCE;
   const canSave = name.trim() !== "" && authCode.trim() !== "" && !saving;
-  const submit = () => { if (canSave) onSave(name.trim(), authCode.trim()); };
+  const submit = () => { if (canSave) onSave(name.trim(), authCode.trim(), showType); };
   return (
     <div className="h-full w-full flex items-center justify-center p-6">
       <Card tone="raised" padding="lg" className="w-full max-w-md shadow-e3">
@@ -1065,6 +1084,24 @@ const ShowSetupScreen = ({ onSave, saving, error, initialName = "", initialAuthC
           or cues. The arm code is used to edit and to launch the show.
         </p>
         <div className="mt-5 flex flex-col gap-4">
+          <Field
+            label="Show type"
+            htmlFor="show-setup-type"
+            hint={
+              stepped
+                ? "A stepped show groups cues into steps you fire one at a time."
+                : "Cues fire on a clock, along the show audio."
+            }
+          >
+            <SegmentedControl
+              id="show-setup-type"
+              label="Show type"
+              value={showType}
+              onChange={setShowType}
+              options={SHOW_SETUP_TYPES}
+              disabled={saving}
+            />
+          </Field>
           <Field label="Show name">
             <input
               autoFocus
@@ -3836,11 +3873,23 @@ const ShowBuilder = (props) => {
   // reachable on a saved show.
   const isShowSaved = () => Boolean(showMetadata?.id);
 
-  // Setup form submitted: stamp name + arm code, then let the effect below save
-  // the show once that metadata has committed (handleSaveShow reads it from
-  // render state, so we can't save synchronously here).
-  const handleShowSetupSave = (name, authCode) => {
-    setShowMetadata((prev) => ({ ...prev, name, authorization_code: authCode }));
+  // Setup form submitted: stamp name, arm code, and show type, then let the
+  // effect below save once that metadata has committed (handleSaveShow reads
+  // it from render state, so we can't save synchronously here).
+  const handleShowSetupSave = (name, authCode, showType) => {
+    const stepped = showType === SHOW_TYPE_MANUAL_SEQUENCE;
+    setShowMetadata((prev) => ({
+      ...prev,
+      name,
+      authorization_code: authCode,
+      showConfig: {
+        ...normalizeShowConfig(prev.showConfig),
+        showType: stepped ? SHOW_TYPE_MANUAL_SEQUENCE : SHOW_TYPE_TIMELINE,
+        // A new timeline has no steps. A new stepped show starts empty;
+        // steps appear when the first cues are added.
+        ...(stepped ? {} : { steps: [] }),
+      },
+    }));
     setSetupError(null);
     setIsSavingSetup(true);
     pendingSetupSaveRef.current = true;
@@ -4966,6 +5015,7 @@ const ShowBuilder = (props) => {
         error={setupError}
         initialName={showMetadata?.name || ""}
         initialAuthCode={showMetadata?.authorization_code || ""}
+        initialShowType={normalizeShowConfig(showMetadata?.showConfig).showType}
       />
     );
   }

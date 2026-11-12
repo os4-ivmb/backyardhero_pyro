@@ -354,6 +354,11 @@ class BYHProtocolHandler:
         normal commands would be silently dropped (`scrubQueueForNode`)
         when the dongle enters flash mode.
         """
+        if getattr(self.parent, 'dongle_link', 'usb') == 'wireless':
+            return False, (
+                "OTA refused: receiver OTA is not supported over a "
+                "wireless hub connection."
+            )
         if self.show_loaded:
             return False, "OTA refused: a show is currently loaded."
         if self.parent.is_armed:

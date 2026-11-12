@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Simple burst: eight rays around a center dot. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group android:pivotX="54" android:pivotY="54">
+        <path android:fillColor="#FFB020" android:pathData="M52,26h4v18h-4z" />
+        <path android:fillColor="#FFB020" android:pathData="M52,64h4v18h-4z" />
+        <path android:fillColor="#FFB020" android:pathData="M26,52h18v4h-18z" />
+        <path android:fillColor="#FFB020" android:pathData="M64,52h18v4h-18z" />
+    </group>
+    <group android:pivotX="54" android:pivotY="54" android:rotation="45">
+        <path android:fillColor="#FF5A36" android:pathData="M52,30h4v14h-4z" />
+        <path android:fillColor="#FF5A36" android:pathData="M52,64h4v14h-4z" />
+        <path android:fillColor="#FF5A36" android:pathData="M30,52h14v4h-14z" />
+        <path android:fillColor="#FF5A36" android:pathData="M64,52h14v4h-14z" />
+    </group>
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M54,54m-6,0a6,6 0,1 1,12 0a6,6 0,1 1,-12 0" />
+</vector>

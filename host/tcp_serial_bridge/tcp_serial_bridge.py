@@ -36,6 +36,18 @@ _DEVICES_UTILS = _resolve_devices_utils()
 if str(_DEVICES_UTILS) not in sys.path:
     sys.path.insert(0, str(_DEVICES_UTILS))
 
+# Sibling of this file. Insert explicitly so `import tcp_serial_bridge`
+# from another working directory can still find it.
+_BRIDGE_DIR = str(Path(__file__).resolve().parent)
+if _BRIDGE_DIR not in sys.path:
+    sys.path.insert(0, _BRIDGE_DIR)
+from hub_link import (  # noqa: E402
+    DEFAULT_HUB_HOST,
+    HubLink,
+    HubLinkError,
+    validate_hub_host,
+)
+
 # Default configuration.
 #
 # Startup precedence for the port: the operator's configured dongle port
@@ -105,7 +117,13 @@ def _initial_serial_config():
         baud = int(baud)
     except (TypeError, ValueError):
         baud = 115200
-    return {'port': port, 'baud': baud}
+    # Missing/unknown link stays on USB so existing configs keep the
+    # hard-wired dongle. `host` is only used when link == wireless.
+    link = system.get('dongle_link') or 'usb'
+    if link not in ('usb', 'wireless'):
+        link = 'usb'
+    host = str(system.get('dongle_hub_host') or DEFAULT_HUB_HOST).strip() or DEFAULT_HUB_HOST
+    return {'port': port, 'baud': baud, 'link': link, 'host': host}
 
 
 SERIAL_CONFIG = _initial_serial_config()
@@ -122,6 +140,15 @@ TCP_PORT = 9000
 # Global serial connection
 serial_conn = None
 serial_lock = threading.Lock()
+
+# Wireless hub session. Mutually exclusive with serial_conn: a config_serial
+# that flips `link` closes the transport it is leaving before opening the
+# other. _hub_lock guards the pointer; HubLink locks its own sends.
+# _hub_connect_lock keeps the reader and a config_serial from opening two
+# WebSockets at once (the hub only keeps two clients, and evicts the older).
+_hub = None
+_hub_lock = threading.Lock()
+_hub_connect_lock = threading.Lock()
 
 # Set to True while the flasher service has the dongle's USB-CDC port
 # checked out for esptool. While True the forwarder threads must NOT
@@ -176,11 +203,18 @@ def _resolve_dongle_port_safe(prefer=None, before=None):
 def _try_auto_reopen():
     """Attempt to re-open the serial port using the last-known config.
 
+    No-op while the operator has selected the wireless hub: reopening
+    USB out from under that session would hold the CDC port and steal
+    bytes the hub link is supposed to own.
+
     Throttled so we don't spin in a tight loop while the dongle is
     physically gone. Safe to call from either the read or write thread;
     the serial_lock + idempotent close serialize concurrent calls.
     """
     global serial_conn, _last_reconnect_attempt, _consecutive_failures
+
+    if SERIAL_CONFIG.get('link') == 'wireless':
+        return False
 
     # The flasher service holds the dongle's USB-CDC port exclusively
     # while esptool is mid-flash. Re-opening here would race with
@@ -216,6 +250,10 @@ def _try_auto_reopen():
                       f"unavailable; following dongle to {new_port}")
                 SERIAL_CONFIG['port'] = new_port
         try:
+            # Re-check under the lock. config_serial may have flipped to
+            # the hub while we were waiting to open the port.
+            if SERIAL_CONFIG.get('link') == 'wireless':
+                return False
             serial_conn = serial.Serial(
                 SERIAL_CONFIG['port'],
                 SERIAL_CONFIG['baud'],
@@ -301,6 +339,198 @@ def reconnect_serial(client_socket):
                 pass
         return False
 
+def _public_serial_config():
+    return {
+        'port': SERIAL_CONFIG.get('port'),
+        'baud': SERIAL_CONFIG.get('baud'),
+        'link': SERIAL_CONFIG.get('link') or 'usb',
+        'host': SERIAL_CONFIG.get('host') or DEFAULT_HUB_HOST,
+    }
+
+
+def _close_serial():
+    global serial_conn
+    with serial_lock:
+        if serial_conn:
+            try:
+                serial_conn.close()
+            except Exception:
+                pass
+            serial_conn = None
+
+
+def _close_hub():
+    global _hub
+    with _hub_lock:
+        link = _hub
+        _hub = None
+    if link is not None:
+        link.close()
+
+
+def _drop_hub(link):
+    """Close a session that just failed. Leave a replacement alone."""
+    global _hub
+    if link is None:
+        return
+    with _hub_lock:
+        if _hub is link:
+            _hub = None
+    link.close()
+
+
+def _current_hub():
+    with _hub_lock:
+        return _hub
+
+
+def _open_hub():
+    """Look up the hub at SERIAL_CONFIG['host'] and open its WebSocket.
+
+    Returns (ok, error_message). The error is operator-facing: the daemon
+    surfaces it when tcpstatus is false.
+    """
+    global _hub
+    with _hub_connect_lock:
+        if SERIAL_CONFIG.get('link') != 'wireless':
+            return False, "Dongle link is not wireless."
+        raw_host = SERIAL_CONFIG.get('host') or DEFAULT_HUB_HOST
+        try:
+            host = validate_hub_host(raw_host)
+        except HubLinkError as e:
+            return False, str(e)
+        SERIAL_CONFIG['host'] = host
+        link = HubLink()
+        try:
+            info = link.connect(host, timeout=3.0)
+        except HubLinkError as e:
+            link.close()
+            return False, str(e)
+        with _hub_lock:
+            if SERIAL_CONFIG.get('link') != 'wireless':
+                link.close()
+                return False, "Connection type changed while looking for the hub."
+            old = _hub
+            _hub = link
+        if old is not None and old is not link:
+            old.close()
+        ssid = info.get('ssid') or host
+        print(f"Hub connected: {ssid} at {host} (fw {info.get('fw')})")
+        return True, None
+
+
+def _try_hub_reopen():
+    """Re-open the hub with the same backoff the USB path uses."""
+    global _last_reconnect_attempt, _consecutive_failures
+    if SERIAL_CONFIG.get('link') != 'wireless':
+        return False
+    current = _current_hub()
+    if current is not None and current.connected:
+        return True
+    now = time.monotonic()
+    backoff = min(
+        RECONNECT_BACKOFF_MAX_S,
+        RECONNECT_BACKOFF_S * (1 + _consecutive_failures),
+    )
+    if now - _last_reconnect_attempt < backoff:
+        return False
+    _last_reconnect_attempt = now
+    ok, err = _open_hub()
+    if ok:
+        _consecutive_failures = 0
+        return True
+    _consecutive_failures += 1
+    if _consecutive_failures == 1 or (_consecutive_failures % 10) == 0:
+        print(f"Hub auto-reconnect attempt {_consecutive_failures} failed: {err}")
+    return False
+
+
+def _reset_reconnect_backoff():
+    global _last_reconnect_attempt, _consecutive_failures
+    _last_reconnect_attempt = 0.0
+    _consecutive_failures = 0
+
+
+def _note_hub_connect_failed():
+    """Start the auto-reconnect backoff after an operator-triggered miss
+    so the reader doesn't immediately open a second socket."""
+    global _last_reconnect_attempt, _consecutive_failures
+    _last_reconnect_attempt = time.monotonic()
+    _consecutive_failures = 1
+
+
+def _ack_link(client_socket, success, error=None):
+    response = {
+        'tcpstatus': bool(success),
+        'serial_config': _public_serial_config(),
+    }
+    if error:
+        response['error'] = error
+    try:
+        client_socket.sendall((json.dumps(response) + '\n').encode('utf-8'))
+    except Exception as e:
+        print(f"config_serial: could not ack client: {e}")
+
+
+def _service_hub_reader(client, stats):
+    """Forward one poll of hub WebSocket messages to the daemon.
+
+    Returns False when the daemon's TCP socket is gone and the reader
+    thread should exit.
+    """
+    link = _current_hub()
+    if link is None or not link.connected:
+        if _try_hub_reopen():
+            _notify_serial_reopened(client)
+        stats['last_rx'] = time.monotonic()
+        time.sleep(0.05)
+        return True
+    try:
+        lines = link.read_lines(0.05)
+    except HubLinkError as e:
+        now = time.monotonic()
+        if now - stats['last_log'] > 2.0:
+            print(f"serial_to_tcp: hub read failed ({e}); will auto-reconnect")
+            stats['last_log'] = now
+        _drop_hub(link)
+        return True
+    if lines:
+        stats['last_rx'] = time.monotonic()
+        try:
+            # The daemon's reader is line-oriented. The hub delivers one
+            # line per WebSocket message and does not include the newline.
+            client.sendall(b''.join(line + b'\n' for line in lines))
+        except OSError as e:
+            print(f"serial_to_tcp: client gone: {e}")
+            return False
+        return True
+    if time.monotonic() - stats['last_rx'] > SERIAL_SILENCE_TIMEOUT_S:
+        now = time.monotonic()
+        if now - stats['last_log'] > 2.0:
+            print(
+                f"serial_to_tcp: no hub traffic for "
+                f"{SERIAL_SILENCE_TIMEOUT_S:.0f}s; forcing reconnect"
+            )
+            stats['last_log'] = now
+        _drop_hub(link)
+        if _try_hub_reopen():
+            _notify_serial_reopened(client)
+        stats['last_rx'] = time.monotonic()
+    return True
+
+
+def _hub_write_line(line):
+    link = _current_hub()
+    if link is None or not link.connected:
+        print(f"tcp_to_serial: hub offline, dropping {len(line)}B")
+        return
+    try:
+        link.send_line(line)
+    except HubLinkError as e:
+        print(f"tcp_to_serial: hub write failed ({e}); dropping {len(line)}B")
+        _drop_hub(link)
+
+
 def process_command(command_data, client_socket):
     """Process configuration commands from the client"""
     global SERIAL_CONFIG
@@ -310,31 +540,52 @@ def process_command(command_data, client_socket):
         cmd = json.loads(command_data.decode('utf-8'))
         
         if cmd.get('type') == 'config_serial':
-            # Update configuration
+            # Update configuration. `link` defaults to whatever we're
+            # already using so an older daemon that only sends port/baud
+            # keeps the USB connection.
             if 'port' in cmd:
                 SERIAL_CONFIG['port'] = cmd['port']
             if 'baud' in cmd:
                 SERIAL_CONFIG['baud'] = int(cmd['baud'])
-            
-            # Reconnect with new settings
+            link = cmd.get('link', SERIAL_CONFIG.get('link') or 'usb')
+            if link not in ('usb', 'wireless'):
+                link = 'usb'
+            # Publish the new link before closing the old transport so
+            # the reader cannot reopen USB after we've decided on the hub
+            # (or the reverse).
+            SERIAL_CONFIG['link'] = link
+            if cmd.get('host'):
+                SERIAL_CONFIG['host'] = str(cmd['host']).strip()
+            _reset_reconnect_backoff()
+
+            if link == 'wireless':
+                _close_serial()
+                success, err = _open_hub()
+                if not success:
+                    _note_hub_connect_failed()
+                    print(f"Hub connect failed: {err}")
+                else:
+                    print("Acking hub connect")
+                _ack_link(client_socket, success, None if success else err)
+                return True
+
+            _close_hub()
             success = reconnect_serial(client_socket)
-            
-            # Send response
-            response = {
-                'tcpstatus': success,
-                'serial_config': SERIAL_CONFIG
-            }
-            if(success):
+            if success:
                 print("Acking success")
-                client_socket.sendall((json.dumps(response) + '\n').encode('utf-8'))
+                _ack_link(client_socket, True)
             return True
             
         elif cmd.get('type') == 'get_status':
-            # Return current status
+            hub = _current_hub()
+            if SERIAL_CONFIG.get('link') == 'wireless':
+                connected = hub is not None and hub.connected
+            else:
+                connected = serial_conn is not None and serial_conn.is_open
             response = {
                 'type': 'status_response',
-                'connected': serial_conn is not None and serial_conn.is_open,
-                'config': SERIAL_CONFIG
+                'connected': connected,
+                'config': _public_serial_config(),
             }
             client_socket.sendall((json.dumps(response) + '\n').encode('utf-8'))
             return True
@@ -367,8 +618,11 @@ def _notify_serial_reopened(client):
     if not client:
         return
     try:
+        target = SERIAL_CONFIG.get('port')
+        if SERIAL_CONFIG.get('link') == 'wireless':
+            target = SERIAL_CONFIG.get('host') or DEFAULT_HUB_HOST
         msg = {'type': 'serial_event', 'event': 'reopened',
-               'port': SERIAL_CONFIG.get('port')}
+               'port': target, 'link': SERIAL_CONFIG.get('link') or 'usb'}
         client.sendall(('\n' + json.dumps(msg) + '\n').encode('utf-8'))
     except Exception as e:
         print(f"_notify_serial_reopened: could not notify client: {e}")
@@ -400,8 +654,15 @@ def serial_to_tcp(client):
     # whenever we (re)open the port or park for flashing so a fresh handle
     # gets a full silence window before we suspect it.
     last_rx = time.monotonic()
+    hub_stats = {'last_rx': last_rx, 'last_log': 0.0}
     try:
         while True:
+            if SERIAL_CONFIG.get('link') == 'wireless':
+                # Hub traffic does not use the USB port, so a dongle
+                # esptool session (`flashing`) must not park this path.
+                if not _service_hub_reader(client, hub_stats):
+                    return
+                continue
             if flashing:
                 # The flasher service has the port. Park here cheaply --
                 # no auto-reopen attempts, no reads. We come back to
@@ -515,6 +776,13 @@ def tcp_to_serial(client):
                     if process_command(line, client):
                         continue
 
+                # Same bytes the USB path would write, one WebSocket
+                # message per line. The hub splits on CR/LF, so the
+                # newline stays off the frame.
+                if SERIAL_CONFIG.get('link') == 'wireless':
+                    _hub_write_line(line)
+                    continue
+
                 # While the flasher has the port, drop everything we'd
                 # forward to serial. The daemon's OTA driver tolerates
                 # silent gaps via its existing dongle-silence-abort path,
@@ -601,6 +869,7 @@ def start_tcp_server():
         server.close()
         if serial_conn:
             serial_conn.close()
+        _close_hub()
 
 
 # ---------------------------------------------------------------------------
@@ -668,8 +937,15 @@ def flash_set_port(port: str) -> None:
 
 
 if __name__ == '__main__':
-    # Establish initial serial connection
-    reconnect_serial(False)
+    # Establish the configured dongle link before accepting daemon
+    # clients, so the first config_serial isn't racing a doomed open
+    # of the other transport.
+    if SERIAL_CONFIG.get('link') == 'wireless':
+        ok, err = _open_hub()
+        if not ok:
+            print(f"Hub not reachable at startup: {err}")
+    else:
+        reconnect_serial(False)
 
     # Start the flasher HTTP server. Imported here (not at module top)
     # to keep the bridge's startup path lightweight: a missing/broken

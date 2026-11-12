@@ -14,6 +14,7 @@ import GpioOverrideBar from "../shell/GpioOverrideBar";
 import { isPollableReceiver } from "@/util/receivers";
 import { HARDWARE } from "@/util/clientEnv";
 import { fwOutOfDate } from "@/util/firmwareVersion";
+import { DONGLE_DEFAULTS, DONGLE_LINK_WIRELESS, selectSerialPayload } from "@/util/dongleLink";
 
 // ---------------------------------------------------------------------------
 // MobileStatusBar -- mobile twin of `shell/StatusBar.jsx`.
@@ -28,12 +29,6 @@ import { fwOutOfDate } from "@/util/firmwareVersion";
 //   * Tap-to-expand reveals the full set of pills (Daemon, Show, Cursor)
 //     in a stacked sheet directly above the bottom nav.
 // ---------------------------------------------------------------------------
-
-const DONGLE_DEFAULTS = {
-  addr: "/dev/tty.usbmodem01",
-  baud: 115200,
-  protocol: "BKYD_TS_HYBRID",
-};
 
 const MAX_TOASTS = 5;
 const RECONNECT_BASE_MS = 500;
@@ -202,15 +197,17 @@ export default function MobileStatusBar() {
   const dongleFwStale = fwOutOfDate(dongleFwVersion, latestDongleVersion);
 
   const rfSettings = stateData.fw_state?.settings?.rf || {};
+  const wirelessLink = rfSettings.link === DONGLE_LINK_WIRELESS;
   const restartDongle = useCallback(async () => {
     if (restartingDongle) return;
     setRestartingDongle(true);
-    const payload = {
-      type: "select_serial",
-      device: rfSettings.addr || DONGLE_DEFAULTS.addr,
-      baud: parseInt(rfSettings.baud || DONGLE_DEFAULTS.baud, 10),
-      protocol: rfSettings.protocol || DONGLE_DEFAULTS.protocol,
-    };
+    const payload = selectSerialPayload({
+      addr: rfSettings.addr,
+      baud: rfSettings.baud,
+      protocol: rfSettings.protocol,
+      link: rfSettings.link,
+      hubHost: rfSettings.hub_host,
+    });
     try {
       await axios.post("/api/system/cmd_daemon", payload, {
         headers: { "Content-Type": "application/json" },
@@ -224,7 +221,7 @@ export default function MobileStatusBar() {
     } finally {
       setRestartingDongle(false);
     }
-  }, [restartingDongle, rfSettings.addr, rfSettings.baud, rfSettings.protocol]);
+  }, [restartingDongle, rfSettings.addr, rfSettings.baud, rfSettings.protocol, rfSettings.link, rfSettings.hub_host]);
 
   const showLabel = !isShowLoaded ? "—" : isShowRunning ? "Running" : "Loaded";
   const showTone = !isShowLoaded ? "neutral" : isShowRunning ? "live" : "ok";
@@ -329,10 +326,15 @@ export default function MobileStatusBar() {
                 dongleTone === "ok" && "text-fg-primary",
                 dongleTone === "neutral" && "text-fg-muted"
               )}
-              title={`Dongle: ${dongleLabel}`}
+              title={wirelessLink
+                ? `Dongle: ${dongleLabel} · hub ${rfSettings.hub_host || DONGLE_DEFAULTS.hubHost}`
+                : `Dongle: ${dongleLabel}`}
             >
               {dongleLabel}
             </span>
+            {wirelessLink ? (
+              <Badge tone="neutral" size="xs">Hub</Badge>
+            ) : null}
             {dongleTone === "ok" && deviceIsTransmitting ? (
               <span
                 className="inline-flex items-center gap-0.5 text-2xs text-live font-semibold"

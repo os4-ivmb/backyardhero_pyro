@@ -82,7 +82,11 @@ MAN_FIRE_GPIO_PIN = 12  # GPIO pin for the arming switch
 
 SWITCH_GPIO_KEY = 'switch'
 ARMING_GPIO_KEY = 'arm'
-MAN_FIRE_GPIO_KEY = 'manfire' 
+MAN_FIRE_GPIO_KEY = 'manfire'
+# After an accepted press on inputs 5–8, ignore another press on that
+# input until this elapses. Firmware already requires the level to hold
+# for 50ms; this stops a chatter or a double-tap from firing two steps.
+STEP_INPUT_LOCKOUT_S = 0.4 
 
 BAD_TX_THRESHOLD = 10 #its broken then
 
@@ -206,6 +210,16 @@ class GPIOHandler:
             'switch': None,
             'manfire': None
         }
+        # Host-header inputs 1–8. True = closed / pressed. Indexes 4–7 are
+        # momentary buttons (inputs 5–8). A press edge is one increment of
+        # `_step_seq` after STEP_INPUT_LOCKOUT_S, so a bounce or a
+        # double-tap inside that window cannot fire two steps.
+        self._lock = threading.Lock()
+        self._inputs_known = False
+        self._inputs = [False] * 8
+        self._step_seq = 0
+        self._step_input = None
+        self._lockout_until = [0.0] * 8
         pass
     def setup_line(self, pin, consumer="pull_up_input"):
         pass
@@ -229,6 +243,44 @@ class GPIOHandler:
 
     def set_gpio(self, gpio_dict):
         self.sgpio = gpio_dict
+
+    def note_inputs(self, raw):
+        """Active-low `inputs` array from gpio_status. Returns True when the
+        snapshot the UI watches has changed (first reading, a level change,
+        or an accepted press on inputs 5–8)."""
+        if not isinstance(raw, list) or len(raw) < 8:
+            return False
+        closed = []
+        for v in raw[:8]:
+            try:
+                closed.append(int(v) == 0)
+            except (TypeError, ValueError):
+                closed.append(False)
+        now = time.monotonic()
+        with self._lock:
+            if not self._inputs_known:
+                self._inputs = closed
+                self._inputs_known = True
+                return True
+            if closed == self._inputs:
+                return False
+            for i in range(4, 8):
+                if closed[i] and not self._inputs[i] and now >= self._lockout_until[i]:
+                    self._step_seq += 1
+                    self._step_input = i + 1
+                    self._lockout_until[i] = now + STEP_INPUT_LOCKOUT_S
+            self._inputs = closed
+            return True
+
+    def input_snapshot(self):
+        with self._lock:
+            if not self._inputs_known:
+                return None
+            return list(self._inputs)
+
+    def step_press_snapshot(self):
+        with self._lock:
+            return {"seq": self._step_seq, "input": self._step_input}
 
     def set_override(self, key, active, on):
         """Force (or release) a switch input. `on` is the human-facing
@@ -284,6 +336,12 @@ class FireworkDaemon:
         self.bad_serial_ct = 0
         self.serial_baud = BAUD_RATE
         self.serial_addr = SERIAL_PORT
+        # How the bridge reaches the dongle. "usb" is the hard-wired
+        # serial port; "wireless" is the Omni hub's WebSocket. Receiver
+        # OTA is refused while the link is wireless.
+        self.dongle_link = "usb"
+        self.dongle_hub_host = "192.17.76.1"
+        self.link_error = None
         self.loaded_show_name = None
         self.loaded_show_id = None
         self.time_cursor = None
@@ -485,6 +543,10 @@ class FireworkDaemon:
         if(cfg_file):
             self.serial_addr = cfg_file.get("dongle_port", SERIAL_PORT)
             self.serial_baud = cfg_file.get("dongle_baud", BAUD_RATE)
+            link = cfg_file.get("dongle_link", "usb")
+            self.dongle_link = link if link in ("usb", "wireless") else "usb"
+            host = cfg_file.get("dongle_hub_host") or "192.17.76.1"
+            self.dongle_hub_host = str(host).strip() or "192.17.76.1"
         else:
             print("No system config.")
 
@@ -551,7 +613,9 @@ class FireworkDaemon:
             config_cmd = {
                 'type': 'config_serial',
                 'port': self.serial_addr,
-                'baud': self.serial_baud
+                'baud': self.serial_baud,
+                'link': self.dongle_link,
+                'host': self.dongle_hub_host,
             }
 
             sock.sendall((json.dumps(config_cmd) + '\n').encode('utf-8'))
@@ -626,10 +690,14 @@ class FireworkDaemon:
             self.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
 
     def _handle_serial_reopened(self, msg=None):
-        """React to the bridge reporting that it (re)opened the dongle's USB
-        serial port. Debounced, and run off the read thread so the receiver
-        re-registration sleeps in on_dongle_reconnected() don't stall serial
-        RX."""
+        """React to the bridge reporting that it (re)opened the dongle link
+        (USB serial, or the hub WebSocket). Debounced, and run off the read
+        thread so the receiver re-registration sleeps in
+        on_dongle_reconnected() don't stall serial RX."""
+        # A successful reopen clears a "couldn't find the hub" error from
+        # the previous attempt, even when this event is debounced away.
+        self.link_error = None
+        self.mark_state_dirty()
         now = time.monotonic()
         last = getattr(self, '_last_dongle_resync_ts', 0.0)
         if now - last < DONGLE_RESYNC_DEBOUNCE_S:
@@ -702,13 +770,23 @@ class FireworkDaemon:
                                         if('tcpstatus' in tcpsrvmsg):
                                             bypass = True
                                             print("Special TCPserv Message")
-                                            if('error' in tcpsrvmsg):
-                                                self.write_error(tcpsrvmsg.get('error'))
-                                            if('serial_config' in tcpsrvmsg and tcpsrvmsg['tcpstatus']):
+                                            cfg = tcpsrvmsg.get('serial_config') or {}
+                                            if isinstance(cfg, dict):
+                                                if cfg.get('port'):
+                                                    self.serial_addr = cfg.get('port')
+                                                if cfg.get('baud') is not None:
+                                                    try:
+                                                        self.serial_baud = int(cfg.get('baud'))
+                                                    except (TypeError, ValueError):
+                                                        pass
+                                                if cfg.get('link') in ('usb', 'wireless'):
+                                                    self.dongle_link = cfg.get('link')
+                                                if cfg.get('host'):
+                                                    self.dongle_hub_host = cfg.get('host')
+                                            if tcpsrvmsg.get('tcpstatus'):
+                                                self.link_error = None
                                                 if(self.debug_enabled()):
                                                     print("Acked serial set")
-                                                self.serial_addr = tcpsrvmsg['serial_config'].get('port')
-                                                self.serial_baud = tcpsrvmsg['serial_config'].get('baud')
                                                 # Replacing the handler abandons
                                                 # the events any in-flight run_show
                                                 # thread is watching. Signal the old
@@ -717,6 +795,10 @@ class FireworkDaemon:
                                                 # writing) against the dead handler.
                                                 self._halt_show_for_handler_swap()
                                                 self.protocol_handler = BYHProtocolHandler(self)
+                                            elif 'error' in tcpsrvmsg:
+                                                self.link_error = tcpsrvmsg.get('error')
+                                                self.write_error(tcpsrvmsg.get('error'))
+                                            self.mark_state_dirty()
                                         elif(tcpsrvmsg.get('type') == 'serial_event'):
                                             # The bridge transparently reopened
                                             # the dongle's USB serial (hot-replug,
@@ -738,6 +820,8 @@ class FireworkDaemon:
                                                 'switch':  int(tcpsrvmsg.get('start_stop')),
                                                 'manfire': int(tcpsrvmsg.get('man_fire')),
                                             })
+                                            if gpio_handler.note_inputs(tcpsrvmsg.get('inputs')):
+                                                self.mark_state_dirty()
                                         else:
                                             bypass = False
 
@@ -986,9 +1070,17 @@ class FireworkDaemon:
         except Exception as e:
             print(f"Error appending to file: {e}")
 
-    def switch_serial(self, addr, baud):
+    def switch_serial(self, addr, baud, link=None, hub_host=None):
         self.serial_addr = addr
         self.serial_baud = baud
+        if link in ('usb', 'wireless'):
+            self.dongle_link = link
+        if hub_host:
+            self.dongle_hub_host = str(hub_host).strip()
+        # The bridge ack replaces this with a real error if the hub
+        # isn't there. Clear the previous one so the UI doesn't keep
+        # showing a miss from the last attempt.
+        self.link_error = None
         self.setup_serial()
 
     def handle_manual_fire(self, zone, target, kind=None):
@@ -1062,7 +1154,12 @@ class FireworkDaemon:
                     else:
                         print(f"abort_show_load ignored: {msg}")
             elif command['type'] == 'select_serial':
-                self.switch_serial(command.get('device'), int(command.get('baud')))
+                self.switch_serial(
+                    command.get('device'),
+                    int(command.get('baud')),
+                    link=command.get('link'),
+                    hub_host=command.get('host'),
+                )
             elif command['type'] == 'reboot_dongle':
                 # Host-requested soft reboot of the ESP32-S2 itself. First
                 # send the `reboot` serial command; the firmware acks (C+
@@ -1221,6 +1318,14 @@ class FireworkDaemon:
                 if not ident or not image_path:
                     self.write_error(
                         "ota_flash_start refused: missing ident or image_path"
+                    )
+                elif self.dongle_link == 'wireless':
+                    # The hub link carries the same line protocol as USB,
+                    # but receiver OTA is not supported over it.
+                    self.write_error(
+                        "ota_flash_start refused: receiver OTA is not "
+                        "supported over a wireless hub connection. Switch "
+                        "the dongle connection to USB."
                     )
                 elif not (self.protocol_handler and hasattr(
                     self.protocol_handler, 'start_ota_flash'
@@ -1603,7 +1708,10 @@ class FireworkDaemon:
         state = {
             "device_running": self.last_serial_received is not None and (datetime.now() - self.last_serial_received).total_seconds() <= 10,
             "device_found": self.serial_connection is not None,
-            "device_address": SERIAL_PORT,
+            "device_address": (
+                self.dongle_hub_host if self.dongle_link == "wireless"
+                else self.serial_addr
+            ),
             "daemon_lup": int(datetime.now().timestamp() * 1000),
             "show_loaded": self.protocol_handler is not None and self.protocol_handler.show_loaded,
             "loaded_show_name": self.loaded_show_name,
@@ -1645,6 +1753,12 @@ class FireworkDaemon:
                     "manfire": gpio_handler.read_raw(MAN_FIRE_GPIO_KEY) == LOW,
                 },
                 "overrides": gpio_handler.override_snapshot(),
+                # inputs[i] is header input i+1, true when closed. None until
+                # a dongle that reports the array (omni FW 34+) has been heard.
+                # stepPress.seq increments once per accepted press on inputs
+                # 5–8; the UI binds or fires off that edge.
+                "inputs": gpio_handler.input_snapshot(),
+                "stepPress": gpio_handler.step_press_snapshot(),
             },
             "fire_check_failures": self.fire_check_failures,
             "proto_handler_errors": self.protocol_handler is not None and self.protocol_handler.errors,
@@ -1693,6 +1807,9 @@ class FireworkDaemon:
                 "rf": {
                     "addr": self.serial_addr,
                     "baud": self.serial_baud,
+                    "link": self.dongle_link,
+                    "hub_host": self.dongle_hub_host,
+                    "link_error": self.link_error,
                     # Live channel from the dongle's per-second status.
                     # None until the first dongle status arrives.
                     "current_channel": self.current_rf_channel,

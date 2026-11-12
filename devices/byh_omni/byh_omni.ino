@@ -3,32 +3,91 @@
 #include <Adafruit_NeoPixel.h>
 #include <Preferences.h>
 #include <Update.h>
-#include "esp_ota_ops.h"   // Boot self-test / rollback confirmation
+#include "esp_ota_ops.h"   // H2.2: boot self-test / rollback confirmation
+#include "omni_pins.h"
+#include "omni_dongle.h"
 
-// Initial BYH Omni firmware, version 1.
-#define BOARD_VERISON 1
-#define FW_VERSION 1
+// BYH Omni firmware.
+//
+// The omni runs on receiver hardware and boots into one of three roles:
+//
+//   * Receiver (default): full parity with os4_receiver.ino FW v30. The
+//     vNN / H# tags referenced in comments below are documented in that
+//     file's FW_VERSION history.
+//   * Dongle: selected when the host (dongle) module is plugged into the
+//     output header. The module ties BOARD_CT to ground through 200k, which
+//     puts the board-count ADC at or above DONGLE_SENSE_ADC_MIN.
+//     Behaves like os4_dongle.ino over USB serial; see omni_dongle.cpp.
+//   * Hub dongle: dongle mode with the host module's hub switch closed at
+//     boot. Starts a WiFi AP and serves the dongle protocol over a
+//     WebSocket instead of waiting for USB serial; see omni_hub.cpp.
+//
+// v34: 2026-11-12 - gpio_status includes the host header's inputs 5–8
+//   (shift-register indexes 4–7), debounced, so a momentary button there
+//   can be bound to sequence step fire.
+// v33: 2026-11-11 - Hub AP address is 192.17.76.1/24 (was the ESP32
+//   default 192.168.4.1/24). The Android app probes this same host.
+// v32: 2026-11-11 - Hub kept a new WebSocket open. The idle check subtracted
+//   a stale clock from a newer stamp, wrapped, and closed every socket
+//   (code 1001) in the same loop that accepted it.
+// v31: 2026-11-XX - Receiver parity with os4_receiver v30 (16-bit IDs, NVS
+//   board version, v10 battery calibration) plus dongle / hub dongle modes.
+#define FW_VERSION 34
 
-// Runtime identity, populated from NVS in setup(). 0 / "O???" are the
-// unprovisioned sentinels. Treat these as read-only outside of the
-// provisioning helpers.
-uint8_t NODE_ID = 0;
-char    RECEIVER_IDENT[16] = "O???";
+// The omni runs on the receiver v10 PCB; SETBOARD overrides per unit.
+#define DEFAULT_BOARD_VERSION 10
+uint8_t boardVersion = DEFAULT_BOARD_VERSION;
+
+// Board-count ADC (13-bit raw) at or above this boots the dongle role: the
+// host module's 200k to ground reads above every cue-board count (1-8 boards
+// read below 5000). An empty header also reads high and boots as a dongle,
+// which is intended. setup() prints the raw reading for calibration.
+#define DONGLE_SENSE_ADC_MIN 7000
+
+// Dongle host module wiring. Inputs are bit indexes on the module's 74HC165
+// (index 0 = input A). They have pulldowns, so a closed switch reads high.
+#define HOST_IN_ARM_INDEX    0
+#define HOST_IN_START_INDEX  1
+#define HOST_IN_MANUAL_INDEX 2
+// Closed at boot -> hub dongle (WiFi AP + WebSocket) instead of USB serial.
+#define HOST_IN_HUB_INDEX    3
+// Bit index on the module's 74HC595 that keys the 433MHz transmitter
+// (index 0 = output QA, wired to RFSIG).
+#define HOST_OUT_RF433_INDEX 0
+// Status pixels on the module, driven from the cue LED data pin.
+#define HOST_STATUS_PIXEL_COUNT 7
+
+enum OmniRole : uint8_t {
+  OMNI_ROLE_RECEIVER = 0,
+  OMNI_ROLE_DONGLE,
+  OMNI_ROLE_HUB_DONGLE
+};
+OmniRole omniRole = OMNI_ROLE_RECEIVER;
+
+// Runtime identity, populated from NVS in setup(). 0 / "RX???" are the
+// unprovisioned sentinels -- see loadIdentityFromNVS(). Treat these as
+// read-only outside of the provisioning helpers.
+uint16_t NODE_ID = 0;
+char    RECEIVER_IDENT[16] = "RX???";
 
 // True until loadIdentityFromNVS() finds a non-zero NODE_ID. Drives the
 // "skip radio init + flash magenta + serial-only" provisioning loop.
 bool isProvisioned = false;
 
 Preferences identityPrefs;
-static const char* IDENTITY_NS       = "byh_omni";
-static const char* IDENTITY_KEY_ID   = "node_id";
+static const char* IDENTITY_NS       = OMNI_NVS_NAMESPACE;
+static const char* IDENTITY_KEY_ID   = "node_id";    // legacy uint8_t key
+static const char* IDENTITY_KEY_ID16 = "node_id16";  // v30 uint16_t key
 static const char* IDENTITY_KEY_IDENT = "ident";
-// Persisted runtime config lives in the identity NVS namespace so flash/wipe
-// tooling handles it consistently. Keep new keys short; NVS keys cap at
-// 15 characters.
+static const char* CONFIG_KEY_BOARD_VERSION = "board_ver";
+// FW v22: persisted runtime config lives in the same NVS namespace so
+// existing flash/wipe tooling keeps working. Add new keys here as more
+// per-receiver knobs land (kept short -- NVS keys cap at 15 chars).
 static const char* CONFIG_KEY_FIRE_DUR = "fire_dur";
 
-// Default fire-pulse width when the NVS setting is absent.
+// Default fire-pulse width if NVS is empty (matches the legacy
+// FIRE_MS_DURATION #define so unflashed-config receivers behave
+// identically to older firmware).
 #define DEFAULT_FIRE_DURATION_MS 1000
 // Sanity bounds for incoming fire_duration_ms set requests. Anything
 // shorter than 50ms is unlikely to reliably fire an e-match; anything
@@ -40,7 +99,7 @@ static const char* CONFIG_KEY_FIRE_DUR = "fire_dur";
 #define FIRE_DURATION_MS_MAX  5000
 
 // Runtime fire-pulse width. Loaded from NVS in setup(); writable via
-// the RECEIVER_CONFIG_QUERY message.
+// the RECEIVER_CONFIG_QUERY message (receiver v22).
 uint16_t fireDurationMs = DEFAULT_FIRE_DURATION_MS;
 
 const bool RECEIVER_USES_V1_CUES = false;
@@ -61,42 +120,14 @@ const bool RECEIVER_USES_V1_CUES = false;
 #define OTA_LOG(x)   do { if (OTA_DEBUG) Serial.print(x);   } while (0)
 #define OTA_LOGLN(x) do { if (OTA_DEBUG) Serial.println(x); } while (0)
 
-#if BOARD_VERISON >= 6
-  #define RF24_CE_PIN 37
-  #define RF24_CSN_PIN 36
-#else
-  #define RF24_CE_PIN 34
-  #define RF24_CSN_PIN 33
-#endif
+// Pin assignments live in omni_pins.h (shared with the dongle mode).
 
-// FIRE pulse width is the NVS-backed runtime value `fireDurationMs`.
-
-#define LED_PIN 11
-#define STATUS_LED_PIN 17
-#define STATUS_LED_COUNT 3
-#define BATT_VOLTAGE_PIN 3
-#define BOARD_CT_PIN 2
-
-enum OmniMode {
-  OMNI_MODE_HOST,
-  OMNI_MODE_CUE_RECEIVER,
-  OMNI_MODE_DMX_RECEIVER
-};
-
-OmniMode omniMode = OMNI_MODE_CUE_RECEIVER;
+// FIRE pulse width is now a runtime value (`fireDurationMs`) backed by NVS
+// instead of the old compile-time #define FIRE_MS_DURATION 1000 (receiver v22).
 
 int NUM_BOARDS = 1;
 int NUM_LEDS = (8 * NUM_BOARDS);
 bool noBoardsDetected = false;
-
-#define SHIFT_OUT_CLOCK 10
-#define SHIFT_OUT_LATCH 9
-#define SHIFT_OUT_OE 13
-#define SHIFT_OUT_DATA 7
-
-#define SHIFT_IN_CLOCK 6
-#define SHIFT_IN_LATCH 5
-#define SHIFT_IN_DATA 12
 
 const uint16_t INPUT_MODE_INTERVAL = 100;
 const uint16_t RX_MESSAGE_FADE_TIME_MS = 1500;
@@ -115,7 +146,9 @@ bool gotCommand = false;
 bool everConnected = false;
 // Raw millis() at the time of the most recent inbound command. Stays in
 // the monotonic millis domain so the disconnect math doesn't depend on
-// clock_offset changes from CLOCK_SYNC.
+// clock_offset. (Previously this was stored in synchronized-clock units
+// and a CLOCK_SYNC arrival could shift it relative to `now` by the
+// clock-offset delta -- which trips the 5s threshold on clock jumps.)
 uint64_t lastCmdReceivedMs = 0;
 uint64_t lastInputModeRunTime = 0;
 uint64_t lastMessageReceivedTime = 0;
@@ -230,8 +263,11 @@ struct ReceiverOtaStatusMessage {
   uint16_t lastChunk;        // last chunkIdx successfully written
   uint32_t bytesReceived;    // running total of bytes accepted by Update.write
   uint8_t  errorCode;        // OtaError below; 0 = none
-  uint8_t  nodeID;           // echoed for sanity
+  uint8_t  nodeID;           // low byte; legacy offset preserved
+  uint8_t  nodeIDHigh;       // v30 append-only high byte
 } __attribute__((packed));
+
+static_assert(sizeof(ReceiverOtaStatusMessage) == 11, "OTA status wire layout changed");
 
 enum OtaState : uint8_t {
   OTA_STATE_IDLE     = 0,  // not in flash mode
@@ -250,7 +286,7 @@ enum OtaError : uint8_t {
   OTA_ERR_OOB_CHUNK        = 5,  // chunkIdx not the expected next slot
   OTA_ERR_HOST_ABORT       = 6,  // host sent OTA_ABORT
   OTA_ERR_BAD_BEGIN        = 7,  // OTA_BEGIN was malformed (bad size / rate)
-  OTA_ERR_CRC              = 8   // end-to-end CRC32 mismatch
+  OTA_ERR_CRC              = 8   // end-to-end CRC32 mismatch (H1)
 };
 
 struct ManualFireMessage {
@@ -302,19 +338,22 @@ struct ShowStartMessage {
 
 struct ReceiverStatusMessage {
   uint8_t type;
-  uint8_t nodeID;
+  uint8_t nodeID;            // low byte; legacy offset preserved
   uint8_t batteryLevel;
   uint16_t showState;
   char ident[10];
   uint64_t cont64_0;
   uint64_t cont64_1;
+  uint8_t nodeIDHigh;        // v30 append-only byte; payload is exactly 32 bytes
 } __attribute__((packed));
+
+static_assert(sizeof(ReceiverStatusMessage) == 32, "receiver status must fit one nRF24 payload");
 
 // dongle -> receiver: fetch config (and optionally set values). flags == 0
 // is a no-op write, response-only fetch; bits in `flags` request specific
 // per-field writes. New writable knobs add new flag bits and new field
-// slots; keep the wire layout append-only and dispatch size-checked for
-// compatibility.
+// slots; the wire layout stays append-only so older firmware just ignores
+// trailing bytes (msgSize-checked at dispatch time).
 struct ReceiverConfigSetMessage {
   uint8_t  type;              // RECEIVER_CONFIG_QUERY
   uint8_t  flags;             // bit 0: SET_FIRE_DURATION (apply fire_duration_ms)
@@ -327,15 +366,17 @@ struct ReceiverConfigSetMessage {
 // is intentionally zero-padded for future fields without a wire bump.
 struct ReceiverConfigResponseMessage {
   uint8_t  type;              // RECEIVER_CONFIG_RESPONSE
-  uint8_t  nodeID;
+  uint8_t  nodeID;            // low byte; legacy offset preserved
   uint8_t  fwVersion;         // FW_VERSION
-  uint8_t  boardVersion;      // BOARD_VERISON
+  uint8_t  boardVersion;      // Runtime boardVersion loaded from NVS
   uint8_t  numBoards;         // 0 if noBoardsDetected, else detected NUM_BOARDS
   uint8_t  noBoardsDetected;  // 0 or 1
   uint8_t  cuesAvailable;     // 0 if noBoardsDetected, else NUM_BOARDS * 8
   uint16_t fireDurationMs;    // currently-effective fire pulse width (ms)
-  uint8_t  reserved[8];       // future fields; zero-padded for now
+  uint8_t  reserved[8];       // reserved[0] = v30 nodeID high byte
 } __attribute__((packed));
+
+static_assert(sizeof(ReceiverConfigResponseMessage) == 17, "config response wire layout changed");
 
 // Non-blocking show-time LED animation state machine. Declared near the top
 // of the file so Arduino's auto-prototype generator sees the enum before it
@@ -359,7 +400,7 @@ uint32_t otaBytesReceived = 0;
 uint32_t otaCrc32Expected = 0;
 // Running end-to-end CRC32 over the bytes we've actually written, held in
 // its INTERNAL (pre-final-inversion) form. Finalized + compared against
-// otaCrc32Expected in handleOtaEnd. The host computes the expected
+// otaCrc32Expected in handleOtaEnd (H1). The host computes the expected
 // value with Python binascii.crc32 (standard zlib/IEEE CRC-32), so the
 // polynomial / init / final-XOR below must match it exactly.
 uint32_t otaCrc32Running = 0xFFFFFFFF;
@@ -380,18 +421,24 @@ bool configResponsePending = false;
 // hung host doesn't strand the receiver.
 #define OTA_INACTIVITY_TIMEOUT_MS 30000UL
 
-RF24 radio(RF24_CE_PIN, RF24_CSN_PIN);
+RF24 radio;
 
-// Must match the dongle scheme: arithmetically add NODE_ID to RECEIVER_BASE
-// so every node maps to a unique radio address.
+// Must match the dongle scheme. v10 fixed a long-standing bug where
+// RECEIVER_BASE was bitwise-OR'd with NODE_ID instead of arithmetically
+// added; that aliased every (even N, odd N+1) pair onto the same radio
+// address. v10 receivers MUST be paired with v8+ dongle firmware -- a
+// v10 receiver with NODE_ID=153 listens on 154, while a v9 receiver
+// with NODE_ID=153 listens on 153. Mixing the two on the same fleet
+// silently breaks polling.
 const uint8_t rfChannel = 85;
 const uint8_t rfSystemId = 0;
 #define MASTER_WRITE_BASE 0x0000000000ULL
 #define RECEIVER_BASE     0x0000000001ULL
 
-// High-entropy address mask. MUST be identical to the dongle's
+// H8: high-entropy address mask. MUST be identical to the dongle's
 // RF_ADDR_ENTROPY_MASK (os4_dongle.ino) -- it scatters the otherwise
-// near-all-zero address bytes to cut nRF24 false-match packet loss.
+// near-all-zero address bytes to cut nRF24 false-match packet loss. This
+// is a BREAKING RF change: a v24+ receiver only talks to a v20+ dongle.
 #define RF_ADDR_ENTROPY_MASK 0xA3C5E1B400ULL
 
 static inline uint64_t systemSalt() {
@@ -404,7 +451,7 @@ static inline uint64_t masterWriteAddress() {
 }
 static inline uint64_t receiverReadAddress() {
   // Arithmetic add (not OR) so each NODE_ID maps to a unique address; XOR
-  // RF_ADDR_ENTROPY_MASK using the identical dongle-side calculation.
+  // RF_ADDR_ENTROPY_MASK for H8 (applied identically on the dongle).
   return RF_ADDR_ENTROPY_MASK ^ (systemSalt() + RECEIVER_BASE + (uint64_t)NODE_ID);
 }
 
@@ -541,7 +588,7 @@ void handleManualFire(ManualFireMessage* msg) {
 
 void handleClockSync(ClockSyncMessage* msg) {
   // Apply ADDITIONAL_CLOCK_TX_OFFSET to compensate for the residual TX-to-RX
-  // latency between timestamping and receipt.
+  // latency that was previously unaccounted for.
   uint64_t localTime64 = (uint64_t)millis();
   clock_offset = (int64_t)msg->timestamp - (int64_t)localTime64 + ADDITIONAL_CLOCK_TX_OFFSET;
 }
@@ -561,7 +608,10 @@ void handleStartLoad(StartLoadMessage* msg) {
 // Bounds-checked single-cue add (used by both SHOW_LOAD and SHOW_LOADN).
 void loadOneCue(uint32_t time, uint8_t position) {
   if (position >= 128) return;
-  // Positions are 0-indexed, so the valid range is [0, NUM_BOARDS*8).
+  // L2: positions are 0-indexed, so the valid range is [0, NUM_BOARDS*8).
+  // The old `>` admitted position == NUM_BOARDS*8 (e.g. 64 with 8 boards),
+  // a ghost slot with no physical output that still counted toward load
+  // completion.
   if (position >= (NUM_BOARDS * 8)) {
     DBG_PRINTLN("LOAD ERR: TARGET EXCEEDS AVAILABLE.");
     return;
@@ -657,25 +707,68 @@ void handleGeneric(GenericMessage* msg) {
 
 // Calculate battery level (returns 5-253).
 //
-// This math assumes the 13-bit ADC resolution set in setup() (raw 0..8191).
-// `bval` is the raw reading halved in software; the
+// H7: this math assumes a 13-bit ADC (raw 0..8191). setup() now pins that
+// with analogReadResolution(13) so it no longer silently depends on the
+// arduino-esp32 core default (12-bit on most cores -> raw maxes at 4095,
+// which would clamp every reading below the empty floor and report a flat
+// minimum battery). `bval` is the raw reading halved in software; the
 // BATT_EMPTY_BVAL/BATT_FULL_BVAL thresholds correspond to the empty/full pack
 // voltages through the on-board resistor divider (tune against a multimeter if
 // the divider changes).
 //
-// The empty point is calibrated at bval ~= 2685 from a field-measured flat
-// pack. The linear region [BATT_EMPTY_BVAL, BATT_FULL_BVAL] maps onto the
+// H9: empty point recalibrated. The old empty reference (~2320/2350) sat below
+// the pack's real cutoff, so a dead pack still read ~raw 60 -- which the host
+// (floor(raw/256*100)) showed as ~23% instead of empty. Field-measuring a flat
+// pack put the true empty at bval ~= 2685, so empty is moved there and the
+// linear region [BATT_EMPTY_BVAL, BATT_FULL_BVAL] is remapped onto the same
 // [5, 253] output byte (raw 5 -> host ~0%, raw 253 -> host ~99%). 5 stays the
 // floor because getBatteryColorRGB() does `batteryLevel - 5` and would
 // underflow below it.
-uint8_t calculateBatteryLevel() {
+uint8_t calculateLegacyBatteryLevelFromRaw(int rawAnalogValue) {
   const int BATT_EMPTY_BVAL = 2685;
   const int BATT_FULL_BVAL  = 3700;
-  int bval = analogRead(BATT_VOLTAGE_PIN) / 2;
+  int bval = rawAnalogValue / 2;
   if (bval > BATT_FULL_BVAL)       return 253;
   else if (bval < BATT_EMPTY_BVAL) return 5;
   else return (uint8_t)(5 + ((uint32_t)(bval - BATT_EMPTY_BVAL) * 248) /
                             (BATT_FULL_BVAL - BATT_EMPTY_BVAL));
+}
+
+uint8_t calculateV10BatteryLevelFromRaw(int rawAnalogValue) {
+  // Measured board-v10 divider calibration, ADC counts -> pack millivolts:
+  //   2000=5.0V, 2200=5.5V, 2390=6.0V, 2770=6.9V,
+  //   3200=8.0V, 3390=8.5V.
+  static const uint16_t adcPoints[] = { 2000, 2200, 2390, 2770, 3200, 3390 };
+  static const uint16_t millivoltPoints[] = { 5000, 5500, 6000, 6900, 8000, 8500 };
+  const uint8_t pointCount = sizeof(adcPoints) / sizeof(adcPoints[0]);
+
+  if (rawAnalogValue <= adcPoints[0]) return 5;
+  if (rawAnalogValue >= adcPoints[pointCount - 1]) return 253;
+
+  uint16_t packMillivolts = millivoltPoints[0];
+  for (uint8_t i = 1; i < pointCount; i++) {
+    if (rawAnalogValue <= adcPoints[i]) {
+      uint16_t adcOffset = (uint16_t)(rawAnalogValue - adcPoints[i - 1]);
+      uint16_t adcSpan = adcPoints[i] - adcPoints[i - 1];
+      uint16_t millivoltSpan = millivoltPoints[i] - millivoltPoints[i - 1];
+      packMillivolts = millivoltPoints[i - 1] +
+          ((uint32_t)adcOffset * millivoltSpan) / adcSpan;
+      break;
+    }
+  }
+
+  return (uint8_t)(5 + ((uint32_t)(packMillivolts - 5000) * 248U) / 3500U);
+}
+
+uint8_t calculateBatteryLevelFromRaw(int rawAnalogValue) {
+  if (boardVersion >= 10) {
+    return calculateV10BatteryLevelFromRaw(rawAnalogValue);
+  }
+  return calculateLegacyBatteryLevelFromRaw(rawAnalogValue);
+}
+
+uint8_t calculateBatteryLevel() {
+  return calculateBatteryLevelFromRaw(analogRead(BATT_VOLTAGE_PIN));
 }
 
 void getBatteryColorRGB(uint8_t batteryLevel, uint8_t *r, uint8_t *g, uint8_t *b) {
@@ -713,7 +806,7 @@ rf24_datarate_e otaWireRate(uint8_t b) {
 // Incremental zlib/IEEE CRC-32 (reflected, poly 0xEDB88320). `crc` is the
 // running INTERNAL state (NOT yet final-inverted); seed with 0xFFFFFFFF and
 // XOR the result with 0xFFFFFFFF once at the end to get the value that
-// matches Python's binascii.crc32. Bitwise (no table) keeps flash
+// matches Python's binascii.crc32 (H1). Bitwise (no table) keeps flash
 // small; at OTA's stop-and-wait cadence the RF round-trip dominates, so the
 // per-byte cost here is negligible.
 uint32_t otaCrc32Update(uint32_t crc, const uint8_t* data, size_t len) {
@@ -744,7 +837,8 @@ void buildOtaStatus(ReceiverOtaStatusMessage* msg) {
   msg->lastChunk     = otaLastChunk;
   msg->bytesReceived = otaBytesReceived;
   msg->errorCode     = otaError;
-  msg->nodeID        = NODE_ID;
+  msg->nodeID        = (uint8_t)(NODE_ID & 0xFF);
+  msg->nodeIDHigh    = (uint8_t)(NODE_ID >> 8);
 }
 
 // Refresh the ACK payload while we're in flash mode. Mirrors the normal
@@ -833,7 +927,7 @@ void handleOtaBegin(OtaBeginMessage* msg) {
   otaPendingDataRate = msg->dataRate;
   otaLastChunk     = 0xFFFF;
   otaBytesReceived = 0;
-  otaCrc32Running  = 0xFFFFFFFF;   // reset running end-to-end CRC
+  otaCrc32Running  = 0xFFFFFFFF;   // reset running end-to-end CRC (H1)
   otaError         = OTA_ERR_NONE;
 
   if (!Update.begin(otaTotalSize)) {
@@ -847,7 +941,7 @@ void handleOtaBegin(OtaBeginMessage* msg) {
   // We don't have an MD5 to hand to Update.setMD5, so end-to-end
   // integrity is enforced by the software CRC32 we accumulate over every
   // written chunk (otaCrc32Running) and compare against otaCrc32Expected
-  // in handleOtaEnd before committing the image.
+  // in handleOtaEnd before committing the image (H1).
   otaState = OTA_STATE_PREP_OK;
   otaLastActivityMs = (uint64_t)millis();
   OTA_LOG(F("[OTA] BEGIN ok size="));
@@ -875,7 +969,7 @@ void handleOtaData(OtaDataMessage* hdr, uint8_t* data, uint8_t dataLen) {
 
   uint16_t expectedIdx = (otaLastChunk == 0xFFFF) ? 0 : (uint16_t)(otaLastChunk + 1);
   if (hdr->chunkIdx != expectedIdx) {
-    // Be tolerant of reordering. The ACK payload
+    // H3: be tolerant of reordering instead of brittle. The ACK payload
     // (refreshed by the caller after this returns) always carries
     // otaLastChunk + otaBytesReceived, so the host can rewind to
     // otaLastChunk+1 and resume -- we never need to scrap the whole
@@ -926,7 +1020,7 @@ void handleOtaData(OtaDataMessage* hdr, uint8_t* data, uint8_t dataLen) {
     return;
   }
 
-  // Fold the just-written bytes into the running end-to-end CRC32.
+  // Fold the just-written bytes into the running end-to-end CRC32 (H1).
   // Done AFTER a successful Update.write so the CRC reflects exactly what
   // landed in flash.
   otaCrc32Running = otaCrc32Update(otaCrc32Running, data, dataLen);
@@ -966,7 +1060,7 @@ void handleOtaEnd() {
     otaTeardown(OTA_ERR_END_FAILED);
     return;
   }
-  // End-to-end CRC32 check BEFORE committing the image. Finalize the
+  // End-to-end CRC32 check BEFORE committing the image (H1). Finalize the
   // running internal CRC (XOR with 0xFFFFFFFF) and compare to the value
   // the host computed over the source .bin. A mismatch means the image is
   // corrupt despite arriving in order with the right byte count -- refuse
@@ -1003,16 +1097,17 @@ void handleOtaAbort() {
   otaTeardown(OTA_ERR_HOST_ABORT);
 }
 
-// Boot self-test / rollback confirmation. When the bootloader is built
+// H2.2: boot self-test / rollback confirmation. When the bootloader is built
 // with CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE, a freshly-flashed OTA image
 // boots in ESP_OTA_IMG_PENDING_VERIFY. If the app never marks itself valid,
 // the bootloader rolls back to the previous (known-good) app on the next
 // reset -- so a bricked OTA image (panic/WDT during boot) self-heals.
 //
 // We only call this AFTER setup() has proven the unit is healthy: radio
-// hardware responded and a valid NVS identity is present. If the image crashes
-// before reaching this point, it is never marked valid and the bootloader
-// reverts.
+// hardware responded and a valid NVS identity is present. That is precisely
+// the "boot self-test passed" signal the review (H2.2) asks for. If the new
+// image crashes before reaching this point, it is never marked valid and the
+// bootloader reverts.
 //
 // On cores built WITHOUT rollback the running partition is simply never in
 // PENDING_VERIFY, so this is a harmless no-op.
@@ -1134,7 +1229,7 @@ void updateOtaStatusLEDs() {
 void buildStatus(ReceiverStatusMessage* msg) {
   uint8_t bval = calculateBatteryLevel();
   msg->type = RECEIVER_STATUS;
-  msg->nodeID = NODE_ID;
+  msg->nodeID = (uint8_t)(NODE_ID & 0xFF);
   msg->batteryLevel = bval;
 
   uint16_t s = currentShowId & 0x3FFF;
@@ -1155,6 +1250,7 @@ void buildStatus(ReceiverStatusMessage* msg) {
     uint8_t boardIdx = i + 8;
     if (boardIdx < NUM_BOARDS) msg->cont64_1 |= ((uint64_t)shiftInput[boardIdx]) << (i * 8);
   }
+  msg->nodeIDHigh = (uint8_t)(NODE_ID >> 8);
 }
 
 // Refresh the ACK-payload FIFO so the next incoming command's auto-ACK carries
@@ -1168,7 +1264,7 @@ void buildStatus(ReceiverStatusMessage* msg) {
 // flush_tx() on the receiver side affects only outgoing payloads (the
 // auto-ACK queue) and is safe to call any time we own the radio.
 void refreshAckPayload() {
-  // While a CONFIG_RESPONSE is sitting in the ACK FIFO waiting
+  // FW v22: while a CONFIG_RESPONSE is sitting in the ACK FIFO waiting
   // to ride out on the dongle's follow-up command, leave it alone.
   // Overwriting with RECEIVER_STATUS here would cause the response to
   // be silently dropped (the dongle would just see a stale status and
@@ -1185,7 +1281,7 @@ void refreshAckPayload() {
   lastAckPayloadRefresh = millis();
 }
 
-// Build the receiver-side configuration snapshot. cuesAvailable
+// FW v22: build the receiver-side configuration snapshot. cuesAvailable
 // is the *physically usable* cue count -- 0 when no boards detected,
 // otherwise NUM_BOARDS * 8. numBoards mirrors that: when no boards are
 // detected we report 0 even though setBoardCount() clamps the runtime
@@ -1194,17 +1290,17 @@ void refreshAckPayload() {
 void buildConfigResponse(ReceiverConfigResponseMessage* msg) {
   memset(msg, 0, sizeof(*msg));
   msg->type             = RECEIVER_CONFIG_RESPONSE;
-  msg->nodeID           = NODE_ID;
+  msg->nodeID           = (uint8_t)(NODE_ID & 0xFF);
   msg->fwVersion        = FW_VERSION;
-  msg->boardVersion     = BOARD_VERISON;
+  msg->boardVersion     = boardVersion;
   msg->numBoards        = noBoardsDetected ? 0 : (uint8_t)NUM_BOARDS;
   msg->noBoardsDetected = noBoardsDetected ? 1 : 0;
   msg->cuesAvailable    = noBoardsDetected ? 0 : (uint8_t)(NUM_BOARDS * 8);
   msg->fireDurationMs   = fireDurationMs;
-  // reserved[8] already zeroed by memset above.
+  msg->reserved[0]      = (uint8_t)(NODE_ID >> 8);
 }
 
-// Load the CONFIG_RESPONSE into the ACK TX FIFO so the dongle's
+// FW v22: load the CONFIG_RESPONSE into the ACK TX FIFO so the dongle's
 // next inbound command (it deliberately queues a CLOCK_SYNC right after
 // the query) carries the response in its auto-ACK. Sets
 // configResponsePending so refreshAckPayload() / the periodic 250ms
@@ -1218,7 +1314,7 @@ void loadConfigResponseIntoAck() {
   lastAckPayloadRefresh = millis();
 }
 
-// Handle an incoming RECEIVER_CONFIG_QUERY. flags == 0 is a
+// FW v22: handle an incoming RECEIVER_CONFIG_QUERY. flags == 0 is a
 // pure fetch -- we apply nothing and only emit the response. Each set
 // bit in flags requests a corresponding write; today the only knob is
 // SET_FIRE_DURATION. saveFireDurationToNVS() clamps to
@@ -1287,32 +1383,60 @@ void notePollContact(uint64_t nowMs) {
 // Identity (NODE_ID + RECEIVER_IDENT) NVS helpers + serial provisioning.
 // ---------------------------------------------------------------------------
 //
-// Identity lives in the NVS partition through the Arduino Preferences
-// wrapper, so one binary serves all units and USB serial handles commissioning.
+// Pre-v14, NODE_ID and RECEIVER_IDENT were #define / const baked into the
+// firmware -- so every receiver in the fleet needed its own custom build.
+// v14 moves identity into the NVS partition (flash-backed key/value store
+// via the Arduino Preferences wrapper) so one binary serves all units;
+// commissioning is done after-the-fact over USB serial (receiver v14).
+
+void loadBoardVersionFromNVS() {
+  identityPrefs.begin(IDENTITY_NS, true);  // read-only
+  boardVersion = identityPrefs.getUChar(CONFIG_KEY_BOARD_VERSION, DEFAULT_BOARD_VERSION);
+  identityPrefs.end();
+  if (boardVersion == 0) boardVersion = DEFAULT_BOARD_VERSION;
+}
+
+bool saveBoardVersionToNVS(uint8_t newBoardVersion) {
+  if (newBoardVersion == 0) return false;
+  identityPrefs.begin(IDENTITY_NS, false);  // read/write
+  size_t wrote = identityPrefs.putUChar(CONFIG_KEY_BOARD_VERSION, newBoardVersion);
+  identityPrefs.end();
+  if (wrote == 0) return false;
+  boardVersion = newBoardVersion;
+  return true;
+}
 
 void loadIdentityFromNVS() {
   identityPrefs.begin(IDENTITY_NS, true);  // read-only
-  NODE_ID = identityPrefs.getUChar(IDENTITY_KEY_ID, 0);
+  NODE_ID = identityPrefs.getUShort(IDENTITY_KEY_ID16, 0);
+  if (NODE_ID == 0) {
+    NODE_ID = identityPrefs.getUChar(IDENTITY_KEY_ID, 0);
+  }
   size_t got = identityPrefs.getString(IDENTITY_KEY_IDENT, RECEIVER_IDENT, sizeof(RECEIVER_IDENT));
   if (got == 0) {
-    strncpy(RECEIVER_IDENT, "O???", sizeof(RECEIVER_IDENT));
+    strncpy(RECEIVER_IDENT, "RX???", sizeof(RECEIVER_IDENT));
   }
   RECEIVER_IDENT[sizeof(RECEIVER_IDENT) - 1] = '\0';
   identityPrefs.end();
   isProvisioned = (NODE_ID != 0);
 }
 
-bool saveIdentityToNVS(uint8_t newId, const char* newIdent) {
+bool saveIdentityToNVS(uint16_t newId, const char* newIdent) {
   if (newId == 0) return false;
   if (newIdent == nullptr) return false;
   size_t identLen = strnlen(newIdent, sizeof(RECEIVER_IDENT));
   if (identLen == 0 || identLen >= sizeof(RECEIVER_IDENT)) return false;
 
   identityPrefs.begin(IDENTITY_NS, false);  // read/write
-  identityPrefs.putUChar(IDENTITY_KEY_ID, newId);
-  identityPrefs.putString(IDENTITY_KEY_IDENT, newIdent);
+  size_t wroteId = identityPrefs.putUShort(IDENTITY_KEY_ID16, newId);
+  if (newId <= 255) {
+    identityPrefs.putUChar(IDENTITY_KEY_ID, (uint8_t)newId);
+  } else {
+    identityPrefs.remove(IDENTITY_KEY_ID);
+  }
+  size_t wroteIdent = identityPrefs.putString(IDENTITY_KEY_IDENT, newIdent);
   identityPrefs.end();
-  return true;
+  return wroteId != 0 && wroteIdent != 0;
 }
 
 void wipeIdentityFromNVS() {
@@ -1321,11 +1445,12 @@ void wipeIdentityFromNVS() {
   identityPrefs.end();
 }
 
-// Persisted runtime config lives in the same IDENTITY_NS so
+// FW v22: persisted runtime config. Lives in the same IDENTITY_NS so
 // `flash_omni.py` and the WIPEID serial helper continue to work
 // without surgery -- WIPEID intentionally clears these too, matching
-// the "factory reset" semantics for a unit. Defaults are applied in
-// setup() when the key is missing.
+// the existing "factory reset" semantics for a unit. Defaults are
+// applied (in setup()) when the key is missing, so legacy units that
+// have never been configured behave exactly like the old #define.
 
 void loadFireDurationFromNVS() {
   identityPrefs.begin(IDENTITY_NS, true);  // read-only
@@ -1373,18 +1498,44 @@ bool readSerialLine(char* out, size_t outCap) {
   return false;
 }
 
-// Process one serial line if available. Always safe to call from the main
-// loop; it's the host-side hook for `devices/utils/flash_omni.py`.
-void serviceSerialProvisioning() {
-  char line[64];
-  if (!readSerialLine(line, sizeof(line))) return;
-
+// Handle one provisioning command line. Returns true if the line was a
+// provisioning command (whether or not it succeeded). Dongle mode routes
+// USB serial lines through here first so the same commissioning commands
+// work regardless of role.
+bool handleProvisioningLine(const char* line) {
   if (strncmp(line, "GETID", 5) == 0) {
     Serial.print(F("NODE_ID="));
     Serial.print(NODE_ID);
     Serial.print(F(" IDENT="));
-    Serial.println(RECEIVER_IDENT);
-    return;
+    Serial.print(RECEIVER_IDENT);
+    Serial.print(F(" BOARD_VERSION="));
+    Serial.println(boardVersion);
+    return true;
+  }
+
+  if (strncmp(line, "GETBOARD", 8) == 0) {
+    Serial.print(F("BOARD_VERSION="));
+    Serial.println(boardVersion);
+    return true;
+  }
+
+  if (strncmp(line, "SETBOARD ", 9) == 0) {
+    int newBoardVersion = -1;
+    int n = sscanf(line + 9, "%d", &newBoardVersion);
+    if (n != 1 || newBoardVersion < 1 || newBoardVersion > 255) {
+      Serial.println(F("ERR SETBOARD -- usage: SETBOARD <1-255>"));
+      return true;
+    }
+    if (!saveBoardVersionToNVS((uint8_t)newBoardVersion)) {
+      Serial.println(F("ERR SETBOARD -- save failed"));
+      return true;
+    }
+    Serial.print(F("OK SETBOARD BOARD_VERSION="));
+    Serial.print(newBoardVersion);
+    Serial.println(F(" -- restarting"));
+    delay(100);
+    ESP.restart();
+    return true;
   }
 
   if (strncmp(line, "WIPEID", 6) == 0) {
@@ -1392,30 +1543,48 @@ void serviceSerialProvisioning() {
     Serial.println(F("OK WIPEID -- restarting"));
     delay(100);
     ESP.restart();
-    return;
+    return true;
   }
 
   if (strncmp(line, "SETID ", 6) == 0) {
-    // Format: "SETID <node_id> <ident>"
+    // Format: "SETID <node_id> <ident> [board_version]"
     int newId = -1;
+    int newBoardVersion = -1;
     char newIdent[sizeof(RECEIVER_IDENT)] = {0};
-    int n = sscanf(line + 6, "%d %15s", &newId, newIdent);
-    if (n != 2 || newId < 1 || newId > 254) {
-      Serial.println(F("ERR SETID -- usage: SETID <1-254> <ident>"));
-      return;
+    int n = sscanf(line + 6, "%d %15s %d", &newId, newIdent, &newBoardVersion);
+    if ((n != 2 && n != 3) || newId < 1 || newId > 65535 ||
+        (n == 3 && (newBoardVersion < 1 || newBoardVersion > 255))) {
+      Serial.println(F("ERR SETID -- usage: SETID <1-65535> <ident> [board_version 1-255]"));
+      return true;
     }
-    if (!saveIdentityToNVS((uint8_t)newId, newIdent)) {
+    if (n == 3 && !saveBoardVersionToNVS((uint8_t)newBoardVersion)) {
+      Serial.println(F("ERR SETID -- board version save failed"));
+      return true;
+    }
+    if (!saveIdentityToNVS((uint16_t)newId, newIdent)) {
       Serial.println(F("ERR SETID -- save failed"));
-      return;
+      return true;
     }
     Serial.print(F("OK SETID NODE_ID="));
     Serial.print(newId);
     Serial.print(F(" IDENT="));
     Serial.print(newIdent);
+    Serial.print(F(" BOARD_VERSION="));
+    Serial.print(boardVersion);
     Serial.println(F(" -- restarting"));
     delay(100);
     ESP.restart();
+    return true;
   }
+  return false;
+}
+
+// Process one serial line if available. Always safe to call from the main
+// loop; it's the host-side hook for `devices/utils/flash_omni.py`.
+void serviceSerialProvisioning() {
+  char line[64];
+  if (!readSerialLine(line, sizeof(line))) return;
+  handleProvisioningLine(line);
 }
 
 // Visual cue for the operator that this unit hasn't been provisioned yet.
@@ -1529,9 +1698,10 @@ void testLEDStrip_pulsingGreen() {
 // Fixed palette mapping decimal digits 0..9 -> a vivid NeoPixel color.
 // Ordering chosen so that consecutive digits are maximally distinct
 // (red->blue->yellow->green->purple->cyan->orange->white->pink->lime),
-// which helps when reading FW_VERSION from the 3 status LEDs. Stored in
-// {R, G, B} order; converted to a packed 32-bit color at use time so
-// STATUS_LED_COUNT can change without touching this table.
+// which is what matters when reading FW_VERSION off the 3 status LEDs
+// (see v16 history note). Stored in {R, G, B} order; converted to a
+// packed 32-bit color at use time so STATUS_LED_COUNT can change without
+// touching this table.
 static const uint8_t FW_DIGIT_COLORS[10][3] = {
   {255,   0,   0},  // 0 red
   {  0,   0, 255},  // 1 blue
@@ -1549,7 +1719,7 @@ static const uint8_t FW_DIGIT_COLORS[10][3] = {
 // (LED 0 = hundreds, LED 1 = tens, LED 2 = ones) with a slow breath in
 // and out. Each digit is colored from FW_DIGIT_COLORS so consecutive
 // values are easy to tell apart at a glance. Used by the boot sequence
-// to flash both FW_VERSION and NODE_ID.
+// to flash both FW_VERSION and NODE_ID; see v16 history note.
 void breatheStatusDigits(uint16_t value) {
   uint16_t v = value % 1000;
   uint8_t digits[STATUS_LED_COUNT];
@@ -1618,11 +1788,35 @@ void statusLEDStartupSequence() {
 
   delay(1500);
 
-  // 3rd flash: NODE_ID as 3 decimal digits in the same digit-color palette.
-  // Unprovisioned units (NODE_ID==0) display all-red(0). The full
+  if (omniRole != OMNI_ROLE_RECEIVER) {
+    // 3rd flash in dongle roles: all yellow. NODE_ID is meaningless here.
+    breatheStatusSolid(255, 200, 0);
+    return;
+  }
+
+  // 3rd flash: the lowest 3 decimal digits of NODE_ID in the same digit-color
+  // palette. Unprovisioned units (NODE_ID==0) display all-red(0). The full
   // unprovisioned magenta-breathe pattern still kicks in afterwards from
   // the main loop, so this is just a heads-up, not the only signal.
   breatheStatusDigits((uint16_t)NODE_ID);
+}
+
+// Same breath curve as breatheStatusDigits, one color on every status LED.
+void breatheStatusSolid(uint8_t r, uint8_t g, uint8_t b) {
+  const int breathSteps = 50;
+  const int breathDelay = 15;
+  for (int pass = 0; pass < 2; pass++) {
+    for (int k = 0; k <= breathSteps; k++) {
+      int j = (pass == 0) ? k : (breathSteps - k);
+      uint16_t bb = (j * 255) / breathSteps;
+      uint32_t c = statusStrip.Color((r * bb) / 255, (g * bb) / 255, (b * bb) / 255);
+      for (int i = 0; i < STATUS_LED_COUNT; i++) statusStrip.setPixelColor(i, c);
+      statusStrip.show();
+      delay(breathDelay);
+    }
+  }
+  statusStrip.clear();
+  statusStrip.show();
 }
 
 void updateStatusLEDs() {
@@ -1698,17 +1892,22 @@ void updateStatusLEDs() {
   statusStrip.show();
 }
 
-void setBoardCount() {
-  int targetY = analogRead(BOARD_CT_PIN);
-
-  if (targetY <= 500) {
-    omniMode = OMNI_MODE_HOST;
-  } else if (targetY >= 4000) {
-    omniMode = OMNI_MODE_DMX_RECEIVER;
-  } else {
-    omniMode = OMNI_MODE_CUE_RECEIVER;
+// Averaged so a single noisy sample can't flip the boot role.
+int readBoardCountRaw() {
+  const int SAMPLES = 8;
+  int32_t sum = 0;
+  for (int i = 0; i < SAMPLES; i++) {
+    sum += analogRead(BOARD_CT_PIN);
+    delay(2);
   }
+  return (int)(sum / SAMPLES);
+}
 
+bool boardCountIndicatesDongleModule(int raw) {
+  return raw >= DONGLE_SENSE_ADC_MIN;
+}
+
+void setBoardCount(int targetY) {
   if      (targetY < 1100) NUM_BOARDS = 1;
   else if (targetY < 1900) NUM_BOARDS = 2;
   else if (targetY < 2500) NUM_BOARDS = 3;
@@ -1762,7 +1961,7 @@ void writeOutputShiftRegister(uint8_t targets[], size_t numTargets) {
     shiftData[boardIndex] |= (1 << position);
   }
 
-  if (BOARD_VERISON >= 8) digitalWrite(SHIFT_OUT_OE, HIGH);
+  if (boardVersion >= 8) digitalWrite(SHIFT_OUT_OE, HIGH);
   else                    digitalWrite(SHIFT_OUT_OE, LOW);
   digitalWrite(SHIFT_OUT_LATCH, LOW);
   for (int i = NUM_BOARDS - 1; i >= 0; i--) {
@@ -1849,8 +2048,12 @@ void handleInputMode() {
 }
 
 void setup() {
+  // Board version changes pin mappings and output-enable polarity, so it must
+  // be loaded before any hardware is initialized.
+  loadBoardVersionFromNVS();
+
   pinMode(SHIFT_OUT_OE, OUTPUT);
-  if (BOARD_VERISON >= 8) digitalWrite(SHIFT_OUT_OE, LOW);
+  if (boardVersion >= 8) digitalWrite(SHIFT_OUT_OE, LOW);
   else                    digitalWrite(SHIFT_OUT_OE, HIGH);
 
   pinMode(SHIFT_OUT_CLOCK, OUTPUT);
@@ -1861,9 +2064,12 @@ void setup() {
   for (int i = 7; i >= 0; i--) myShiftOut(SHIFT_OUT_DATA, SHIFT_OUT_CLOCK, MSBFIRST, 0);
   digitalWrite(SHIFT_OUT_LATCH, HIGH);
 
-  if (BOARD_VERISON >= 8) digitalWrite(SHIFT_OUT_OE, HIGH);
+  if (boardVersion >= 8) digitalWrite(SHIFT_OUT_OE, HIGH);
   else                    digitalWrite(SHIFT_OUT_OE, LOW);
 
+  // Dongle mode pipelines OTA `flash_data` lines over USB; the default 256B
+  // CDC RX buffer drops bytes between loop iterations. Must precede begin().
+  Serial.setRxBufferSize(2048);
   // Same TX-timeout reasoning as the dongle: prevent any Serial.print
   // (incl. OTA_LOGLN inside the OTA hot path) from blocking the main
   // loop indefinitely when the host isn't draining USB CDC. 50ms is
@@ -1875,21 +2081,38 @@ void setup() {
   delay(100);
 
 
-  // Pin the ADC to 13-bit so calculateBatteryLevel / setBoardCount thresholds
-  // use their expected raw ranges.
+  // H7: pin the ADC to 13-bit so calculateBatteryLevel / setBoardCount
+  // thresholds (raw up to ~7400 / ~5000) aren't silently broken by a core
+  // default of 12-bit (which caps raw at 4095 -> battery always reads min).
   analogReadResolution(13);
 
   loadIdentityFromNVS();
   loadFireDurationFromNVS();
 
-  setBoardCount();
-
   pinMode(SHIFT_IN_CLOCK, OUTPUT);
   pinMode(SHIFT_IN_LATCH, OUTPUT);
   pinMode(SHIFT_IN_DATA, INPUT);
 
-  Serial.print(F("Board Version: ")); Serial.println(BOARD_VERISON);
+  int boardCountRaw = readBoardCountRaw();
+  uint8_t hostInputs = 0;
+  if (boardCountIndicatesDongleModule(boardCountRaw)) {
+    hostInputs = omni_dongle::readHostInputs();
+    omniRole = (hostInputs & (1 << HOST_IN_HUB_INDEX)) ? OMNI_ROLE_HUB_DONGLE
+                                                       : OMNI_ROLE_DONGLE;
+  } else {
+    setBoardCount(boardCountRaw);
+  }
+
+  Serial.print(F("Board Version: ")); Serial.println(boardVersion);
   Serial.print(F("FW Version: "));    Serial.println(FW_VERSION);
+  Serial.print(F("Board-count ADC: ")); Serial.println(boardCountRaw);
+  if (omniRole != OMNI_ROLE_RECEIVER) {
+    Serial.print(F("Host inputs: 0b")); Serial.println(hostInputs, BIN);
+  }
+  Serial.print(F("Role: "));
+  if (omniRole == OMNI_ROLE_HUB_DONGLE)  Serial.println(F("hub dongle"));
+  else if (omniRole == OMNI_ROLE_DONGLE) Serial.println(F("dongle"));
+  else                                   Serial.println(F("receiver"));
   Serial.print(F("Ident: "));         Serial.println(RECEIVER_IDENT);
   Serial.print(F("NODE_ID: "));       Serial.println(NODE_ID);
   Serial.print(F("Fire duration: ")); Serial.print(fireDurationMs); Serial.println(F(" ms"));
@@ -1899,6 +2122,26 @@ void setup() {
   statusStrip.clear();
   statusStrip.show();
   statusLEDStartupSequence();
+
+  if (omniRole != OMNI_ROLE_RECEIVER) {
+    OmniDongleConfig cfg;
+    cfg.boardVersion       = boardVersion;
+    cfg.fwVersion          = FW_VERSION;
+    cfg.ident              = RECEIVER_IDENT;
+    cfg.hubMode            = (omniRole == OMNI_ROLE_HUB_DONGLE);
+    cfg.statusStrip        = &statusStrip;
+    cfg.statusLedCount     = STATUS_LED_COUNT;
+    cfg.hostPixelCount     = HOST_STATUS_PIXEL_COUNT;
+    cfg.armInputIndex      = HOST_IN_ARM_INDEX;
+    cfg.startInputIndex    = HOST_IN_START_INDEX;
+    cfg.manualInputIndex   = HOST_IN_MANUAL_INDEX;
+    cfg.rf433OutputIndex   = HOST_OUT_RF433_INDEX;
+    cfg.provisioningHook   = handleProvisioningLine;
+    omni_dongle::setup(cfg);
+    // The dongle only returns from setup() once its radio is up.
+    otaMarkAppValidIfPending();
+    return;
+  }
 
   strip.begin();
   strip.clear();
@@ -1916,15 +2159,22 @@ void setup() {
     return;
   }
 
-  if (BOARD_VERISON < 6) SPI.begin(36, 37, 35);
-  else                   SPI.begin(35, 33, 34);
+  if (boardVersion < 6) SPI.begin(36, 37, 35);
+  else                  SPI.begin(35, 33, 34);
 
-  while (!radio.begin()) {
+  bool radioStarted = false;
+  while (!radioStarted) {
+    if (boardVersion < 6) {
+      radioStarted = radio.begin(&SPI, RF24_CE_PIN_PRE_V6, RF24_CSN_PIN_PRE_V6);
+    } else {
+      radioStarted = radio.begin(&SPI, RF24_CE_PIN_V6_PLUS, RF24_CSN_PIN_V6_PLUS);
+    }
+    if (radioStarted) break;
     Serial.println(F("ERROR: Radio not responding!"));
     delay(5000);
   }
   radio.setDataRate(RF24_250KBPS);
-  if (BOARD_VERISON < 6) radio.setPALevel(RF24_PA_HIGH);
+  if (boardVersion < 6) radio.setPALevel(RF24_PA_HIGH);
   else                   radio.setPALevel(RF24_PA_MAX);
   radio.setChannel(rfChannel);
   radio.setRetries(15, 5);
@@ -1962,7 +2212,7 @@ void setup() {
   // ACK back with current status.
   refreshAckPayload();
 
-  // Radio hardware and NVS identity are healthy, so confirm
+  // H2.2: we've proven radio hardware + NVS identity are healthy, so confirm
   // this OTA image as valid (cancels a pending bootloader rollback). If the
   // image had crashed before reaching here, the bootloader would have rolled
   // back to the previous app instead.
@@ -1970,6 +2220,11 @@ void setup() {
 }
 
 void loop() {
+  if (omniRole != OMNI_ROLE_RECEIVER) {
+    omni_dongle::loop();
+    return;
+  }
+
   // Serial provisioning is always live -- this is the only way to recover
   // a unit whose NODE_ID got wiped, and the only way to re-ID a unit in
   // the field without re-flashing.
@@ -1984,8 +2239,9 @@ void loop() {
   // While we're in OTA flash mode, run a tight inner loop dedicated to
   // ingesting OTA frames + repainting the OTA status LEDs. Skip the
   // normal show / poll-gap / disconnect machinery -- if a show was
-  // running it stays running on its loaded schedule, and the operator
-  // already gated this off "no show loaded" on the host side anyway.
+  // running it stays running on its loaded schedule (see runPlayLoop
+  // notes in v12), and the operator already gated this off "no show
+  // loaded" on the host side anyway.
   if (otaIsActive()) {
     serviceOtaLoopIteration();
     return;
@@ -2078,14 +2334,14 @@ void loop() {
         break;
     }
 
-    // Any non-config inbound command means the dongle has
+    // FW v22: any non-config inbound command means the dongle has
     // already pulled the previously-loaded CONFIG_RESPONSE off the
     // wire (it rode out in *this* command's auto-ACK). Clear the flag
     // so refreshAckPayload() below can resume normal status piggyback.
     if (mType != RECEIVER_CONFIG_QUERY) configResponsePending = false;
 
     // Refresh the ACK payload immediately so the next command's auto-ACK
-    // carries fresh status.
+    // carries fresh status. This replaces the old sendStatus() TX pattern.
     refreshAckPayload();
 
     // Trigger non-blocking decorative animations on certain commands.

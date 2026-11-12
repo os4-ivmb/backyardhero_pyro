@@ -25,6 +25,7 @@ import {
   showConfigOf,
 } from "@/util/showConfig";
 import ShowHealthStrip from "./ShowHealthStrip";
+import { setStepPressHandler, useStepButtonBound } from "@/util/stepHardwareButton";
 
 // ---------------------------------------------------------------------------
 // Console for manual-sequence shows. There is no load / countdown: each step
@@ -134,6 +135,7 @@ export default function ManualSequenceConsole() {
     return groupItemsIntoSteps(r.steps, r.items);
   }, [config.steps, stagedShow?.items]);
   const fireKey = config.fireKey;
+  const hardwareButton = useStepButtonBound();
 
   // Position survives a page reload mid-show. `steps.length` means "past the
   // last step" (sequence complete).
@@ -190,7 +192,12 @@ export default function ManualSequenceConsole() {
     { id: "arm", ok: isArmed, label: "ARM key on", fix: "Turn the ARM key on the box." },
     { id: "manual", ok: isManualFire, label: "Manual fire key on", fix: "Turn the manual fire key on the box." },
     { id: "start", ok: startSwActive, label: "Show start switch on", fix: "Turn the show start switch on." },
-    { id: "firekey", ok: !!fireKey, label: "Fire key set", fix: "Set a fire key in Editor → Show Details." },
+    {
+      id: "firekey",
+      ok: !!fireKey || hardwareButton != null,
+      label: hardwareButton ? `Input ${hardwareButton} bound` : "Fire key set",
+      fix: "Bind a hardware button on the status strip, or set a fire key in Editor → Show Details.",
+    },
     { id: "steps", ok: steps.length > 0, label: "Steps defined", fix: "Add steps to this show in the Editor." },
   ];
   const blocker = checks.find((c) => !c.ok) || null;
@@ -283,6 +290,13 @@ export default function ManualSequenceConsole() {
 
   const keyStateRef = useRef({});
   keyStateRef.current = { started, jogging, fireKey, fireCurrent, jog };
+  const fireRef = useRef(fireCurrent);
+  fireRef.current = fireCurrent;
+  const startedRef = useRef(started);
+  startedRef.current = started;
+  useEffect(() => setStepPressHandler(() => {
+    if (startedRef.current) fireRef.current();
+  }), []);
   useEffect(() => {
     const onKey = (e) => {
       const s = keyStateRef.current;
@@ -409,8 +423,13 @@ export default function ManualSequenceConsole() {
             <div className="min-w-0">
               <div className="eyebrow text-live animate-livePulse">Fire key live</div>
               <div className="text-lg font-semibold text-live-fg">
-                Press <kbd className="mx-1 rounded border border-live/60 bg-surface-base/60 px-2 py-0.5 font-mono">{fireKey?.label}</kbd>
-                to fire step {index + 1}
+                Press{" "}
+                {fireKey ? (
+                  <kbd className="mx-1 rounded border border-live/60 bg-surface-base/60 px-2 py-0.5 font-mono">{fireKey.label}</kbd>
+                ) : null}
+                {fireKey && hardwareButton ? " or " : null}
+                {hardwareButton ? <span className="font-mono">input {hardwareButton}</span> : null}
+                {" "}to fire step {index + 1}
               </div>
             </div>
           </div>
@@ -434,8 +453,9 @@ export default function ManualSequenceConsole() {
           </div>
         ) : (
           <div className="text-sm text-fg-secondary">
-            Press <span className="font-semibold text-fg-primary">Start</span> to arm the fire key
-            {fireKey ? <> (<span className="font-mono text-fg-primary">{fireKey.label}</span>)</> : null}.
+            Press <span className="font-semibold text-fg-primary">Start</span> to arm step fire
+            {fireKey ? <> (<span className="font-mono text-fg-primary">{fireKey.label}</span>)</> : null}
+            {hardwareButton ? <> (input {hardwareButton})</> : null}.
           </div>
         )}
 

@@ -1,8 +1,11 @@
 import React, { useMemo } from "react";
 import useAppStore from "@/store/useAppStore";
 import useStateAppStore, { serverElapsedMs } from "@/store/useStateAppStore";
-import { Card, Stat, cn } from "@/design";
+import { Button, cn } from "@/design";
 import { isPollableReceiver } from "@/util/receivers";
+import { downloadAppShow } from "@/util/exportAppShow";
+import { isManualSequenceShow } from "@/util/showConfig";
+import HardwareStepButton from "./HardwareStepButton";
 
 // 4-metric pre-flight strip. Calm by default — only goes "loud" when a
 // metric is failing AND that failure is operationally meaningful (e.g.
@@ -124,8 +127,10 @@ export default function ShowHealthStrip({ connectivityOnly = false } = {}) {
   }, [stagedShow, stateData.fw_state?.receivers, systemConfig]);
 
   if (!metrics) return null;
+  const sequence = isManualSequenceShow(stagedShow);
 
   return (
+    <div className="flex flex-col gap-2">
     <div className="flex items-stretch gap-2">
       <div className={cn("flex-1 grid grid-cols-2 gap-2", !connectivityOnly && "md:grid-cols-4")}>
         <Metric label="Receivers connected" {...metrics.receiversConnected} />
@@ -137,6 +142,13 @@ export default function ShowHealthStrip({ connectivityOnly = false } = {}) {
           </>
         ) : null}
       </div>
+      <div className="flex items-center shrink-0">
+        <Button size="xs" variant="outline" onClick={() => downloadAppShow(stagedShow)}>
+          Export to app
+        </Button>
+      </div>
+    </div>
+    {sequence ? <HardwareStepButton /> : null}
     </div>
   );
 }

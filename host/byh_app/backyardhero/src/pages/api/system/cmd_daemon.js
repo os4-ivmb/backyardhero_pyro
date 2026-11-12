@@ -3,6 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { ensureHardware } from '@/util/apiGuards';
 import { COMMAND_DIR } from '@/util/paths';
+import { isHubHost } from '@/util/dongleLink';
 
 // W1: This route used to write req.body verbatim into /tmp/d_cmd, making
 // it an unauthenticated arbitrary-daemon-command proxy. We now enforce a
@@ -60,6 +61,12 @@ const VALIDATORS = {
   select_serial: (b) => {
     if (!isStr(b.device)) return 'select_serial requires string "device"';
     if (b.baud === undefined || isNaN(Number(b.baud))) return 'select_serial requires numeric "baud"';
+    if (b.link !== undefined && b.link !== 'usb' && b.link !== 'wireless') {
+      return 'select_serial "link" must be usb or wireless';
+    }
+    if (b.link === 'wireless' && !isHubHost(b.host)) {
+      return 'select_serial wireless requires a hub IP address or hostname';
+    }
     return null;
   },
 

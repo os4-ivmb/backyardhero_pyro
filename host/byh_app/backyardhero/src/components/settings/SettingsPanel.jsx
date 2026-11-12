@@ -32,9 +32,9 @@ import CloudSyncPanel from "./CloudSyncPanel";
 import VersionFooter from "./VersionFooter";
 
 // Settings page. Top-level tabs:
-//   Dongle    — physical box knobs: LEDs, retransmit count, serial
-//               connection, debug-mode toggle. Anything that controls
-//               the USB transmitter directly.
+//   Dongle    — physical box knobs: LEDs, retransmit count, USB or
+//               wireless-hub connection, debug-mode toggle. Anything
+//               that controls the transmitter directly.
 //   Receivers — runtime config that lives on each receiver (FW v22+ /
 //               dongle FW v16+): broadcast fire_duration_ms, refresh
 //               every receiver's reported config, etc. Per-receiver
@@ -64,7 +64,7 @@ const TABS = [
 ];
 
 const SUBTITLES = {
-  dongle: "Brightness, serial connection, retransmit count, debug mode.",
+  dongle: "Brightness, USB or wireless hub connection, retransmit count, debug mode.",
   receivers: "Fleet-wide receiver runtime knobs (fire pulse width, etc.).",
   network: "WiFi access point + system update.",
   data: "Export or import your Backyard Hero database.",
@@ -223,7 +223,7 @@ function DongleTab() {
 
       <SettingCard
         title="Connection"
-        eyebrow="Serial"
+        eyebrow="USB or hub"
         className="lg:col-span-2"
       >
         <TxConfig />

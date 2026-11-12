@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The hub serves plain HTTP / ws:// on its own AP. Cleartext is allowed
+     only for the hub's address. -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">192.17.76.1</domain>
+    </domain-config>
+</network-security-config>

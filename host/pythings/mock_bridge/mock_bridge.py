@@ -107,11 +107,18 @@ class MockBridge:
                 # Ack the (re)configure exactly like the real bridge's
                 # process_command success path. This is what flips the daemon
                 # to CONNECTED and (re)builds its protocol handler.
+                link = cmd.get("link") if cmd.get("link") in ("usb", "wireless") else "usb"
                 self._send({
                     "tcpstatus": True,
                     "serial_config": {
                         "port": cmd.get("port", "/dev/ttyMOCK0"),
                         "baud": int(cmd.get("baud", 115200)),
+                        "link": link,
+                        # Echo the hub address so the settings UI can show
+                        # the mode it just applied. This stand-in does not
+                        # open a real WebSocket; it keeps emitting the fake
+                        # heartbeat either way.
+                        "host": cmd.get("host") or "192.17.76.1",
                     },
                 })
                 if DEBUG:

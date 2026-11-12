@@ -4,7 +4,9 @@
   "system": {
     "dongle_port": "/dev/tty.usbmodem01",
     "dongle_baud": 115200,
-    "dongle_protocol": "BKYD_TS_HYBRID"
+    "dongle_protocol": "BKYD_TS_HYBRID",
+    "dongle_link": "usb",
+    "dongle_hub_host": "192.17.76.1"
   },
   "protocols": {
     "BKYD_TS_HYBRID": {
