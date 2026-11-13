@@ -24,15 +24,18 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -59,6 +62,9 @@ fun HubSettingsSheet(vm: AppViewModel, onDismiss: () -> Unit) {
     val wifi by vm.session.wifi.collectAsStateWithLifecycle()
     val dongle by vm.session.dongle.collectAsStateWithLifecycle()
     val log by vm.session.log.collectAsStateWithLifecycle()
+    val brightness by vm.session.ledBrightness.collectAsStateWithLifecycle()
+    var brightnessSlider by remember { mutableFloatStateOf(brightness.toFloat()) }
+    var brightnessDragging by remember { mutableStateOf(false) }
 
     var ssid by remember { mutableStateOf("") }
     var pass by remember { mutableStateOf("") }
@@ -66,6 +72,7 @@ fun HubSettingsSheet(vm: AppViewModel, onDismiss: () -> Unit) {
 
     LaunchedEffect(Unit) { vm.session.requestWifiConfig() }
     LaunchedEffect(wifi?.ssid) { if (ssid.isEmpty()) ssid = wifi?.ssid.orEmpty() }
+    LaunchedEffect(brightness) { if (!brightnessDragging) brightnessSlider = brightness.toFloat() }
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = ByhColors.Surface) {
         Column(
@@ -105,6 +112,38 @@ fun HubSettingsSheet(vm: AppViewModel, onDismiss: () -> Unit) {
             OutlinedButton(onClick = { vm.forgetHub(); onDismiss() }) {
                 Text(if (mode == LinkMode.USB) "Disconnect" else "Disconnect / find another hub")
             }
+
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider(color = ByhColors.Outline)
+            Spacer(Modifier.height(16.dp))
+
+            Text("Dongle LEDs", color = ByhColors.Text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                "Front-panel LED brightness. Lowering it helps in dim environments.",
+                color = ByhColors.TextDim, fontSize = 13.sp,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Device LED brightness", color = ByhColors.Text, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                Text("${brightnessSlider.toInt()}%", color = ByhColors.TextDim, fontSize = 14.sp)
+            }
+            Slider(
+                value = brightnessSlider,
+                onValueChange = {
+                    brightnessDragging = true
+                    brightnessSlider = it
+                },
+                onValueChangeFinished = {
+                    brightnessDragging = false
+                    vm.session.setLedBrightness(brightnessSlider.toInt())
+                },
+                valueRange = 0f..100f,
+                steps = 99,
+                modifier = Modifier.fillMaxWidth(),
+            )
 
             Spacer(Modifier.height(16.dp))
             HorizontalDivider(color = ByhColors.Outline)

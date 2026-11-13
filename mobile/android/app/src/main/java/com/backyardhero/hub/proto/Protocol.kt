@@ -69,6 +69,7 @@ object Cmd {
         put("show_run_state", state.showRun)
         put("error_state", state.error)
         put("arm_state", state.arm)
+        put("led_brightness", state.brightness.coerceIn(1, 100))
     }.toString()
 
     const val SHOW_LOADN_MAX_CUES = 6
@@ -104,6 +105,8 @@ data class LedState(
     val showRun: Int = RunLed.OFF,
     val error: Int = 0,
     val arm: Int = 0,
+    /** 1–100; firmware maps this onto the NeoPixel PWM range. */
+    val brightness: Int = 50,
 )
 
 object LoadLed { const val OFF = 0; const val LOADED = 1; const val LOADING = 2; const val LOAD_ERROR = 3 }

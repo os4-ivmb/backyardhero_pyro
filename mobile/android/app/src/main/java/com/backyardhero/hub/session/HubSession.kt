@@ -182,6 +182,12 @@ class HubSession(
     private val _wifi = MutableStateFlow<WifiConfig?>(null)
     val wifi: StateFlow<WifiConfig?> = _wifi.asStateFlow()
 
+    /** Dongle status-pixel brightness, 1–100. Persisted on the phone; applied on each config push. */
+    private val _ledBrightness = MutableStateFlow(
+        prefs.getInt(KEY_LED_BRIGHTNESS, DEFAULT_LED_BRIGHTNESS).coerceIn(1, 100)
+    )
+    val ledBrightness: StateFlow<Int> = _ledBrightness.asStateFlow()
+
     private val _log = MutableStateFlow<List<LogLine>>(emptyList())
     val log: StateFlow<List<LogLine>> = _log.asStateFlow()
 
@@ -1009,6 +1015,18 @@ class HubSession(
     fun setWifi(ssid: String?, pass: String?) { send(Cmd.wifiSet(ssid, pass)) }
     fun resetWifi() { send(Cmd.WIFI_RESET) }
 
+    /** Same 0–100 host slider; 0 is stored/sent as 1, matching the daemon. */
+    fun setLedBrightness(value: Int) {
+        val next = value.coerceIn(1, 100)
+        if (next == _ledBrightness.value) {
+            pushLedState(force = true)
+            return
+        }
+        _ledBrightness.value = next
+        prefs.edit().putInt(KEY_LED_BRIGHTNESS, next).apply()
+        pushLedState(force = true)
+    }
+
     // ------------------------------------------------------------------
     // Dongle status pixels
     // ------------------------------------------------------------------
@@ -1039,6 +1057,7 @@ class HubSession(
             },
             error = if (st.phase == ShowPhase.LOAD_ERROR) 1 else 0,
             arm = if (sw.armed) 1 else 0,
+            brightness = _ledBrightness.value,
         )
         if (!force && led == lastLed) return
         lastLed = led
@@ -1053,6 +1072,8 @@ class HubSession(
         private const val KEY_RECEIVERS = "receivers"
         private const val KEY_BILUSOCN = "bilusocn"
         private const val KEY_STEP_INPUT = "step_input"
+        private const val KEY_LED_BRIGHTNESS = "led_brightness"
+        private const val DEFAULT_LED_BRIGHTNESS = 50
         private const val STEP_INPUT_MIN = 5
         private const val STEP_INPUT_MAX = 8
         private const val STEP_BUTTON_LOCKOUT_MS = 400L

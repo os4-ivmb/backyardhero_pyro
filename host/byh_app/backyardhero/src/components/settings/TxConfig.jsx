@@ -105,6 +105,7 @@ export default function TxConfig() {
           value={wireless ? DONGLE_LINK_WIRELESS : DONGLE_LINK_USB}
           onChange={(link) => draft.set("link", link)}
           options={LINK_OPTIONS}
+          className="w-fit self-start"
         />
       </Field>
 
