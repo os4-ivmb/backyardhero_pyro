@@ -392,6 +392,12 @@ class FireworkDaemon:
         # "currently running v15, uploading v16" before the operator
         # clicks flash.
         self.dongle_fw_version = None
+        # The dongle's board type (0 = os4_dongle, 1 = omni) and PCB
+        # revision from its heartbeat. dongle_board_type_reported is False
+        # when the type was defaulted because the heartbeat lacked `bt`.
+        self.dongle_board_type = None
+        self.dongle_board_type_reported = False
+        self.dongle_board_version = None
         # When set, /data/last_scan.json holds the full per-channel result
         # from the most recent scan_result we've received from the dongle.
         self.rf_scan_pending_since_ms = None
@@ -1797,6 +1803,9 @@ class FireworkDaemon:
             # by the dongle update UI to display "currently running
             # vN" before the operator picks a .bin.
             "dongle_fw_version": self.dongle_fw_version,
+            "dongle_board_type": self.dongle_board_type,
+            "dongle_board_type_reported": self.dongle_board_type_reported,
+            "dongle_board_version": self.dongle_board_version,
             "settings": {
                 "led_brightness": self.led_brightness,
                 "fire_repeat_ct": self.fire_repetition,

@@ -13,7 +13,12 @@ import {
 import useStateAppStore from "@/store/useStateAppStore";
 import useAppStore from "@/store/useAppStore";
 import { Button, Card, Badge, Modal, cn } from "@/design";
-import { fwOutOfDate } from "@/util/firmwareVersion";
+import {
+  fwOutOfDate,
+  firmwareProduct,
+  latestForBoard,
+  PRODUCT_BIN_PREFIX,
+} from "@/util/firmwareVersion";
 
 // FW_VERSION: Dongle firmware update panel
 // v1.0.0: Initial multi-file version (app + boot_app0, optional full reflash).
@@ -91,6 +96,13 @@ export default function DongleFlashPanel() {
 
   const dongleOta = stateData?.fw_state?.dongle_ota || null;
   const dongleFw  = stateData?.fw_state?.dongle_fw_version ?? null;
+  // 0 = os4_dongle, 1 = omni acting as dongle. `reported` is false when the
+  // heartbeat had no `bt` and the daemon assumed 0 -- older omni firmware
+  // (< v35) looks the same, so we warn before flashing os4_dongle onto it.
+  const dongleBoardType = stateData?.fw_state?.dongle_board_type ?? null;
+  const dongleTypeInferred = stateData?.fw_state?.dongle_board_type_reported === false;
+  const dongleProduct = firmwareProduct(dongleBoardType, "dongle");
+  const dongleBin = dongleProduct ? PRODUCT_BIN_PREFIX[dongleProduct] : "os4_dongle";
   const isShowLoaded = !!stateData?.fw_state?.show_loaded;
   const isArmed = !!stateData?.fw_state?.device_is_armed;
   // The receiver-OTA panel and dongle update share the dongle radio,
@@ -136,12 +148,10 @@ export default function DongleFlashPanel() {
     return `${phaseMeta.label.toLowerCase()} (${pct}%)`;
   }, [dongleOta, phase, phaseMeta.label, dongleFw]);
 
-  // Latest published dongle firmware (from the static site). null when
-  // offline / not fetched -- in that case we just don't show the buttons'
-  // version info.
-  const latestDongle = latestFirmware?.dongle?.available
-    ? latestFirmware.dongle
-    : null;
+  // Latest published firmware for this dongle's product (os4_dongle or
+  // byh_omni). null when offline / not fetched / board type unknown -- in
+  // that case we just don't show the buttons' version info.
+  const latestDongle = latestForBoard(latestFirmware, dongleBoardType, "dongle");
   const latestDongleVersion = latestDongle?.version ?? null;
   const outOfDate = fwOutOfDate(dongleFw, latestDongleVersion);
 
@@ -166,7 +176,10 @@ export default function DongleFlashPanel() {
       const { data } = await axios.post("/api/system/flash_latest", {
         device: "dongle",
       });
-      setLatestMsg({ tone: "ok", text: `Flashing dongle v${data.version}…` });
+      setLatestMsg({
+        tone: "ok",
+        text: `Flashing dongle with ${PRODUCT_BIN_PREFIX[data.product] || "firmware"} v${data.version}…`,
+      });
     } catch (e) {
       setLatestMsg({ tone: "danger", text: e?.response?.data?.error || e.message });
     } finally {
@@ -177,7 +190,8 @@ export default function DongleFlashPanel() {
   return (
     <div className="flex flex-col gap-3" data-fw-version={FW_VERSION}>
       <p className="text-xs text-fg-muted leading-snug">
-        Push a freshly-built <code>os4_dongle_v&lt;N&gt;.bin</code> onto the
+        Push a freshly-built <code>os4_dongle_v&lt;N&gt;.bin</code> (or
+        <code> byh_omni_v&lt;N&gt;.bin</code> for an omni dongle) onto the
         physical dongle plugged into this host. The bridge releases the
         USB-CDC port for esptool, writes the new app image at
         <code> 0x10000</code>, and reattaches once the chip reboots — no
@@ -217,7 +231,7 @@ export default function DongleFlashPanel() {
               loading={latestBusy}
               title={
                 blockedReason ||
-                `Download and flash os4_dongle_v${latestDongleVersion}.bin from backyard-hero.com`
+                `Download and flash ${dongleBin}_v${latestDongleVersion}.bin from backyard-hero.com`
               }
             >
               {outOfDate
@@ -243,6 +257,14 @@ export default function DongleFlashPanel() {
               `${dongleFw != null ? ` (running v${dongleFw})` : ""}.`
             : `Up to date${dongleFw != null ? ` (v${dongleFw})` : ""}.`}
           {latestDongle?.stale ? " (cached — couldn't reach the server)" : ""}
+        </p>
+      )}
+
+      {dongleTypeInferred && latestDongleVersion != null && (
+        <p className="text-xs text-warn-fg">
+          This dongle&apos;s firmware doesn&apos;t report its board type, so it&apos;s
+          assumed to be a dedicated os4 dongle. If it&apos;s actually an omni, don&apos;t
+          use Flash latest — flash it once with <code>flash_omni.py</code> over USB.
         </p>
       )}
 
@@ -344,7 +366,7 @@ function FlashModal({
     ) {
       setSubmitError(
         `${f.name} looks like a bootloader/partitions/boot_app0 image, ` +
-        `not the app. Pick the file named like os4_dongle_v<N>.bin (no infix).`,
+        `not the app. Pick the file named like os4_dongle_v<N>.bin / byh_omni_v<N>.bin (no infix).`,
       );
       return;
     }
@@ -493,8 +515,9 @@ function FlashModal({
             )}
           </div>
           <span className="text-xs text-fg-muted">
-            Pick the app image from <code>devices/os4_dongle/bin/</code> —
-            named like <code>os4_dongle_v&lt;N&gt;.bin</code> (or the
+            Pick the app image from <code>devices/os4_dongle/bin/</code>
+            (<code>devices/byh_omni/bin/</code> for an omni) — named like
+            <code> os4_dongle_v&lt;N&gt;.bin</code> / <code>byh_omni_v&lt;N&gt;.bin</code> (or the
             <code> latest.bin </code>symlink). Written at <code>0x10000</code>.
           </span>
         </label>

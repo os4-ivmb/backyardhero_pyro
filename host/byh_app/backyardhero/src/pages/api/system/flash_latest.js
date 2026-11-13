@@ -1,8 +1,15 @@
 import fs from 'fs';
 import path from 'path';
 import { ensureHardware } from '@/util/apiGuards';
-import { COMMAND_DIR, STAGING_DIR } from '@/util/paths';
+import { getRepo } from '@/data';
+import { COMMAND_DIR, STAGING_DIR, STATE_FILE_PATH } from '@/util/paths';
 import { getLatest } from '@/util/firmwareLatest';
+import {
+  firmwareProduct,
+  normalizeBoardType,
+  normalizeVersion,
+  PRODUCT_BIN_PREFIX,
+} from '@/util/firmwareVersion';
 
 // Mirrors the caps in dongle_flash.js / ota_flash.js: the app .bin is ~340KB;
 // 4MB is generous headroom for a future partition scheme.
@@ -20,6 +27,50 @@ function looksLikeEsp32App(buf) {
   return !!buf && buf.length >= 8 && buf[0] === 0xe9;
 }
 
+function readDaemonState() {
+  try {
+    return JSON.parse(fs.readFileSync(STATE_FILE_PATH, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Work out which hardware we're about to flash. Returns
+ *   { boardType, running, inferred } or { error, status }.
+ * The board type comes from the hardware itself (dongle heartbeat `bt`,
+ * Receivers.board_type from the receiver's config response) -- the caller
+ * never gets to choose the image.
+ */
+async function resolveTarget(req, device, ident) {
+  if (device === 'dongle') {
+    const state = readDaemonState();
+    const boardType = normalizeBoardType(state?.dongle_board_type);
+    if (boardType == null) {
+      return { status: 409, error: 'Dongle board type not reported yet (is the dongle connected?).' };
+    }
+    return {
+      boardType,
+      running: normalizeVersion(state?.dongle_fw_version),
+      // Heartbeat had no `bt`; type 0 was assumed. A pre-v35 omni dongle
+      // looks exactly like this too.
+      inferred: state?.dongle_board_type_reported === false,
+    };
+  }
+
+  const repo = await getRepo(req);
+  const row = await repo.receivers.getById(ident);
+  if (!row) return { status: 404, error: `Unknown receiver ${ident}.` };
+  const boardType = normalizeBoardType(row.board_type);
+  if (boardType == null) {
+    return {
+      status: 409,
+      error: `Board type for ${ident} is unknown. Refresh its config (rxcfg) first.`,
+    };
+  }
+  return { boardType, running: normalizeVersion(row.fw_version), inferred: false };
+}
+
 async function downloadBin(link) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
@@ -34,10 +85,20 @@ async function downloadBin(link) {
 
 /**
  * POST /api/system/flash_latest
- *   Body: { device: "dongle" }
- *      or { device: "receiver", ident: "RX163", rate?: 0|1|2 }
+ *   Body: { device: "dongle", force?: bool }
+ *      or { device: "receiver", ident: "RX163", rate?: 0|1|2, force?: bool }
  *
- *   Resolves the latest published firmware for the device, downloads the .bin
+ *   `device` is the ROLE being flashed (USB dongle vs receiver OTA), not the
+ *   image. The image is the firmware product for the hardware's reported
+ *   board type: dedicated boards get os4_dongle / os4_receiver, omni boards
+ *   get byh_omni in either role. Unknown board type is refused.
+ *
+ *   Safety net for the rollout: an omni running firmware older than v35
+ *   reports board type 0. If the unit's running version is NEWER than the
+ *   latest of the product we resolved, it's almost certainly a different
+ *   product, so we refuse unless force:true.
+ *
+ *   Resolves the latest published firmware for that product, downloads the .bin
  *   on the host, stages it, and drops the SAME daemon command the manual
  *   upload routes use (dongle_flash_start / ota_flash_start). All downstream
  *   gating (show loaded / armed / receiver online) is enforced by the daemon
@@ -51,7 +112,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { device, ident, rate } = req.body || {};
+    const { device, ident, rate, force } = req.body || {};
     if (device !== 'dongle' && device !== 'receiver') {
       return res.status(400).json({ error: 'device must be "dongle" or "receiver".' });
     }
@@ -59,10 +120,36 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'ident is required (string) for a receiver flash.' });
     }
 
-    const latest = await getLatest(device, { force: false });
+    const target = await resolveTarget(req, device, ident);
+    if (target.error) {
+      return res.status(target.status).json({ error: target.error });
+    }
+    const product = firmwareProduct(target.boardType, device);
+    if (!product) {
+      return res.status(409).json({
+        error: `No firmware product for board type ${target.boardType} as ${device}.`,
+      });
+    }
+
+    const latest = await getLatest(product, { force: false });
     if (!latest.available || !latest.link) {
       return res.status(503).json({
         error: 'Latest firmware metadata is unavailable (no internet?). Try "Check for updates" first.',
+      });
+    }
+
+    if (
+      force !== true &&
+      target.running != null &&
+      target.running > latest.version
+    ) {
+      return res.status(409).json({
+        error:
+          `Running v${target.running} is newer than the latest ${product} firmware ` +
+          `(v${latest.version}). This may be a different board type` +
+          (target.inferred ? ' (its board type was not reported)' : '') +
+          '. Not flashing.',
+        product,
       });
     }
 
@@ -89,7 +176,7 @@ export default async function handler(req, res) {
     if (!fs.existsSync(STAGING_DIR)) fs.mkdirSync(STAGING_DIR, { recursive: true });
     if (!fs.existsSync(COMMAND_DIR)) fs.mkdirSync(COMMAND_DIR, { recursive: true });
 
-    const fileName = `os4_${device}_v${latest.version}.bin`;
+    const fileName = `${PRODUCT_BIN_PREFIX[product]}_v${latest.version}.bin`;
 
     if (device === 'dongle') {
       const jobDir = path.join(STAGING_DIR, `${Date.now()}_dongle`);
@@ -110,6 +197,7 @@ export default async function handler(req, res) {
       return res.status(202).json({
         message: 'Dongle flash (latest) queued.',
         device,
+        product,
         version: latest.version,
         bytes: image.length,
       });
@@ -136,6 +224,7 @@ export default async function handler(req, res) {
     return res.status(202).json({
       message: 'OTA flash (latest) queued.',
       device,
+      product,
       ident,
       version: latest.version,
       bytes: image.length,

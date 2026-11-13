@@ -32,7 +32,7 @@ import {
   BILUSOCN_RANGE_LEN,
 } from "@/util/showReceivers";
 import useShowReceiverVerification from "@/util/useShowReceiverVerification";
-import { fwOutOfDate } from "@/util/firmwareVersion";
+import { fwOutOfDate, latestForBoard } from "@/util/firmwareVersion";
 
 // FW_VERSION: Frontend version tracking for ReceiverDisplay component
 // v1.0.0: Initial version - Basic receiver display with battery, connectivity, and cue status
@@ -207,7 +207,7 @@ function SingleReceiver({
   debugDisplay = false,
   // Latest published receiver firmware version (from latest.json). Null when
   // unknown (offline / not fetched). Drives the "update available" badge.
-  latestReceiverVersion = null,
+  latestFirmware = null,
 }) {
   const [popup, setPopup] = useState(null);
   const receiverRef = useRef(null);
@@ -340,6 +340,12 @@ function SingleReceiver({
   // Firmware freshness. receiver.fw_version is null until a CONFIG_QUERY
   // ("Fetch cfg") lands, so this stays false (no badge) for receivers we
   // haven't queried -- and never shows when we have no latest info (offline).
+  //
+  // The latest version is per firmware product: os4_receiver for dedicated
+  // boards, byh_omni for omnis (receiver.board_type). Unknown board type =>
+  // no badge rather than comparing against the wrong product's counter.
+  const latestReceiverVersion =
+    latestForBoard(latestFirmware, receiver.board_type, "receiver")?.version ?? null;
   const fwUpdateAvailable = fwOutOfDate(receiver.fw_version, latestReceiverVersion);
 
   return (
@@ -508,7 +514,10 @@ function SingleReceiver({
             <span>FW <span className="text-gray-200">v{receiver.fw_version}</span></span>
           )}
           {receiver.board_version != null && (
-            <span>Board <span className="text-gray-200">v{receiver.board_version}</span></span>
+            <span>
+              Board <span className="text-gray-200">v{receiver.board_version}</span>
+              {receiver.board_type === 1 && <span className="text-gray-200"> (omni)</span>}
+            </span>
           )}
           {receiver.config_data?.fire_duration_ms != null && (
             <span>
@@ -925,11 +934,9 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       latestFirmware,
     } = useAppStore();
     const { stateData } = useStateAppStore()
-    // Latest published receiver firmware, surfaced per-card as an "update
-    // available" badge. Null when offline / not yet fetched (no badge).
-    const latestReceiverVersion = latestFirmware?.receiver?.available
-      ? latestFirmware.receiver.version
-      : null;
+    // Latest published firmware (all products), surfaced per-card as an
+    // "update available" badge; each card picks its own product from its
+    // board type. Null entries when offline / not yet fetched (no badge).
     const [ targetRcvMap, setTargetRcvMap ] = useState({});
     const [showUnusedReceivers, setShowUnusedReceivers] = useState(false);
     const [showDisabledReceivers, setShowDisabledReceivers] = useState(false);
@@ -1931,7 +1938,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                               onDelete={handleDelete}
                               deleteBusy={!!deleteBusy[id]}
                               debugDisplay={debugDisplay}
-                              latestReceiverVersion={latestReceiverVersion}
+                              latestFirmware={latestFirmware}
                             />
                         );
                         if (!isInsufficient) return tile;
@@ -1986,7 +1993,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                                       onDelete={handleDelete}
                                       deleteBusy={!!deleteBusy[rcv_key]}
                                       debugDisplay={debugDisplay}
-                                      latestReceiverVersion={latestReceiverVersion}
+                                      latestFirmware={latestFirmware}
                                     />
                                 ))}
                             </div>
@@ -2016,7 +2023,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                           onDelete={handleDelete}
                           deleteBusy={!!deleteBusy[rcv_key]}
                           debugDisplay={debugDisplay}
-                          latestReceiverVersion={latestReceiverVersion}
+                          latestFirmware={latestFirmware}
                         />
                     ))}
                 </div>
@@ -2053,7 +2060,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                                   onDelete={handleDelete}
                                   deleteBusy={!!deleteBusy[rcv_key]}
                                   debugDisplay={debugDisplay}
-                                  latestReceiverVersion={latestReceiverVersion}
+                                  latestFirmware={latestFirmware}
                                 />
                             ))}
                         </div>

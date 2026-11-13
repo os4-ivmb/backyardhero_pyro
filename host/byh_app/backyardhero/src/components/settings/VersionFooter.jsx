@@ -12,7 +12,7 @@ import useStateAppStore from "@/store/useStateAppStore";
 import useAppStore from "@/store/useAppStore";
 import { Badge, Button } from "@/design";
 import { HARDWARE } from "@/util/clientEnv";
-import { fwOutOfDate } from "@/util/firmwareVersion";
+import { fwOutOfDate, latestForBoard } from "@/util/firmwareVersion";
 
 // Settings footer: shows the running Host (desktop app) + Dongle firmware
 // versions and whether newer ones are available. Host updates are driven by
@@ -128,9 +128,9 @@ export default function VersionFooter() {
   const hostStale = !!host?.latest?.stale;
 
   const dongleFw = stateData?.fw_state?.dongle_fw_version ?? null;
-  const latestDongle = latestFirmware?.dongle?.available
-    ? latestFirmware.dongle
-    : null;
+  const latestDongle = latestForBoard(
+    latestFirmware, stateData?.fw_state?.dongle_board_type, "dongle",
+  );
   const latestDongleVersion = latestDongle?.version ?? null;
   const dongleOutOfDate = fwOutOfDate(dongleFw, latestDongleVersion);
 

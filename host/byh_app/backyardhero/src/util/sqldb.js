@@ -189,6 +189,9 @@ function initializeDatabase(db) {
   // Receiver-reported fields (FW v22+ via the dongle's RECEIVER_CONFIG_RESPONSE):
   //   fw_version       INT    -- nullable until first config response lands
   //   board_version    INT    -- ditto
+  //   board_type       INT    -- product family from config resp reserved[1]:
+  //                              0 = dedicated os4_receiver, 1 = omni. Picks
+  //                              the OTA image. NULL until the first rxcfg.
   //   cues_available   INT    -- physically-usable cues per the receiver's
   //                              own NUM_BOARDS detection. 0 when no boards
   //                              are plugged in. Authoritative; replaces the
@@ -210,6 +213,7 @@ function initializeDatabase(db) {
       configuration_version INTEGER NOT NULL DEFAULT 1,
       fw_version INTEGER,
       board_version INTEGER,
+      board_type INTEGER,
       cues_available INTEGER,
       config_data TEXT NOT NULL DEFAULT '{}', -- JSON: { fire_duration_ms?: number, ... }
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
@@ -339,6 +343,7 @@ function initializeDatabase(db) {
     for (const sql of [
       `ALTER TABLE Receivers ADD COLUMN fw_version INTEGER`,
       `ALTER TABLE Receivers ADD COLUMN board_version INTEGER`,
+      `ALTER TABLE Receivers ADD COLUMN board_type INTEGER`,
       `ALTER TABLE Receivers ADD COLUMN cues_available INTEGER`,
       `ALTER TABLE Receivers ADD COLUMN config_data TEXT NOT NULL DEFAULT '{}'`,
     ]) {

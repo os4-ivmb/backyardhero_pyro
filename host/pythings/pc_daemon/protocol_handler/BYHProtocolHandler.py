@@ -682,6 +682,10 @@ class BYHProtocolHandler:
         'sp': 'successPercent',
         'fw':  'fwVersion',
         'bv':  'boardVersion',
+        # Board type (product family): 0 = dedicated os4_receiver, 1 = omni.
+        # Reported by dongle FW that reads config-response reserved[1]
+        # (os4_dongle v31+, omni v35+). Absent on older dongles.
+        'bt':  'boardType',
         'nb':  'numBoards',
         'nbd': 'noBoardsDetected',
         'ca':  'cuesAvailable',
@@ -788,7 +792,26 @@ class BYHProtocolHandler:
     #   receiver, or when a board is partially wired.
     _CONFIG_DATA_HOST_OVERRIDE_KEYS = ('force_cues_available',)
 
-    def _persist_rxcfg_to_db(self, ident, fw, bv, ca, fire_dur):
+    # Set once the Receivers.board_type column is known to exist. The Next
+    # app owns the schema (sqldb.js adds the column too), but the daemon can
+    # start first against an older DB, so it adds the column itself rather
+    # than failing the whole rxcfg persist.
+    _board_type_column_ready = False
+
+    def _ensure_board_type_column(self, cur):
+        if BYHProtocolHandler._board_type_column_ready:
+            return
+        cols = {r[1] for r in cur.execute("PRAGMA table_info(Receivers)").fetchall()}
+        if 'board_type' not in cols:
+            try:
+                cur.execute("ALTER TABLE Receivers ADD COLUMN board_type INTEGER")
+            except sqlite3.OperationalError as e:
+                # Lost a race with sqldb.js adding it -- fine.
+                if 'duplicate column' not in str(e).lower():
+                    raise
+        BYHProtocolHandler._board_type_column_ready = True
+
+    def _persist_rxcfg_to_db(self, ident, fw, bv, ca, fire_dur, bt=None):
         """Mirror the receiver-reported config into the Receivers table.
 
         Skips silently if the row doesn't exist (operator may have just
@@ -810,6 +833,7 @@ class BYHProtocolHandler:
             try:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
+                self._ensure_board_type_column(cur)
                 cur.execute(
                     "SELECT type, cues_data, config_data FROM Receivers WHERE id = ?",
                     (ident,),
@@ -825,6 +849,15 @@ class BYHProtocolHandler:
                     cfg = {}
                 if fire_dur is not None:
                     cfg['fire_duration_ms'] = int(fire_dur)
+
+                # Board type picks the OTA image (os4_receiver vs byh_omni).
+                # An rxcfg without `bt` comes from a dongle that predates
+                # board-type reporting; every receiver it can describe is
+                # treated as type 0 (dedicated), same as a zeroed reserved[1].
+                try:
+                    board_type = int(bt) if bt is not None else 0
+                except (TypeError, ValueError):
+                    board_type = 0
 
                 # Auto-derive cues_data from the receiver-reported
                 # cues_available count. Only touch cues_data when:
@@ -871,6 +904,7 @@ class BYHProtocolHandler:
                         """UPDATE Receivers SET
                               fw_version = ?,
                               board_version = ?,
+                              board_type = ?,
                               cues_available = ?,
                               config_data = ?,
                               cues_data = ?,
@@ -880,6 +914,7 @@ class BYHProtocolHandler:
                         (
                             int(fw) if fw is not None else None,
                             int(bv) if bv is not None else None,
+                            board_type,
                             int(ca) if ca is not None else None,
                             json.dumps(cfg),
                             cues_data_param,
@@ -891,6 +926,7 @@ class BYHProtocolHandler:
                         """UPDATE Receivers SET
                               fw_version = ?,
                               board_version = ?,
+                              board_type = ?,
                               cues_available = ?,
                               config_data = ?,
                               configuration_version = configuration_version + 1,
@@ -899,6 +935,7 @@ class BYHProtocolHandler:
                         (
                             int(fw) if fw is not None else None,
                             int(bv) if bv is not None else None,
+                            board_type,
                             int(ca) if ca is not None else None,
                             json.dumps(cfg),
                             ident,
@@ -953,6 +990,7 @@ class BYHProtocolHandler:
             msg_obj.get('bv'),
             msg_obj.get('ca'),
             msg_obj.get('fd'),
+            msg_obj.get('bt'),
         )
 
     def fetch_receiver_config(self, ident, fire_duration_ms=None):
@@ -1140,6 +1178,22 @@ class BYHProtocolHandler:
                     if 'fw' in msg_obj:
                         try:
                             self.parent.dongle_fw_version = int(msg_obj['fw'])
+                        except (TypeError, ValueError):
+                            pass
+                    # Board type / version of the dongle itself (os4_dongle
+                    # v31+, omni v35+). Picks os4_dongle vs byh_omni for
+                    # USB flashing. A heartbeat without `bt` is from
+                    # firmware that predates it: default to 0 (dedicated)
+                    # but remember it was inferred so the UI can warn --
+                    # a pre-v35 omni dongle also omits it.
+                    try:
+                        self.parent.dongle_board_type = int(msg_obj['bt']) if 'bt' in msg_obj else 0
+                    except (TypeError, ValueError):
+                        self.parent.dongle_board_type = 0
+                    self.parent.dongle_board_type_reported = 'bt' in msg_obj
+                    if 'bv' in msg_obj:
+                        try:
+                            self.parent.dongle_board_version = int(msg_obj['bv'])
                         except (TypeError, ValueError):
                             pass
                     # Capture the active RF channel from each status frame.

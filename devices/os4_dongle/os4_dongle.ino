@@ -200,7 +200,18 @@
 //   payloads remain valid: status/OTA add an optional trailing high byte and
 //   config responses use reserved[0]. All command payloads remain unchanged;
 //   only the RF destination address and dongle bookkeeping widen to uint16_t.
-#define FW_VERSION 30
+// v31: 2026-11-13 - Board type: store RECEIVER_CONFIG_RESPONSE reserved[1]
+//   per receiver and emit it as `bt` on rxcfg and on each status receivers[]
+//   entry; the heartbeat also carries the dongle's own `bt` (0) and `bv`.
+//   The host uses it to pick os4_receiver vs byh_omni for OTA.
+#define FW_VERSION 31
+
+// Board type (product family), reported in RECEIVER_CONFIG_RESPONSE
+// reserved[1] and as `bt` in host JSON. The host keys its firmware catalog
+// on it: 0 = dedicated os4_receiver / os4_dongle, 1 = byh_omni. Older
+// firmware zero-fills reserved[], which reads as 0 (dedicated).
+#define BOARD_TYPE_DEDICATED 0
+#define BOARD_TYPE_OMNI      1
 
 #define BOARD_VERSION 2
 
@@ -335,6 +346,7 @@ struct ReceiverConfigResponseMessage {
   uint8_t  cuesAvailable;     // 0 if noBoardsDetected, else NUM_BOARDS * 8
   uint16_t fireDurationMs;    // currently-effective fire pulse width (ms)
   uint8_t  reserved[8];       // reserved[0] = v30 nodeID high byte
+                              // reserved[1] = board type (0 dedicated, 1 omni)
 } __attribute__((packed));
 
 static_assert(sizeof(ReceiverConfigResponseMessage) == 17, "config response wire layout changed");
@@ -420,6 +432,7 @@ struct ReceiverInfo {
   bool     configQueryPending;
   uint8_t  fwVersion;
   uint8_t  boardVersion;
+  uint8_t  boardType;        // config resp reserved[1]; 0 dedicated, 1 omni
   uint8_t  numBoards;
   uint8_t  noBoardsDetected;
   uint8_t  cuesAvailable;
@@ -978,6 +991,7 @@ ReceiverInfo* getReceiverByIdent(const String &ident, bool createIfNotExist) {
     r.configQueryPending = true;
     r.fwVersion = 0;
     r.boardVersion = 0;
+    r.boardType = 0;
     r.numBoards = 0;
     r.noBoardsDetected = 0;
     r.cuesAvailable = 0;
@@ -1238,6 +1252,7 @@ void emitRxCfg(const ReceiverInfo* r) {
   d["n"]    = r->nodeID;
   d["fw"]   = r->fwVersion;
   d["bv"]   = r->boardVersion;
+  d["bt"]   = r->boardType;
   d["nb"]   = r->numBoards;
   d["nbd"]  = r->noBoardsDetected;
   d["ca"]   = r->cuesAvailable;
@@ -1279,6 +1294,7 @@ ReceiverInfo* ingestConfigResponse(const uint8_t* buf, uint8_t len, uint64_t now
   r->configQueryPending = false;
   r->fwVersion         = cr->fwVersion;
   r->boardVersion      = cr->boardVersion;
+  r->boardType         = cr->reserved[1];
   r->numBoards         = cr->numBoards;
   r->noBoardsDetected  = cr->noBoardsDetected;
   r->cuesAvailable     = cr->cuesAvailable;
@@ -3218,6 +3234,9 @@ void loop() {
       doc["qmax"] = MAX_COMMANDS_IN_QUEUE;
       doc["fw"] = FW_VERSION;
       doc["ch"] = rfChannel;
+      // Identify the dongle itself so the host flashes the right image.
+      doc["bt"] = BOARD_TYPE_DEDICATED;
+      doc["bv"] = BOARD_VERSION;
       // Echo the live (post-clamp) clock-sync interval so the UI can show
       // the operator what the dongle is actually running with -- e.g. if
       // they typed 0 in settings, they'll see CSIM_MIN_MS reflected here
@@ -3256,6 +3275,7 @@ void loop() {
         if (receivers[i].configValid) {
           ro["fw"]  = receivers[i].fwVersion;
           ro["bv"]  = receivers[i].boardVersion;
+          ro["bt"]  = receivers[i].boardType;
           ro["nb"]  = receivers[i].numBoards;
           ro["nbd"] = receivers[i].noBoardsDetected;
           ro["ca"]  = receivers[i].cuesAvailable;

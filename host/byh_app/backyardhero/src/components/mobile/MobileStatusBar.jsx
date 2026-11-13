@@ -13,7 +13,7 @@ import Toast from "../common/Toast";
 import GpioOverrideBar from "../shell/GpioOverrideBar";
 import { isPollableReceiver } from "@/util/receivers";
 import { HARDWARE } from "@/util/clientEnv";
-import { fwOutOfDate } from "@/util/firmwareVersion";
+import { fwOutOfDate, latestForBoard } from "@/util/firmwareVersion";
 import { DONGLE_DEFAULTS, DONGLE_LINK_WIRELESS, selectSerialPayload } from "@/util/dongleLink";
 
 // ---------------------------------------------------------------------------
@@ -191,9 +191,9 @@ export default function MobileStatusBar() {
 
   // Dongle firmware freshness (see StatusBar.jsx for the full rationale).
   const dongleFwVersion = stateData.fw_state?.dongle_fw_version ?? null;
-  const latestDongleVersion = latestFirmware?.dongle?.available
-    ? latestFirmware.dongle.version
-    : null;
+  const latestDongleVersion = latestForBoard(
+    latestFirmware, stateData.fw_state?.dongle_board_type, "dongle",
+  )?.version ?? null;
   const dongleFwStale = fwOutOfDate(dongleFwVersion, latestDongleVersion);
 
   const rfSettings = stateData.fw_state?.settings?.rf || {};

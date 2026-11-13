@@ -22,6 +22,10 @@
 //     boot. Starts a WiFi AP and serves the dongle protocol over a
 //     WebSocket instead of waiting for USB serial; see omni_hub.cpp.
 //
+// v35: 2026-11-13 - Report board type (BOARD_TYPE_OMNI) in config response
+//   reserved[1] and as `bt` in the dongle-mode rxcfg / status JSON, so the
+//   host can pick the byh_omni image for OTA and USB flashing instead of
+//   os4_receiver / os4_dongle.
 // v34: 2026-11-12 - gpio_status includes the host header's inputs 5–8
 //   (shift-register indexes 4–7), debounced, so a momentary button there
 //   can be bound to sequence step fire.
@@ -32,7 +36,15 @@
 //   (code 1001) in the same loop that accepted it.
 // v31: 2026-11-XX - Receiver parity with os4_receiver v30 (16-bit IDs, NVS
 //   board version, v10 battery calibration) plus dongle / hub dongle modes.
-#define FW_VERSION 34
+#define FW_VERSION 35
+
+// Board type (product family), reported in RECEIVER_CONFIG_RESPONSE
+// reserved[1] and as `bt` in host JSON. The host keys its firmware catalog
+// on it: 0 = dedicated os4_receiver / os4_dongle, 1 = byh_omni. Older
+// firmware zero-fills reserved[], which reads as 0 (dedicated).
+#define BOARD_TYPE_DEDICATED 0
+#define BOARD_TYPE_OMNI      1
+#define BOARD_TYPE           BOARD_TYPE_OMNI
 
 // The omni runs on the receiver v10 PCB; SETBOARD overrides per unit.
 #define DEFAULT_BOARD_VERSION 10
@@ -374,6 +386,7 @@ struct ReceiverConfigResponseMessage {
   uint8_t  cuesAvailable;     // 0 if noBoardsDetected, else NUM_BOARDS * 8
   uint16_t fireDurationMs;    // currently-effective fire pulse width (ms)
   uint8_t  reserved[8];       // reserved[0] = v30 nodeID high byte
+                              // reserved[1] = v35 board type (BOARD_TYPE)
 } __attribute__((packed));
 
 static_assert(sizeof(ReceiverConfigResponseMessage) == 17, "config response wire layout changed");
@@ -1298,6 +1311,7 @@ void buildConfigResponse(ReceiverConfigResponseMessage* msg) {
   msg->cuesAvailable    = noBoardsDetected ? 0 : (uint8_t)(NUM_BOARDS * 8);
   msg->fireDurationMs   = fireDurationMs;
   msg->reserved[0]      = (uint8_t)(NODE_ID >> 8);
+  msg->reserved[1]      = BOARD_TYPE;
 }
 
 // FW v22: load the CONFIG_RESPONSE into the ACK TX FIFO so the dongle's

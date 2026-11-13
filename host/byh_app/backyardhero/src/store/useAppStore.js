@@ -17,6 +17,10 @@ const receiverRowToStoreEntry = (row) => ({
   // "haven't queried yet" from "really 0 cues / no boards".
   fw_version: row.fw_version ?? null,
   board_version: row.board_version ?? null,
+  // Product family from the receiver's config response: 0 = dedicated
+  // os4_receiver, 1 = omni. Null until the first rxcfg after the host
+  // learned about board types. Picks the OTA image.
+  board_type: row.board_type ?? null,
   cues_available: row.cues_available ?? null,
   config_data: row.config_data || {},
 });
@@ -583,9 +587,12 @@ const useAppStore = create(persist((set, get) => ({
   // surface "out of date" warnings and the "Flash latest" buttons. Stays null
   // until the first successful fetch; offline / cloud profile just leaves it
   // null so no warnings ever appear and nothing errors.
-  //   { receiver: { available, version, link, stale } | null, dongle: {...} }
+  //   { receiver: { available, version, link, stale } | null, dongle: {...},
+  //     omni: {...} }
+  // Keyed by firmware product; use latestForBoard(latestFirmware, boardType,
+  // role) to pick the one that applies to a given board.
   // ---------------------------------------------------------------------------
-  latestFirmware: { receiver: null, dongle: null },
+  latestFirmware: { receiver: null, dongle: null, omni: null },
   latestFirmwareLoading: false,
 
   /**
@@ -603,6 +610,7 @@ const useAppStore = create(persist((set, get) => ({
         latestFirmware: {
           receiver: data?.receiver ?? null,
           dongle: data?.dongle ?? null,
+          omni: data?.omni ?? null,
         },
       });
       return data;

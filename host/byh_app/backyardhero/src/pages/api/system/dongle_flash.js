@@ -7,7 +7,22 @@ import { ensureHardware } from '@/util/apiGuards';
 // host-side bridge inline (content_b64), so the bridge does NOT need to see
 // the staging path itself -- important on Docker Desktop / Windows where the
 // native bridge and the WSL2 container share no filesystem.
-import { COMMAND_DIR, STAGING_DIR } from '@/util/paths';
+import { COMMAND_DIR, STAGING_DIR, STATE_FILE_PATH } from '@/util/paths';
+import { imageMismatchError } from '@/util/firmwareVersion';
+
+// Dongle board type from the daemon state file (heartbeat `bt`), plus
+// whether the heartbeat actually carried it (vs. the daemon defaulting to 0).
+function dongleBoardType() {
+  try {
+    const st = JSON.parse(fs.readFileSync(STATE_FILE_PATH, 'utf8'));
+    return {
+      boardType: st?.dongle_board_type ?? null,
+      reported: st?.dongle_board_type_reported === true,
+    };
+  } catch {
+    return { boardType: null, reported: false };
+  }
+}
 
 // Hard cap on the uploaded app image. The dongle's app .bin sits
 // around ~340KB; 4MB is generous headroom for any future partition-
@@ -111,10 +126,14 @@ function handleStart(req, res) {
       return res.status(400).json({
         error:
           "file doesn't look like an ESP32 app image (first byte must be 0xE9). " +
-          'Make sure you picked os4_dongle_v<N>.bin (the app), not bootloader, ' +
+          'Make sure you picked os4_dongle_v<N>.bin / byh_omni_v<N>.bin (the app), not bootloader, ' +
           'partitions, or boot_app0.',
       });
     }
+
+    const { boardType, reported } = dongleBoardType();
+    const mismatch = imageMismatchError(name, boardType, 'dongle', { typeCertain: reported });
+    if (mismatch) return res.status(409).json({ error: mismatch });
 
     // Stage to /tmp/ota_staging/<ts>_dongle/app.bin. The daemon (same
     // container, same filesystem) reads this back and forwards the bytes

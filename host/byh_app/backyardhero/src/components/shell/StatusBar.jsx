@@ -9,7 +9,7 @@ import Toast from "../common/Toast";
 import GpioOverrideBar from "./GpioOverrideBar";
 import { isPollableReceiver } from "@/util/receivers";
 import { HARDWARE } from "@/util/clientEnv";
-import { fwOutOfDate } from "@/util/firmwareVersion";
+import { fwOutOfDate, latestForBoard } from "@/util/firmwareVersion";
 import { DONGLE_DEFAULTS, DONGLE_LINK_WIRELESS, selectSerialPayload } from "@/util/dongleLink";
 
 // ---------------------------------------------------------------------------
@@ -270,9 +270,11 @@ export default function StatusBar() {
   // latest published on the static site. Only meaningful while the dongle is
   // actually reporting, and stays silent when we have no latest info (offline).
   const dongleFwVersion = stateData.fw_state?.dongle_fw_version ?? null;
-  const latestDongleVersion = latestFirmware?.dongle?.available
-    ? latestFirmware.dongle.version
-    : null;
+  // Latest for THIS dongle's product: os4_dongle, or byh_omni for an omni
+  // dongle (fw_state.dongle_board_type from the heartbeat `bt`).
+  const latestDongleVersion = latestForBoard(
+    latestFirmware, stateData.fw_state?.dongle_board_type, "dongle",
+  )?.version ?? null;
   const dongleFwStale = fwOutOfDate(dongleFwVersion, latestDongleVersion);
 
   // Force-restart the dongle link on the daemon. This is the same path

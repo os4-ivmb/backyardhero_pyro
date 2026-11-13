@@ -5,6 +5,10 @@
 //   { "version": "21",
 //     "link": "https://backyard-hero.com/download/firmware/dongle/os4_dongle_v21.bin" }
 //
+// One file per firmware *product* (see FIRMWARE_PRODUCTS in firmwareVersion):
+// receiver/ and dongle/ are the dedicated os4 boards (type 0), omni/ is the
+// byh_omni image used by omni boards in either role (type 1).
+//
 // This module fetches those files on the host (Next.js server), caches the
 // result in-process with a TTL so we don't hammer the static site, and is
 // offline-safe: a failed refresh falls back to the last good value (flagged
@@ -25,11 +29,13 @@ const TTL_MS = 6 * 60 * 60 * 1000;
 // Fail fast when there's no internet -- the warnings/buttons are best-effort.
 const FETCH_TIMEOUT_MS = 4000;
 
-const DEVICES = ['receiver', 'dongle'];
+import { FIRMWARE_PRODUCTS } from './firmwareVersion';
+
+const DEVICES = FIRMWARE_PRODUCTS;
 
 // Module-level cache survives across requests within a single server process.
-// { receiver: { version, link, fetchedAt } | null, dongle: ... }
-const cache = { receiver: null, dongle: null };
+// { receiver: { version, link, fetchedAt } | null, dongle: ..., omni: ... }
+const cache = Object.fromEntries(DEVICES.map((d) => [d, null]));
 
 function parseVersion(v) {
   const n = parseInt(String(v), 10);

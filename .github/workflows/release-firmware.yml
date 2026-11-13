@@ -1,10 +1,11 @@
 name: Release firmware
 
-# Builds an ESP32 firmware image (receiver or dongle) and publishes it to the
+# Builds an ESP32 firmware image (receiver, dongle or omni) and publishes it to the
 # static download site whenever a firmware tag is pushed:
 #
 #   h-rcv-<N>   -> build + publish os4_receiver  v<N>
 #   h-dng-<N>   -> build + publish os4_dongle    v<N>
+#   h-omni-<N>  -> build + publish byh_omni      v<N>
 #
 # These are the same tags ownerutils/deploy_*_firmware create; pushing one is
 # now all you need -- CI builds the four bins, writes per-device latest.json,
@@ -20,12 +21,13 @@ on:
     tags:
       - "h-rcv-*"
       - "h-dng-*"
+      - "h-omni-*"
   workflow_dispatch:
     inputs:
       device:
         description: "Which firmware to build + publish"
         type: choice
-        options: [receiver, dongle]
+        options: [receiver, dongle, omni]
         required: true
 
 # Serialize all firmware releases. The manifest merge reads the currently
@@ -60,6 +62,8 @@ jobs:
             device="receiver"
           elif [[ "${ref}" == h-dng-* ]]; then
             device="dongle"
+          elif [[ "${ref}" == h-omni-* ]]; then
+            device="omni"
           else
             echo "::error::cannot determine device from ref '${ref}'"; exit 1
           fi
@@ -67,6 +71,7 @@ jobs:
           case "${device}" in
             receiver) sketch="devices/os4_receiver/os4_receiver.ino"; build="devices/utils/build_receiver.sh" ;;
             dongle)   sketch="devices/os4_dongle/os4_dongle.ino";     build="devices/utils/build_dongle.sh" ;;
+            omni)     sketch="devices/byh_omni/byh_omni.ino";         build="devices/utils/build_omni.sh" ;;
           esac
 
           version="$(awk '/^#define[[:space:]]+FW_VERSION[[:space:]]+/ { print $3; exit }' "${sketch}")"
@@ -74,7 +79,7 @@ jobs:
 
           # When triggered by a tag, the tag's number must match the sketch so we
           # never publish os4_<device>_v<N>.bin whose contents aren't really v<N>.
-          if [[ "${ref}" == h-rcv-* || "${ref}" == h-dng-* ]]; then
+          if [[ "${ref}" == h-rcv-* || "${ref}" == h-dng-* || "${ref}" == h-omni-* ]]; then
             tagver="${ref##*-}"
             if [[ "${tagver}" != "${version}" ]]; then
               echo "::error::tag ${ref} says v${tagver} but ${sketch} declares FW_VERSION ${version}"; exit 1
@@ -103,8 +108,8 @@ jobs:
             https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
-          # build_receiver.sh doesn't auto-install libs (build_dongle.sh does);
-          # install the shared set here so both builds work.
+          # build_receiver.sh / build_omni.sh don't auto-install libs
+          # (build_dongle.sh does); install the shared set here so all builds work.
           arduino-cli lib install "RF24" "Adafruit NeoPixel" "ArduinoJson"
 
       - name: Build firmware

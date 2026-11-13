@@ -91,6 +91,7 @@ function receiverRowOut(row) {
     configuration_version: 1,
     fw_version: null,
     board_version: null,
+    board_type: null,
     cues_available: null,
     config_data: {},
     updated_at: row.updated_at,

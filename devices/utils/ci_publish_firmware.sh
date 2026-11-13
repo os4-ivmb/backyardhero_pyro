@@ -3,13 +3,15 @@
 # it to the download/firmware tree on the static host.
 #
 # This is the CI counterpart of ownerutils/deploy_*_firmware. It assumes the
-# four per-version bins already exist under devices/os4_<device>/bin/ (produced
-# by build_receiver.sh / build_dongle.sh in an earlier workflow step). It:
+# four per-version bins already exist under the device's bin/ dir
+# (devices/os4_<device>/bin/, or devices/byh_omni/bin/ for omni -- produced by
+# build_receiver.sh / build_dongle.sh / build_omni.sh in an earlier workflow
+# step). It:
 #
 #   1. Stages firmware/<device>/{the 4 bins, latest.json} plus an aggregate
 #      firmware/manifest.json, under a tree rooted at the download/ folder.
 #   2. Fetches the currently-published manifest.json over public HTTPS and merges
-#      this device into it (so the *other* device's entry survives) -- nothing is
+#      this device into it (so the *other* devices' entries survive) -- nothing is
 #      read back over SSH, which lets the deploy key stay write-only.
 #   3. Hands the staged tree to scoped_download_rsync.sh, which uploads it.
 #
@@ -20,7 +22,7 @@
 # and the sibling device's files survive. See ownerutils/FIRMWARE_RELEASE.md.
 #
 # Required env:
-#   DEVICE              receiver | dongle
+#   DEVICE              receiver | dongle | omni
 #   VERSION             FW_VERSION just built (e.g. 26)
 #   REMOTE_HOST         static host (scratchy)
 #   REMOTE_USER         ssh user that owns the scoped key
@@ -31,7 +33,7 @@
 #   DRY_RUN             1 to rsync --dry-run (no changes pushed)
 set -euo pipefail
 
-DEVICE="${DEVICE:?set DEVICE=receiver|dongle}"
+DEVICE="${DEVICE:?set DEVICE=receiver|dongle|omni}"
 VERSION="${VERSION:?set VERSION}"
 DOWNLOAD_BASE_URL="${DOWNLOAD_BASE_URL:-https://backyard-hero.com/download/firmware}"
 
@@ -39,14 +41,15 @@ err()  { echo "[ci_publish] ERROR: $*" >&2; exit 1; }
 info() { echo "[ci_publish] $*"; }
 
 case "${DEVICE}" in
-  receiver) prefix="os4_receiver" ;;
-  dongle)   prefix="os4_dongle" ;;
-  *) err "DEVICE must be receiver|dongle, got '${DEVICE}'" ;;
+  receiver) prefix="os4_receiver"; sketch_dir="os4_receiver" ;;
+  dongle)   prefix="os4_dongle";   sketch_dir="os4_dongle" ;;
+  omni)     prefix="byh_omni";     sketch_dir="byh_omni" ;;
+  *) err "DEVICE must be receiver|dongle|omni, got '${DEVICE}'" ;;
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BIN_DIR="${REPO_ROOT}/devices/os4_${DEVICE}/bin"
+BIN_DIR="${REPO_ROOT}/devices/${sketch_dir}/bin"
 RSYNC_HELPER="${REPO_ROOT}/.github/scripts/scoped_download_rsync.sh"
 base="${DOWNLOAD_BASE_URL%/}"
 link="${base}/${DEVICE}/${prefix}_v${VERSION}.bin"

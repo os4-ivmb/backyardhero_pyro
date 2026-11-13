@@ -18,7 +18,13 @@ import {
   selectClass,
   cn,
 } from "@/design";
-import { fwOutOfDate } from "@/util/firmwareVersion";
+import {
+  fwOutOfDate,
+  firmwareProduct,
+  latestForBoard,
+  PRODUCT_BIN_PREFIX,
+  PRODUCT_LABEL,
+} from "@/util/firmwareVersion";
 
 // FW_VERSION: OTA flash panel
 // v1.0.0: Initial version - lets the operator pick an online receiver and
@@ -100,6 +106,9 @@ function useFlashableReceivers() {
         online,
         battery: liveRow?.status?.battery ?? null,
         fw_version: def.fw_version ?? null,
+        // 0 = dedicated os4_receiver, 1 = omni; null until reported.
+        // Picks which firmware product applies (see firmwareProduct).
+        board_type: def.board_type ?? null,
       });
     }
     out.sort((a, b) => {
@@ -110,6 +119,10 @@ function useFlashableReceivers() {
   }, [dbReceivers, stateData?.fw_state?.receivers]);
 }
 
+function hasReceiverLatest(latestFirmware) {
+  return ["receiver", "omni"].some((p) => latestFirmware?.[p]?.available);
+}
+
 // Component ----------------------------------------------------------------
 
 export default function OtaFlashPanel() {
@@ -118,10 +131,12 @@ export default function OtaFlashPanel() {
   const [open, setOpen] = useState(false);
   const [checking, setChecking] = useState(false);
 
-  const latestReceiver = latestFirmware?.receiver?.available
-    ? latestFirmware.receiver
-    : null;
-  const latestReceiverVersion = latestReceiver?.version ?? null;
+  // Receivers can be dedicated boards (os4_receiver) or omnis (byh_omni);
+  // their versions are independent, so list each product's latest.
+  const latestSummary = ["receiver", "omni"]
+    .filter((p) => latestFirmware?.[p]?.available)
+    .map((p) => `${PRODUCT_LABEL[p]} v${latestFirmware[p].version}`);
+  const anyStale = ["receiver", "omni"].some((p) => latestFirmware?.[p]?.stale);
 
   const handleCheck = useCallback(async () => {
     setChecking(true);
@@ -206,10 +221,10 @@ export default function OtaFlashPanel() {
         </div>
       </div>
 
-      {latestReceiverVersion != null && (
+      {latestSummary.length > 0 && (
         <p className="text-xs text-fg-muted">
-          Latest receiver firmware: v{latestReceiverVersion}.
-          {latestReceiver?.stale ? " (cached — couldn't reach the server)" : ""}
+          Latest firmware: {latestSummary.join(", ")}.
+          {anyStale ? " (cached — couldn't reach the server)" : ""}
           {" "}Open the flasher to push it to a receiver.
         </p>
       )}
@@ -221,7 +236,7 @@ export default function OtaFlashPanel() {
         phase={phase}
         isActive={isActive}
         blockedReason={blockedReason}
-        latestReceiverVersion={latestReceiverVersion}
+        latestFirmware={latestFirmware}
       />
     </div>
   );
@@ -234,10 +249,17 @@ function FlashModal({
   phase,
   isActive,
   blockedReason,
-  latestReceiverVersion = null,
+  latestFirmware = null,
 }) {
   const flashable = useFlashableReceivers();
   const [selectedIdent, setSelectedIdent] = useState("");
+  // The image follows the selected receiver's board type: os4_receiver for
+  // dedicated boards, byh_omni for omnis. Unknown type => no "Flash latest".
+  const selected = flashable.find((r) => r.id === selectedIdent) || null;
+  const selectedProduct = selected ? firmwareProduct(selected.board_type, "receiver") : null;
+  const latestReceiverVersion = selected
+    ? latestForBoard(latestFirmware, selected.board_type, "receiver")?.version ?? null
+    : null;
   const [file, setFile] = useState(null);
   const [rate, setRate] = useState(2);
   const [submitting, setSubmitting] = useState(false);
@@ -380,7 +402,7 @@ function FlashModal({
                   onClick={handleFlashLatest}
                   disabled={latestBusy || submitting || !!blockedReason || !selectedIdent}
                   loading={latestBusy}
-                  title={`Download os4_receiver_v${latestReceiverVersion}.bin and OTA it to the selected receiver`}
+                  title={`Download ${PRODUCT_BIN_PREFIX[selectedProduct]}_v${latestReceiverVersion}.bin and OTA it to the selected receiver`}
                 >
                   Flash latest (v{latestReceiverVersion})
                 </Button>
@@ -423,21 +445,24 @@ function FlashModal({
             >
               <option value="">— pick one —</option>
               {flashable.map((r) => {
-                const upd = fwOutOfDate(r.fw_version, latestReceiverVersion);
+                const product = firmwareProduct(r.board_type, "receiver");
+                const latestV = latestForBoard(latestFirmware, r.board_type, "receiver")?.version ?? null;
+                const upd = fwOutOfDate(r.fw_version, latestV);
                 return (
                   <option key={r.id} value={r.id} disabled={!r.online}>
                     {r.label}
                     {r.label !== r.id ? ` (${r.id})` : ""}
+                    {product === "omni" ? " · omni" : ""}
                     {r.online ? "" : " · offline"}
-                    {upd ? ` · update → v${latestReceiverVersion}` : ""}
+                    {upd ? ` · update → v${latestV}` : ""}
                   </option>
                 );
               })}
             </select>
             <span className="text-xs text-fg-muted">
               Only online, NRF-capable receivers are listed.
-              {latestReceiverVersion != null
-                ? " “update” marks receivers older than the latest firmware."
+              {hasReceiverLatest(latestFirmware)
+                ? " “update” marks receivers older than the latest firmware for their board type."
                 : ""}
             </span>
           </label>
@@ -478,7 +503,8 @@ function FlashModal({
             )}
           </div>
           <span className="text-xs text-fg-muted">
-            Use the <code>os4_receiver_v&lt;N&gt;.bin</code> from <code>devices/utils/build_receiver.sh</code>.
+            Use <code>os4_receiver_v&lt;N&gt;.bin</code> (<code>build_receiver.sh</code>) for a
+            dedicated receiver, or <code>byh_omni_v&lt;N&gt;.bin</code> (<code>build_omni.sh</code>) for an omni.
             Bootloader / partitions are first-flash only and aren't sent.
           </span>
         </label>

@@ -2,6 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import { ensureHardware } from '@/util/apiGuards';
 import { COMMAND_DIR, STAGING_DIR } from '@/util/paths';
+import { getRepo } from '@/data';
+import { imageMismatchError } from '@/util/firmwareVersion';
 // Hard cap on the upload size. The receiver image today is ~340KB; we
 // allow ~4MB to give headroom for partition-scheme growth and base64
 // expansion (~4/3 vs raw bytes).
@@ -37,7 +39,7 @@ export const config = {
  *   Aborts the in-flight OTA job (queues an `ota_flash_abort` daemon
  *   command).
  */
-export default function handler(req, res) {
+export default async function handler(req, res) {
   if (!ensureHardware(res)) return;
   if (req.method === 'POST') {
     try {
@@ -63,6 +65,18 @@ export default function handler(req, res) {
         return res.status(413).json({
           error: `Image too large (${image.length} bytes; max ${MAX_IMAGE_BYTES}).`,
         });
+      }
+
+      // Refuse an image that's obviously for the other product (e.g.
+      // os4_receiver onto an omni). Best-effort: unknown board type or an
+      // unrecognized filename falls through to the daemon unchanged.
+      try {
+        const repo = await getRepo(req);
+        const row = await repo.receivers.getById(ident);
+        const mismatch = imageMismatchError(file_name, row?.board_type, 'receiver');
+        if (mismatch) return res.status(409).json({ error: mismatch });
+      } catch (e) {
+        console.warn('ota_flash: board type check skipped:', e?.message);
       }
 
       const sanitizedRate = [0, 1, 2].includes(parseInt(rate, 10))

@@ -1,10 +1,11 @@
 import { ensureHardware } from '@/util/apiGuards';
 import { getLatest } from '@/util/firmwareLatest';
+import { FIRMWARE_PRODUCTS } from '@/util/firmwareVersion';
 
 /**
  * GET /api/system/firmware_latest
  *   Query:
- *     device?   "dongle" | "receiver"  -- omit to get both
+ *     device?   "receiver" | "dongle" | "omni"  -- omit to get all
  *     refresh?  "1" | "true"           -- bypass the server-side TTL cache
  *
  *   Returns the latest published firmware version + download link for the
@@ -14,8 +15,11 @@ import { getLatest } from '@/util/firmwareLatest';
  *   status bar / receivers page out-of-date warnings and the "Flash latest"
  *   buttons.
  *
- *   Single device:  { device, available, version, link, fetchedAt, stale }
- *   Both devices:   { receiver: {...}, dongle: {...} }
+ *   Single product: { device, available, version, link, fetchedAt, stale }
+ *   All products:   { receiver: {...}, dongle: {...}, omni: {...} }
+ *
+ *   receiver/dongle are the dedicated os4 boards; omni is the byh_omni image
+ *   (either role). Pick the entry with firmwareProduct(boardType, role).
  */
 export default async function handler(req, res) {
   if (!ensureHardware(res)) return;
@@ -32,17 +36,19 @@ export default async function handler(req, res) {
       const result = await getLatest(device, { force });
       return res.status(200).json(result);
     }
-    const [receiver, dongle] = await Promise.all([
-      getLatest('receiver', { force }),
-      getLatest('dongle', { force }),
-    ]);
-    return res.status(200).json({ receiver, dongle });
+    const results = await Promise.all(
+      FIRMWARE_PRODUCTS.map((p) => getLatest(p, { force })),
+    );
+    return res.status(200).json(
+      Object.fromEntries(FIRMWARE_PRODUCTS.map((p, i) => [p, results[i]])),
+    );
   } catch (error) {
     console.error('firmware_latest GET failed:', error);
     // getLatest is non-throwing, but guard anyway so the client never sees a 500.
-    return res.status(200).json({
-      receiver: { device: 'receiver', available: false, stale: true },
-      dongle: { device: 'dongle', available: false, stale: true },
-    });
+    return res.status(200).json(
+      Object.fromEntries(
+        FIRMWARE_PRODUCTS.map((p) => [p, { device: p, available: false, stale: true }]),
+      ),
+    );
   }
 }

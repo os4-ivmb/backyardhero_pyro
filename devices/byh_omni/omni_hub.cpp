@@ -260,6 +260,7 @@ void buildInfo(JsonDocument& d) {
   d["device"]      = "byh_omni";
   d["role"]        = "hub_dongle";
   d["fw"]          = hubCfg.fwVersion;
+  d["bt"]          = 1;  // board type: omni (see byh_omni.ino BOARD_TYPE_*)
   d["ident"]       = hubCfg.ident;
   d["ssid"]        = activeSsid;
   d["ap_channel"]  = activeChannel;
