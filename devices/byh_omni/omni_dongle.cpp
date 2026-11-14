@@ -559,9 +559,10 @@ struct ReceiverInfo {
 #define RXUPD_MIN_INTERVAL_MS 100UL
 
 // Bumped from 10 to 32 to support 20+ receivers per the throughput target,
-// then to 128 once the table was slimmed and the status tick sliced (T11).
+// then to 128 once the table was slimmed and the status tick sliced (T11),
+// then back to 64 because 128 overflowed static DRAM (dram0_0_seg) on the S2.
 // numReceivers / nextPollReceiverIdx are uint8_t, so stay below 256.
-#define MAX_RECEIVERS 128
+#define MAX_RECEIVERS 64
 ReceiverInfo receivers[MAX_RECEIVERS];
 uint8_t numReceivers = 0;
 
@@ -648,8 +649,9 @@ struct QueuedCommand {
 #define QF_FOLLOWUP  0x02
 
 // Bumped from 40 to 128 — show-start can enqueue ~300 commands at once.
-// 256 since T11: one fan-out to 128 receivers alone would fill 128.
-#define MAX_COMMANDS_IN_QUEUE 256
+// 256 since T11 for 128-receiver fan-outs; 192 now that MAX_RECEIVERS is 64
+// (256 x 104 B overflowed static DRAM on the S2).
+#define MAX_COMMANDS_IN_QUEUE 192
 QueuedCommand commandBuffer[MAX_COMMANDS_IN_QUEUE];
 int cmdQueueHead = 0;
 int cmdQueueTail = 0;
