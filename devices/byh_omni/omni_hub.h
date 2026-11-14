@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <math.h>
 
 // Hub dongle transport: a WiFi AP with a single HTTP listener on port 80.
 //
@@ -46,7 +47,9 @@ void flush(uint32_t timeoutMs);
 // password can be reset over USB) and take effect on the next hub boot.
 // wifiSet: a null ssid or pass keeps the current value.
 void wifiDescribe(JsonDocument& out);
-bool wifiSet(const char* ssid, const char* pass, const char** err);
+// txPowerDbm: AP transmit power in dBm (mapped to the nearest supported
+// step, applied at once if the hub is running, and stored); NAN keeps it.
+bool wifiSet(const char* ssid, const char* pass, const char** err, float txPowerDbm = NAN);
 void wifiReset();
 
 // Last nRF24 channel the host selected, persisted so the next hub boot can

@@ -14,7 +14,8 @@
       "config": {
         "min_battery_to_fire_pct": 30,
         "require_continuity": true,
-        "show_end_grace_seconds": 5
+        "show_end_grace_seconds": 5,
+      "use_broadcast_control": false
       }
     }
   },

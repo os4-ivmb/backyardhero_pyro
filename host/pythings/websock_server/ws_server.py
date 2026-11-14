@@ -413,12 +413,92 @@ async def aux_watcher():
             STATE_COND.notify_all()
 
 
-def _stable_signature(payload):
-    """Hash the payload *excluding* the per-tick timestamp so we only treat
-    it as 'changed' when something meaningful actually moved."""
-    snapshot = {k: v for k, v in payload.items() if k != "fw_last_update"}
+# Keys that change on every daemon snapshot or every sample without the
+# operator-visible state changing. They are left out of the change signature
+# (T19) and carried by the heartbeat instead.
+_VOLATILE_FW_STATE_KEYS = ("daemon_lup", "daemon_active")
+
+
+def _stable_signature(fw_state_live, aux):
+    """Hash of the content that matters for a full resend: fw_state minus
+    its per-snapshot timestamp / liveness flag, plus the cursor, firing and
+    error inputs. fw_system (CPU, memory, temperature) is excluded; it
+    changes on every sample and rides on the heartbeat."""
+    snapshot = {
+        "fw_state": {k: v for k, v in (fw_state_live or {}).items()
+                     if k not in _VOLATILE_FW_STATE_KEYS},
+        "fw_cursor": aux.get("fw_cursor"),
+        "fw_firing": aux.get("fw_firing"),
+        "fw_error": aux.get("fw_error"),
+        "fw_d_error": aux.get("fw_d_error"),
+    }
     encoded = json.dumps(snapshot, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha1(encoded).hexdigest()
+
+
+def _split_receivers(fw_state):
+    """Split fw_state.receivers into static config (label, type, cue lists,
+    metadata: changes only when the operator edits receivers) and live
+    status (`status`, `drift`). T20: the config is sent once per change as
+    a separate `_rcfg` message; the regular payload carries only the live
+    part plus `receivers_rev`, and the UI store joins them back so every
+    component still reads receivers[ident].cues / .label / .status."""
+    receivers = (fw_state or {}).get("receivers")
+    if not isinstance(receivers, dict):
+        return None, None, None
+    config, live = {}, {}
+    for ident, rcv in receivers.items():
+        if not isinstance(rcv, dict):
+            continue
+        config[ident] = {k: v for k, v in rcv.items() if k not in ("status", "drift")}
+        live[ident] = {k: rcv[k] for k in ("status", "drift") if k in rcv}
+    rev = hashlib.sha1(
+        json.dumps(config, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:16]
+    return config, live, rev
+
+
+# T19: encode once per state version, not once per client per update.
+# (key, signature, payload bytes, receivers rev, rcfg bytes, aux)
+_ENCODED = None
+
+
+async def _encoded_state():
+    """Return the current (signature, payload_bytes, rev, rcfg_bytes, aux),
+    built at most once per (state version, aux sample) for all clients."""
+    global _ENCODED
+    aux = await _get_aux_shared()
+    key = (STATE_VERSION, AUX_CACHE_TS)
+    if _ENCODED is not None and _ENCODED[0] == key:
+        return _ENCODED[1:]
+    fw_state = LATEST_FW_STATE or _read_fw_state_from_file()
+    config, live, rev = _split_receivers(fw_state)
+    if live is not None:
+        fw_state = dict(fw_state)
+        fw_state["receivers"] = live
+        fw_state["receivers_rev"] = rev
+        rcfg_bytes = json.dumps({"_rcfg": config, "rev": rev})
+    else:
+        rcfg_bytes = None
+    payload = dict(aux)
+    payload["fw_state"] = fw_state
+    payload["fw_last_update"] = int(time.time() * 1000)
+    sig = _stable_signature(fw_state, aux)
+    _ENCODED = (key, sig, json.dumps(payload), rev, rcfg_bytes, aux)
+    return _ENCODED[1:]
+
+
+def _heartbeat_bytes(aux):
+    """Small keep-alive. Carries the fields left out of the signature so
+    the UI's daemon-liveness and system-stats indicators stay current."""
+    fw_state = LATEST_FW_STATE or {}
+    return json.dumps({
+        "_hb": True,
+        "fw_last_update": int(time.time() * 1000),
+        "daemon_active": fw_state.get("daemon_active", False),
+        "daemon_lup": fw_state.get("daemon_lup"),
+        "fw_system": aux.get("fw_system"),
+    })
 
 
 # M5: cross-client cache for the auxiliary inputs (CPU temp, error-log
@@ -457,36 +537,37 @@ async def _get_aux_shared():
         return aux
 
 
-async def _build_payload():
-    """Combine the cached fw_state with the shared auxiliary inputs."""
-    aux = await _get_aux_shared()
-    payload = dict(aux)  # shallow copy so per-client keys don't mutate cache
-    payload["fw_state"] = LATEST_FW_STATE or _read_fw_state_from_file()
-    payload["fw_last_update"] = int(time.time() * 1000)
-    return payload
-
-
 async def file_update_server(websocket):
     """
     Per-client task: send a fresh payload whenever STATE_COND fires (i.e.
-    new daemon snapshot or new cursor/firing tick). Sends a heartbeat at
+    new daemon snapshot or new cursor/firing tick). Sends a full payload at
     least every HEARTBEAT_FORCE_SECONDS so a just-connected client sees
-    state even during a quiet period. Also rate-limits sends to
-    MIN_SEND_INTERVAL_S so a chatty daemon can't drown the WS pipe.
+    state even during a quiet period, and a small heartbeat otherwise. Also
+    rate-limits sends to MIN_SEND_INTERVAL_S so a chatty daemon can't drown
+    the WS pipe. Payloads are encoded once and shared by every client.
     """
     updateWebLEDState(WEB_ACT_STATE.RUNNING.value)
     last_signature = None
     last_full_send_ts = 0.0
     last_seen_version = -1
+    sent_rev = None
+
+    async def send_rcfg_if_needed(rev, rcfg_bytes):
+        nonlocal sent_rev
+        if rcfg_bytes is not None and rev != sent_rev:
+            await websocket.send(rcfg_bytes)
+            sent_rev = rev
 
     try:
         # Send an initial snapshot immediately so the UI doesn't have to
-        # wait for a state mutation to render.
-        initial = await _build_payload()
-        last_signature = _stable_signature(initial)
+        # wait for a state mutation to render. Receiver config first, so
+        # the store can join it into the first payload.
+        sig, data, rev, rcfg_bytes, _aux = await _encoded_state()
+        await send_rcfg_if_needed(rev, rcfg_bytes)
+        last_signature = sig
         last_full_send_ts = time.time()
         last_seen_version = STATE_VERSION
-        await websocket.send(json.dumps(initial))
+        await websocket.send(data)
 
         while True:
             # Wake on either a state-version bump or a heartbeat timeout.
@@ -509,23 +590,21 @@ async def file_update_server(websocket):
             if since_last < MIN_SEND_INTERVAL_S:
                 await asyncio.sleep(MIN_SEND_INTERVAL_S - since_last)
 
-            payload = await _build_payload()
-            sig = _stable_signature(payload)
+            last_seen_version = STATE_VERSION
+            sig, data, rev, rcfg_bytes, aux = await _encoded_state()
             now = time.time()
             unchanged = (sig == last_signature)
             within_force_window = (now - last_full_send_ts) < HEARTBEAT_FORCE_SECONDS
 
+            await send_rcfg_if_needed(rev, rcfg_bytes)
             if unchanged and within_force_window:
                 # No meaningful change; send a tiny heartbeat so the
                 # client knows we're still here.
-                hb = {"_hb": True, "fw_last_update": payload["fw_last_update"]}
-                await websocket.send(json.dumps(hb))
+                await websocket.send(_heartbeat_bytes(aux))
             else:
                 last_signature = sig
                 last_full_send_ts = now
-                await websocket.send(json.dumps(payload))
-
-            last_seen_version = STATE_VERSION
+                await websocket.send(data)
     except websockets.exceptions.ConnectionClosed:
         print("Client disconnected")
         updateWebLEDState(WEB_ACT_STATE.DISCONNECTED.value)
@@ -548,7 +627,12 @@ async def main():
         asyncio.create_task(aux_watcher(),           name="aux_watch"),
     ]
 
-    server = await websockets.serve(file_update_server, "0.0.0.0", 8090)
+    # Per-message deflate is the websockets default. On a LAN the CPU cost
+    # can outweigh the bandwidth saved now that payloads are compact (T19);
+    # WS_COMPRESSION=none turns it off so the two can be compared on the Pi.
+    compression = None if os.environ.get("WS_COMPRESSION", "deflate").lower() == "none" else "deflate"
+    server = await websockets.serve(file_update_server, "0.0.0.0", 8090,
+                                    compression=compression)
     print("WebSocket server is running")
     try:
         await server.wait_closed()

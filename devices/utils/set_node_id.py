@@ -108,6 +108,7 @@ from flash_receiver import (  # noqa: E402
     read_boot_banner,
     read_until_any,
     send_setid_and_confirm,
+    set_rf_and_confirm,
 )
 
 
@@ -124,10 +125,19 @@ def parse_args() -> argparse.Namespace:
         help="just print the receiver's current NODE_ID + IDENT and exit (no writes).",
     )
     mode.add_argument(
+        "--set-rf", action="store_true",
+        help="only store the RF channel / system ID given with --rf (no SETID).",
+    )
+    mode.add_argument(
         "--wipe", action="store_true",
         help="clear the NVS identity (back to UNPROVISIONED). Reboots the chip.",
     )
 
+    p.add_argument(
+        "--rf", nargs=2, type=int, metavar=("CHANNEL", "SYSTEM_ID"),
+        help="also store this RF channel (0-125) and system ID (0-255) after SETID "
+             "(or alone with --set-rf). Must match the dongle.",
+    )
     p.add_argument("--node", type=int, help="receiver NODE_ID to set (1-65535). Skips the prompt.")
     p.add_argument("--ident", help="receiver ident string (default: RX<node>). Skips the prompt.")
     p.add_argument(
@@ -223,13 +233,23 @@ def main() -> int:
     if args.wipe:
         return issue_wipe(port)
 
+    if args.set_rf:
+        if not args.rf:
+            print("[set_node_id] ERROR: --set-rf needs --rf CHANNEL SYSTEM_ID", file=sys.stderr)
+            return 1
+        set_rf_and_confirm(port, args.rf[0], args.rf[1])
+        return 0
+
     node_id = args.node if args.node is not None else prompt_node_id()
     if not (1 <= node_id <= 65535):
         print(f"[set_node_id] ERROR: node_id out of range: {node_id}", file=sys.stderr)
         return 1
     ident = args.ident or prompt_ident(default=f"RX{node_id}")
 
-    return issue_setid(port, node_id, ident, wait_banner=not args.no_banner_wait)
+    rc = issue_setid(port, node_id, ident, wait_banner=not args.no_banner_wait)
+    if rc == 0 and args.rf:
+        set_rf_and_confirm(port, args.rf[0], args.rf[1])
+    return rc
 
 
 if __name__ == "__main__":

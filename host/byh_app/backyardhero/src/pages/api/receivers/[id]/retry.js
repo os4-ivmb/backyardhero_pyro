@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { ensureHardware } from '@/util/apiGuards';
 import { COMMAND_DIR } from '@/util/paths';
+import { writeCommandFile } from '@/util/commandFile';
 
 /**
  * POST /api/receivers/:id/retry
@@ -29,10 +30,7 @@ export default function handler(req, res) {
       fs.mkdirSync(folderPath, { recursive: true });
     }
     const filePath = path.join(folderPath, `${Date.now()}-retry-${id}.json`);
-    fs.writeFileSync(
-      filePath,
-      JSON.stringify({ type: 'retry_receiver', ident: id }, null, 2),
-    );
+    writeCommandFile(filePath, { type: 'retry_receiver', ident: id });
     return res.status(200).json({ message: `Retry queued for ${id}.` });
   } catch (error) {
     console.error(`Failed to queue retry_receiver(${id}):`, error);

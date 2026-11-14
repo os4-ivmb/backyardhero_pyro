@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { ensureHardware } from '@/util/apiGuards';
 import { COMMAND_DIR } from '@/util/paths';
+import { writeCommandFile } from '@/util/commandFile';
 
 /**
  * POST /api/receivers/reload
@@ -28,7 +29,7 @@ export default function handler(req, res) {
       fs.mkdirSync(folderPath, { recursive: true });
     }
     const filePath = path.join(folderPath, `${Date.now()}-reload-rcv.json`);
-    fs.writeFileSync(filePath, JSON.stringify({ type: 'reload_receivers' }, null, 2));
+    writeCommandFile(filePath, { type: 'reload_receivers' });
     return res.status(200).json({ message: 'Reload command queued.' });
   } catch (error) {
     console.error('Failed to queue reload_receivers command:', error);

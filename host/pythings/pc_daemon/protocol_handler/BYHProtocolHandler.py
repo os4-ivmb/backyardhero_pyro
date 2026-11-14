@@ -12,6 +12,7 @@ from led_control import *
 from config_loader import load_system_config
 
 from .OtaFlashDriver import OtaFlashDriver
+from .CommandWindow import RESULT_NAMES
 from .DongleFlashDriver import DongleFlashDriver
 
 # Base dirs are env-overridable (defaults reproduce the original container
@@ -47,6 +48,39 @@ ASYNC_LOAD_TIMEOUT_MS = 5000
 # loadComplete (H4). The operator can also cancel manually from the UI
 # (abort_show_load) before this fires.
 LOAD_TIMEOUT_SECONDS = 60
+# Load supervisor (T15): how often it checks, the minimum quiet time before a
+# receiver's load is re-sent (also >= 2 poll intervals), and how many sends a
+# receiver gets before the load fails naming it.
+LOAD_SUPERVISOR_TICK_S = 0.25
+LOAD_RESEND_MIN_S = 3.0
+LOAD_MAX_ATTEMPTS = 4
+
+# stop_all(): STOP is idempotent on the receivers, so it is sent in several
+# passes rather than trusting one. The first pass goes out immediately; the
+# repeat passes run on a short-lived thread at these offsets (seconds after
+# the first pass) so the caller returns promptly.
+STOP_REPEAT_OFFSETS_S = (0.3, 1.0)
+# Host-side spacing between stop lines inside one pass. A stop dispatches on
+# the dongle in ~3ms and its queue holds 128+, so 5ms keeps the queue shallow
+# without the 30ms fan-out pacing used for routine traffic.
+STOP_SEND_SPACING_S = 0.005
+# A stop from inside run_show() is skipped when stop_all() already ran this
+# recently (the operator's stop path sends it directly).
+STOP_DEDUPE_WINDOW_S = 2.0
+# Receivers that report play state and still say "playing" this long after
+# the first stop pass are named in an operator error.
+STOP_CONFIRM_TIMEOUT_S = 2.0
+
+# Timestamped pause / resume (T25). Resume is scheduled this far ahead (plus
+# a little per receiver) so every receiver has the PLAY before it takes
+# effect and they all resume at the same show instant.
+RESUME_LEAD_S = 1.5
+RESUME_LEAD_PER_RECEIVER_S = 0.005
+DONGLE_CAP_TIMED_PAUSE = 0x02
+DONGLE_CAP_BCAST = 0x04
+# Broadcast control ops (T27, dongle `bcast <op> <showId> <at>`).
+BCAST_STOP, BCAST_PAUSE, BCAST_PLAY, BCAST_SHOW_START = 1, 2, 3, 4
+RX_CAP_TIMED_PAUSE = 0x02
 
 def chunk_list(lst, n):
     """Yield successive n-sized chunks from lst."""
@@ -105,6 +139,19 @@ class BYHProtocolHandler:
         self.types = {}
         self.async_load_targets = {}
         self.show_start_time = 0
+        # stop_all() bookkeeping. _stop_generation is bumped by every
+        # stop_all() and by anything that must cancel pending repeat passes
+        # (a new load or show start), so a stale repeat thread exits instead
+        # of stopping a show that started after it.
+        self._stop_generation = 0
+        self._last_stop_all_mono = 0.0
+        # Load supervision (T15). _load_abort is replaced per load and set
+        # to end that load's send loop and supervisor; _load_state tracks
+        # {ident: {"last_send": monotonic, "attempts": n}}.
+        self._load_abort = threading.Event()
+        self._load_abort.set()
+        self._load_state = {}
+        self._load_lock = threading.RLock()
         # Idents of receiver rows that exist only in self.receivers
         # because the currently-loaded show owns a Bilusocn 433MHz zone
         # and we need three 4-cue rows (1-4, 5-8, 9-12) per zone for
@@ -155,10 +202,47 @@ class BYHProtocolHandler:
     def _register_all_receivers_with_dongle(self):
         """Pre-register every (enabled) receiver from config so the dongle's
         TDMA poller starts pinging them immediately, even before any show
-        traffic. Spaced lightly to avoid bursting the queue."""
-        for rcv_ident, rcv_cfg in self.receivers.items():
-            if self._register_receiver_with_dongle(rcv_ident, rcv_cfg):
-                time.sleep(0.03)
+        traffic. Paced by the command window (or lightly spaced on a dongle
+        without command acks). Never waits for results: this runs on the
+        bridge read thread when the handler is built."""
+        cmds = [f"sync {ident} 0 1" for ident, cfg in list(self.receivers.items())
+                if cfg.get("type") != "BILUSOCN_433_TX_ONLY"]
+        self._send_batch(cmds, retry=0, wait=False)
+
+    # ------------------------------------------------------------------
+    # Paced sending (T14). With a dongle that acks `#<seq>` lines, batches
+    # go through the daemon's CommandWindow (up to 16 in flight, failures
+    # reported and retried). Otherwise the old fixed spacing applies.
+    # ------------------------------------------------------------------
+    def _window(self):
+        return getattr(self.parent, 'command_window', None)
+
+    def _send_batch(self, cmds, priority=False, legacy_spacing_s=0.03, retry=1,
+                    wait=True, abort_event=None):
+        """Send command lines in order. Returns [(cmd, result)] for the ones
+        that failed after `retry` retries (always [] without acks or when
+        not waiting)."""
+        window = self._window()
+        if window is None:
+            for cmd in cmds:
+                if abort_event is not None and abort_event.is_set():
+                    break
+                self.parent.send_serial_command(cmd)
+                if legacy_spacing_s:
+                    time.sleep(legacy_spacing_s)
+            return []
+        return window.submit_many(cmds, priority=priority, retry=retry,
+                                  legacy_spacing_s=legacy_spacing_s,
+                                  abort_event=abort_event, wait=wait)
+
+    def _acks_enabled(self):
+        window = self._window()
+        return bool(window is not None and window.enabled)
+
+    @staticmethod
+    def _describe_failures(failures):
+        return ", ".join(f"{cmd.split()[1] if len(cmd.split()) > 1 else cmd}: "
+                         f"{RESULT_NAMES.get(res, res)}" for cmd, res in failures)
 
     def _forget_receiver_on_dongle(self, rcv_ident):
         """Tell the dongle to drop a receiver from its poll table immediately,
@@ -303,19 +387,15 @@ class BYHProtocolHandler:
             # forget AND keep them in self.receivers below.
             if prev.get('__ephemeral'):
                 continue
-            self._forget_receiver_on_dongle(ident)
             forgotten.append(ident)
-            time.sleep(0.03)
+        self._send_batch([f"forget {ident}" for ident in forgotten], retry=0, wait=False)
 
         # Register anyone new (or re-enabled). Always re-issuing sync for
         # already-known receivers is harmless — the dongle's TDMA poller will
         # absorb the no-op.
-        registered = []
-        for ident, def_ in new_map.items():
-            if ident not in old_map:
-                if self._register_receiver_with_dongle(ident, def_):
-                    registered.append(ident)
-                    time.sleep(0.03)
+        registered = [ident for ident, def_ in new_map.items()
+                      if ident not in old_map and def_.get("type") != "BILUSOCN_433_TX_ONLY"]
+        self._send_batch([f"sync {ident} 0 1" for ident in registered], retry=0, wait=False)
 
         # Drop dropped latency sample buffers so memory doesn't grow forever
         # across many enable/disable cycles.
@@ -580,45 +660,95 @@ class BYHProtocolHandler:
                     pass
 
     def updateRelevantStates(self):
+        """Runs on the bridge read thread for every status / rxupd line.
+
+        Only reads state and flips flags: completes the load as soon as
+        every target reports loadComplete. All re-sending and timeouts live
+        on the load supervisor thread (T15), so incoming status is never
+        held up behind a re-send."""
         if self.load_waiting and self.show_id and not self.show_loaded:
-            print("Detected async load wait state. Checking statuses")
-            incomplete_devices = self.get_async_load_targets_not_with_status('loadComplete', True)
-            if not incomplete_devices:
-                print("No more devices to wait on. calling it loaded.")
-                self.show_loaded = True
-                self.load_waiting = False
-                self.load_start_ts = 0
-                self.status = START_SEQUENCE_STEPS.LOADED
-                self.parent.signal_show_loaded(self.show_id)
-            else:
-                # Fail the load visibly once we've exceeded the timeout
-                # instead of retrying the same cues forever (H4). Tear the
-                # async wait down, reset the half-loaded receivers, and tell
-                # the daemon so the UI drops out of the LOADING state and the
-                # error LED comes on -- previously this left show_load_state
-                # stuck on LOADING and the operator with no signal.
-                if self.load_start_ts and (time.time() - self.load_start_ts) > LOAD_TIMEOUT_SECONDS:
-                    incomplete = list(self.async_load_targets.keys())
-                    self._teardown_async_load(send_reset=True)
-                    self.status = START_SEQUENCE_STEPS.ABORTED
-                    self.parent.signal_show_load_failed(
-                        f"Show load timed out after {LOAD_TIMEOUT_SECONDS}s. "
-                        f"Receivers still not loaded: {incomplete}"
+            if not self.get_async_load_targets_not_with_status('loadComplete', True):
+                self._complete_load()
+
+    def _complete_load(self):
+        with self._load_lock:
+            if self.show_loaded or not self.load_waiting:
+                return
+            print("All receivers report loaded. Show loaded.")
+            self.show_loaded = True
+            self.load_waiting = False
+            self.load_start_ts = 0
+            self.status = START_SEQUENCE_STEPS.LOADED
+            self._load_abort.set()   # ends the supervisor
+        self.parent.signal_show_loaded(self.show_id)
+
+    def _load_timeout_s(self):
+        # Scales with fleet size until loads are fast (T14 windowed sends).
+        return max(LOAD_TIMEOUT_SECONDS, 2.0 * len(self.async_load_targets))
+
+    def _load_resend_after_s(self):
+        csi_ms = self.parent.dongle_clock_sync_interval_ms or 2000
+        return max(LOAD_RESEND_MIN_S, 2.0 * csi_ms / 1000.0)
+
+    def _start_load_supervisor(self):
+        threading.Thread(target=self._load_supervisor, name="load-supervisor",
+                         daemon=True).start()
+
+    def _load_supervisor(self):
+        """Watches an async load until it completes, fails or is aborted.
+
+        Every LOAD_SUPERVISOR_TICK_S: completes the load when every target
+        reports loadComplete; re-sends a receiver's load only when it has
+        been quiet for _load_resend_after_s() since its last send; fails the
+        load (naming the receiver) after LOAD_MAX_ATTEMPTS sends, or when the
+        overall timeout passes."""
+        abort = self._load_abort
+        while not abort.wait(LOAD_SUPERVISOR_TICK_S):
+            if not self.load_waiting or self.show_loaded:
+                return
+            incomplete = self.get_async_load_targets_not_with_status('loadComplete', True)
+            if not incomplete:
+                self._complete_load()
+                return
+            now = time.monotonic()
+            if self.load_start_ts and (time.time() - self.load_start_ts) > self._load_timeout_s():
+                self._fail_load(
+                    f"Show load timed out after {self._load_timeout_s():.0f}s. "
+                    f"Receivers still not loaded: {incomplete}"
+                )
+                return
+            resend_after = self._load_resend_after_s()
+            for ident in incomplete:
+                st = self._load_state.setdefault(ident, {"last_send": now, "attempts": 1})
+                if now - st["last_send"] <= resend_after:
+                    continue
+                if st["attempts"] >= LOAD_MAX_ATTEMPTS:
+                    self._fail_load(
+                        f"Show load failed: {ident} did not report loaded after "
+                        f"{st['attempts']} attempts. Still not loaded: {incomplete}"
                     )
                     return
-                print("Waiting on targets to load:", incomplete_devices)
-                self.async_retry_ct += 1
-                if self.async_retry_ct > 10:
-                    print(f"Retrying show load for incomplete devices: {incomplete_devices}")
-                    # Retry only for devices that haven't completed loading
-                    # Skip START_LOAD on retry to avoid resetting receivers that are already loading
-                    incomplete_targets = {dev: self.async_load_targets[dev] for dev in incomplete_devices}
-                    self.load_async_fire_targets(incomplete_targets, self.show_id, False, skip_startload=True)
-                    self.async_retry_ct = 0
+                if abort.is_set():
+                    return
+                print(f"Re-sending show load to {ident} (attempt {st['attempts'] + 1})")
+                targets = self.async_load_targets.get(ident)
+                if targets is None:
+                    continue
+                self.load_async_fire_targets({ident: targets}, self.show_id, False,
+                                             skip_startload=True)
+
+    def _fail_load(self, reason):
+        with self._load_lock:
+            if not self.load_waiting:
+                return
+            self._teardown_async_load(send_reset=True)
+            self.status = START_SEQUENCE_STEPS.ABORTED
+        self.parent.signal_show_load_failed(reason)
 
     def get_async_load_targets_not_with_status(self, key, state):
         false_device_ids = []
-        for device_id, alt in self.async_load_targets.items():
+        debug = self.parent.debug_mode
+        for device_id, alt in list(self.async_load_targets.items()):
             # A receiver can exist in self.receivers (registered with the
             # dongle) but not yet have a `status` substructure if it hasn't
             # answered a poll. Treat "no status" as "not in desired state"
@@ -626,18 +756,18 @@ class BYHProtocolHandler:
             # handler (M3).
             status = self.receivers.get(device_id, {}).get('status')
             if not status:
-                print(f"{device_id}: no status yet; treating as not loaded")
+                if debug:
+                    print(f"{device_id}: no status yet; treating as not loaded")
                 false_device_ids.append(device_id)
                 continue
             if(status.get('showId') == self.show_id):
-                if(status.get(key)):
-                    print(f"{device_id}:{key} is TRUE as '{status.get(key)}'")
-                    pass
-                else:
-                    print(f"{device_id}:{key} is FALSE as '{status.get(key)}'")
+                if not status.get(key):
+                    if debug:
+                        print(f"{device_id}:{key} is FALSE as '{status.get(key)}'")
                     false_device_ids.append(device_id)
             else:
-                print(f"Show {self.show_id} not correct for {device_id}({status.get('showId')})")
+                if debug:
+                    print(f"Show {self.show_id} not correct for {device_id}({status.get('showId')})")
                 false_device_ids.append(device_id)
         return false_device_ids
 
@@ -690,6 +820,18 @@ class BYHProtocolHandler:
         'nbd': 'noBoardsDetected',
         'ca':  'cuesAvailable',
         'fd':  'fireDurationMs',
+        # Receiver play state, bit 0 playing / bit 1 paused. Only present
+        # for receivers that advertise it (receiver FW with status flags),
+        # so a missing key means "unknown", not "idle".
+        'pf':  'stateFlags',
+        # Average auto-retries per delivered frame x10 (link margin; rises
+        # well before successPercent drops).
+        'rt':  'retryAvgX10',
+        # Receiver capability bits from its config response (bit 0 status
+        # flags, bit 1 timestamped pause / resume).
+        'rc':  'rxCaps',
+        # Receiver's stored RF channel / system ID (rxcfg, T26).
+        'sid': 'rfSystemId',
     }
 
     def _merge_receiver(self, abbr_dict, lmtoffset):
@@ -721,6 +863,13 @@ class BYHProtocolHandler:
                 samples.append(value)
                 value = round(sum(samples) / len(samples))
             full_receiver[full_key] = value
+        if 'pf' in abbr_dict:
+            try:
+                flags = int(abbr_dict['pf'])
+                full_receiver['playing'] = bool(flags & 0x01)
+                full_receiver['paused'] = bool(flags & 0x02)
+            except (TypeError, ValueError):
+                pass
         self.receivers[ident]['drift'] = lmtoffset
         self.receivers[ident]['status'] = full_receiver
         return True
@@ -811,7 +960,7 @@ class BYHProtocolHandler:
                     raise
         BYHProtocolHandler._board_type_column_ready = True
 
-    def _persist_rxcfg_to_db(self, ident, fw, bv, ca, fire_dur, bt=None):
+    def _persist_rxcfg_to_db(self, ident, fw, bv, ca, fire_dur, bt=None, rf_ch=None, rf_sid=None):
         """Mirror the receiver-reported config into the Receivers table.
 
         Skips silently if the row doesn't exist (operator may have just
@@ -849,6 +998,12 @@ class BYHProtocolHandler:
                     cfg = {}
                 if fire_dur is not None:
                     cfg['fire_duration_ms'] = int(fire_dur)
+                # Receiver's stored RF channel / system ID (receiver FW with
+                # SETRF; absent otherwise, which means the compiled-in 85 / 0).
+                if rf_ch is not None:
+                    cfg['rf_channel'] = int(rf_ch)
+                if rf_sid is not None:
+                    cfg['rf_system_id'] = int(rf_sid)
 
                 # Board type picks the OTA image (os4_receiver vs byh_omni).
                 # An rxcfg without `bt` comes from a dongle that predates
@@ -973,6 +1128,8 @@ class BYHProtocolHandler:
         # keys added above).
         if ident in self.receivers:
             self._merge_receiver(msg_obj, lmtoffset=0)
+            if 'ch' in msg_obj:
+                self.receivers[ident].setdefault('status', {})['rfChannel'] = msg_obj.get('ch')
             # Stamp lmt with host-now: the rxcfg arrived via the same
             # USB-CDC path as rxupd does for successful TX, so host time
             # is the most accurate "last contact" we have.
@@ -991,6 +1148,8 @@ class BYHProtocolHandler:
             msg_obj.get('ca'),
             msg_obj.get('fd'),
             msg_obj.get('bt'),
+            msg_obj.get('ch'),
+            msg_obj.get('sid'),
         )
 
     def fetch_receiver_config(self, ident, fire_duration_ms=None):
@@ -1042,19 +1201,26 @@ class BYHProtocolHandler:
                 continue
             ok = self.fetch_receiver_config(ident, fire_duration_ms=fire_duration_ms)
             results[ident] = ok
-            # Light spacing so the dongle's 128-deep queue doesn't
-            # saturate when broadcasting to ~30 receivers (each rxcfg
-            # turns into a CONFIG_QUERY + a follow-up CLOCK_SYNC, so we
-            # enqueue 2 slots per receiver).
-            time.sleep(0.04)
+            # Light spacing so the dongle's queue doesn't saturate when
+            # broadcasting to many receivers. Not needed once the dongle
+            # acks commands: then the queue depth is visible per command.
+            if not self._acks_enabled():
+                time.sleep(0.04)
         return results
 
     def process_serial_in(self, msg):
         if(self.parent.debug_mode):
             if not (msg.startswith('OA ') or msg.startswith('ON ')
-                    or msg.startswith('OS ') or msg.startswith('OP ')):
+                    or msg.startswith('OS ') or msg.startswith('OP ')
+                    or msg.startswith('K ')):
                 print("BYH handler got message to look at")
                 print(msg)
+        if msg.startswith('K '):
+            # T14 command ack: K <seq> <result> <queue depth>.
+            window = self._window()
+            if window is not None:
+                window.handle_line(msg)
+            return True
         if msg.startswith('OA '):
             # Compact OTA ACK from dongle hot path:
             #   OA <idx> <state> <bytes> <attempts>
@@ -1169,6 +1335,11 @@ class BYHProtocolHandler:
             try:
                 msg_obj = json.loads(msg)
                 msg_type = msg_obj.get('type','status')
+                # Switch-state lines ({"gpio": ...}) have no `type` either;
+                # the daemon consumes them itself. They are not status ticks
+                # and must not reset dongle fields (board type, caps).
+                if msg_type == 'status' and 'gpio' in msg_obj:
+                    return True
 
                 if(msg_type == 'status'):
                     # Capture the dongle's own FW version from its
@@ -1223,6 +1394,22 @@ class BYHProtocolHandler:
                     if 'csim' in msg_obj:
                         try:
                             self.parent.dongle_clock_sync_interval_ms = int(msg_obj['csim'])
+                        except (TypeError, ValueError):
+                            pass
+                    # Capability bits (bit 0: `#<seq>` command acks). A
+                    # tick without `caps` is from firmware that predates them.
+                    window = self._window()
+                    if window is not None:
+                        window.note_caps(msg_obj.get('caps', 0))
+                    try:
+                        self.parent.dongle_caps = int(msg_obj.get('caps', 0) or 0)
+                    except (TypeError, ValueError):
+                        self.parent.dongle_caps = 0
+                    # Receivers the dongle has put in poll backoff because
+                    # they stopped answering (dongle FW with poll backoff).
+                    if 'off' in msg_obj:
+                        try:
+                            self.parent.dongle_backed_off_receivers = int(msg_obj['off'])
                         except (TypeError, ValueError):
                             pass
                     self.process_status_msg(msg_obj)
@@ -1412,54 +1599,99 @@ class BYHProtocolHandler:
         # Deterministic packing order by start time.
         return sorted(seen.values(), key=lambda it: it.get("startTime", 0))
 
+    def _load_commands_for(self, ident, fire_targets, show_id, send_startload):
+        """(startload line or None, [showloadn lines]) for one receiver."""
+        # De-dupe (device, target) pairs before counting: the receiver
+        # has exactly one targetLoaded slot per position, but
+        # expectedItemsCt counts every cue. Two cues mapped to the same
+        # position would make recheckLoadComplete never reach
+        # expectedTargets, so the host retries the load forever (H4).
+        fire_targets = self._dedupe_fire_targets(ident, fire_targets)
+        startload = f"startload {ident} {len(fire_targets)} {show_id}" if send_startload else None
+        chunks = []
+        # Pack cues SHOW_LOADN_MAX_CUES at a time into single RF frames.
+        for i in range(0, len(fire_targets), self.SHOW_LOADN_MAX_CUES):
+            chunk = fire_targets[i:i + self.SHOW_LOADN_MAX_CUES]
+            # (time_ms, zero_indexed_pos). Clamp a t=0 cue to 1ms: the
+            # receiver's loadOneCue ignores time==0, so the cue would never
+            # set targetLoaded and the load would never complete (H4).
+            packed = [(max(1, round(item["startTime"] * 1000)), item["target"] - 1) for item in chunk]
+            parts = ["showloadn", ident, str(len(packed))]
+            for t, p in packed:
+                parts += [str(int(t)), str(int(p))]
+            parts.append("2")
+            chunks.append(" ".join(parts))
+        return startload, chunks
+
     def load_async_fire_targets(self, async_fire_targets, showId, setLoadTargets=True, skip_startload=False):
         if(setLoadTargets):
             self.async_load_targets = async_fire_targets
+        if not skip_startload:
+            # A stop_all() repeat pass from just before this load would make
+            # the dongle scrub the queued load frames for those receivers.
+            self.cancel_pending_stop_repeats()
 
         self.status = START_SEQUENCE_STEPS.LOADING
+        abort = self._load_abort
+        now = time.monotonic()
 
-        for target_key, fire_targets in async_fire_targets.items():
-            print(f"Processing {target_key}:")
-
-            # De-dupe (device, target) pairs before counting: the receiver
-            # has exactly one targetLoaded slot per position, but
-            # expectedItemsCt counts every cue. Two cues mapped to the same
-            # position would make recheckLoadComplete never reach
-            # expectedTargets, so the host retries the load forever (H4).
-            fire_targets = self._dedupe_fire_targets(target_key, fire_targets)
-
-            # Only send START_LOAD if skip_startload is False (initial load) or if receiver has wrong showId
-            should_send_startload = not skip_startload
+        plan = []   # (ident, startload or None, [chunks])
+        for ident, fire_targets in async_fire_targets.items():
+            # On a re-send, skip START_LOAD when the receiver already has
+            # this show id: it would reset the cues it already holds.
+            send_startload = not skip_startload
             if skip_startload:
-                # Check if receiver already has the correct showId - if so, skip START_LOAD to avoid resetting
-                receiver_status = self.receivers.get(target_key, {}).get('status', {})
-                if receiver_status.get('showId') == showId:
-                    print(f"Skipping START_LOAD for {target_key} - already loading show {showId}")
-                    should_send_startload = False
-            
-            if should_send_startload:
-                expectedItemsCt = len(fire_targets)
-                self.parent.send_serial_command(f"startload {target_key} {expectedItemsCt} {showId}")
-                # Brief settle: dongle just needs to enqueue + dispatch one cmd
-                # (~3-5ms with ACK-payload protocol). 50ms is plenty.
-                time.sleep(0.05)
+                receiver_status = self.receivers.get(ident, {}).get('status') or {}
+                send_startload = receiver_status.get('showId') != showId
+            startload, chunks = self._load_commands_for(ident, fire_targets, showId, send_startload)
+            plan.append((ident, startload, chunks))
+            st = self._load_state.setdefault(ident, {"last_send": now, "attempts": 0})
+            st["last_send"] = now
+            st["attempts"] += 1
 
-            # Pack cues SHOW_LOADN_MAX_CUES at a time into single RF frames.
-            # With 6 cues per frame, a 30-cue receiver loads in ~5 frames
-            # instead of 15 — roughly 3x fewer round-trips.
-            chunk_size = self.SHOW_LOADN_MAX_CUES
-            for i in range(0, len(fire_targets), chunk_size):
-                chunk = fire_targets[i:i + chunk_size]
-                # Convert to (time_ms, zero_indexed_pos) tuples. Clamp a
-                # t=0 cue to 1ms: the receiver's loadOneCue silently
-                # ignores time==0, so the cue never sets targetLoaded and
-                # the load never completes (H4). One ms is inaudible in pyro.
-                packed = [(max(1, round(item["startTime"] * 1000)), item["target"] - 1) for item in chunk]
-                self.send_load_chunk_to_dev(target_key, packed, repeat=2)
-                # Light spacing so we don't outrun the dongle's 128-deep queue
-                # when loading huge shows. Dongle dispatch is ~3-5ms/cmd, so
-                # 30ms per host send leaves ~6x headroom.
-                time.sleep(0.03)
+        if not self._acks_enabled():
+            # Dongle without command acks: the original fixed pacing. The
+            # 50ms after START_LOAD gives the dongle time to dispatch it.
+            for ident, startload, chunks in plan:
+                if abort.is_set():
+                    return
+                if startload:
+                    self.parent.send_serial_command(startload)
+                    time.sleep(0.05)
+                for line in chunks:
+                    if abort.is_set():
+                        return
+                    self.parent.send_serial_command(line)
+                    time.sleep(0.03)
+            return
+
+        # Windowed: everything goes out back to back, up to 16 in flight.
+        # The dongle queue is FIFO, so each receiver's START_LOAD still
+        # reaches it before that receiver's cues.
+        cmds = []
+        for _ident, startload, chunks in plan:
+            if startload:
+                cmds.append(startload)
+            cmds.extend(chunks)
+        failures = self._send_batch(cmds, retry=0, abort_event=abort)
+        if not failures or abort.is_set():
+            return
+        # Retry once. A receiver whose START_LOAD failed gets its whole load
+        # again (re-sending START_LOAD alone would wipe cues it received);
+        # otherwise only the failed frames are re-sent.
+        failed_cmds = {cmd for cmd, _res in failures}
+        retry_cmds = []
+        for _ident, startload, chunks in plan:
+            if startload and startload in failed_cmds:
+                retry_cmds.append(startload)
+                retry_cmds.extend(chunks)
+            else:
+                retry_cmds.extend(c for c in chunks if c in failed_cmds)
+        failures = self._send_batch(retry_cmds, retry=0, abort_event=abort)
+        if failures:
+            # The supervisor re-sends on its timer and fails the load if a
+            # receiver never completes; just log what the dongle reported.
+            print(f"Load: frames not delivered: {self._describe_failures(failures)}")
 
     #Figure out which ones we need to preload (native) and which we fire via. daemon (433 Bilusocn).. or if we have zones+targets that we cant fire. Annotates firing array.
     def load_targets_to_devices(self, firing_array, showId):
@@ -1502,26 +1734,39 @@ class BYHProtocolHandler:
         for shows that only use native receivers (i.e. everything that
         was authorable before the rework).
         """
+        # A previous load's supervisor (if any) ends; this load gets a
+        # fresh abort event shared by the send loop and its supervisor.
+        self._load_abort.set()
+        self._load_abort = threading.Event()
+        self._load_state = {}
         self.show_id=show_id
         self.errors = []
         if(len(firing_array) == 0):
             self.parent.write_error("Loaded a show with an empty firing array? No")
             return False
         self._materialize_show_bilusocn_receivers(show_receivers)
+        self.load_start_ts = time.time()
         self.load_targets_to_devices(firing_array, show_id)
-        
+
         if(self.errors):
             print("There were errors..")
             self.show_loaded = False
             return False
 
         print(f"Loaded firing array for Show {show_id}")
-        print( self.firing_array)
+        if self.parent.debug_mode:
+            print(self.firing_array)
 
+        if self._load_abort.is_set():
+            # Aborted by the operator while the cues were being sent.
+            return False
         if(self.async_load_targets):
             self.load_waiting = True
-            self.load_start_ts = time.time()
-            print("Failure signaled, but implied that process is waiting for async load.")
+            self._start_load_supervisor()
+            # Status may already have reported everything loaded while the
+            # cues were still going out.
+            self.updateRelevantStates()
+            print("Waiting for receivers to report loaded.")
             return False
         else:
             self.status = START_SEQUENCE_STEPS.LOADED
@@ -1534,18 +1779,19 @@ class BYHProtocolHandler:
         `send_reset` is set we first tell the receivers that were mid-load
         to `reset` so they discard the partially-loaded program instead of
         sitting on a stale half-show. We reassign async_load_targets to a
-        fresh dict (rather than mutating in place) so the read-thread's
-        updateRelevantStates can't trip over a dict-changed-size error if
-        it's iterating concurrently.
+        fresh dict (rather than mutating in place) so a concurrent reader
+        can't trip over a dict-changed-size error.
         """
+        self._load_abort.set()   # stops the send loop and the supervisor
         targets = self.async_load_targets
-        if send_reset and targets:
-            self.send_to_active_nodes("reset", " 0", rcv_dict_override=targets)
         self.load_waiting = False
         self.load_start_ts = 0
         self.async_retry_ct = 0
         self.async_load_targets = {}
+        self._load_state = {}
         self.show_loaded = False
+        if send_reset and targets:
+            self.send_to_active_nodes("reset", " 0", rcv_dict_override=targets, wait=False)
 
     def abort_show_load(self):
         """Operator-requested cancel of an in-progress show load.
@@ -1559,34 +1805,178 @@ class BYHProtocolHandler:
         if not (self.load_waiting or self.status == START_SEQUENCE_STEPS.LOADING):
             return False, "no show load in progress"
         incomplete = list(self.async_load_targets.keys())
-        self._teardown_async_load(send_reset=True)
-        self.status = START_SEQUENCE_STEPS.ABORTED
+        with self._load_lock:
+            self._teardown_async_load(send_reset=True)
+            self.status = START_SEQUENCE_STEPS.ABORTED
         self.parent.write_error(
             f"Show load cancelled by operator. Receivers reset: {incomplete}"
         )
         return True, "show load aborted"
 
-    def send_to_active_nodes(self, cmdpre, cmdpost="", repeat=1, rcv_dict_override=None):
-        receiver_dict = self.receivers.items()
-        print("STAN")
-        print(rcv_dict_override)
-        if(rcv_dict_override):
-            receiver_dict = rcv_dict_override.items()
+    def request_load_abort(self):
+        """Thread-safe signal used by the daemon's fast command lane: stops
+        the cue-send loop between sends without waiting for it."""
+        self._load_abort.set()
 
-        for rcv, statusdata in receiver_dict:
-            if self.receiver_is_connected(rcv):
-                # Include repeat count in the command itself
-                cmd = f"{cmdpre} {rcv}{cmdpost} {repeat}"
-                print(f"Sending cmd: {cmd} (repeat={repeat})")
-                self.parent.send_serial_command(cmd)
-                # Dongle now dispatches each cmd in ~3-5ms (down from ~30ms).
-                # 30ms host spacing keeps the dongle queue comfortably below
-                # its 128-deep limit even when broadcasting to 32 receivers.
-                time.sleep(0.03)
+    def _nrf_receiver_idents(self, preferred=None):
+        """Every nRF24 receiver ident (not 433MHz TX-only rows), with the
+        idents in `preferred` first. No connectivity filter: a receiver that
+        has gone quiet keeps running its loaded program through a dropout,
+        so it is exactly the one that most needs a stop."""
+        order = []
+        seen = set()
+        receivers = dict(self.receivers)
+        for ident in list(preferred or ()):
+            rcv = receivers.get(ident)
+            if rcv is None or rcv.get('type') == 'BILUSOCN_433_TX_ONLY':
+                continue
+            if ident not in seen:
+                order.append(ident)
+                seen.add(ident)
+        for ident, rcv in receivers.items():
+            if ident in seen or rcv.get('type') == 'BILUSOCN_433_TX_ONLY':
+                continue
+            if rcv.get('__ephemeral'):
+                continue
+            order.append(ident)
+            seen.add(ident)
+        return order
+
+    def _send_stop_pass(self, idents):
+        # Priority, and never waits: delivery is confirmed by the repeat
+        # passes and the playing flags, not by blocking the caller.
+        self._send_batch([f"stop {ident} 0 5" for ident in idents], priority=True,
+                         legacy_spacing_s=STOP_SEND_SPACING_S, retry=0, wait=False)
+
+    def cancel_pending_stop_repeats(self):
+        """Invalidate any in-flight stop_all() repeat thread. Called when a
+        new load or show start begins so a late repeat pass can't knock a
+        freshly armed receiver back out."""
+        self._stop_generation += 1
+
+    def stop_all(self, reason="stop"):
+        """Send STOP to every nRF receiver, now and again shortly after.
+
+        Independent of the show thread: works when run_show() has already
+        returned or died, and does not filter on connectivity. The first
+        pass is sent on the caller's thread (stop is safety-critical, so the
+        caller pays ~5ms per receiver); repeat passes run in the background
+        and the call returns straight after the first pass."""
+        self._last_stop_all_mono = time.monotonic()
+        self._stop_generation += 1
+        gen = self._stop_generation
+        idents = self._nrf_receiver_idents(self.async_load_targets)
+        if not idents:
+            return
+        print(f"stop_all ({reason}): {len(idents)} receiver(s)")
+        # One broadcast reaches every receiver within a few ms (T27, opt-in);
+        # the unicast passes below still go to each receiver.
+        self._broadcast(BCAST_STOP)
+        self._send_stop_pass(idents)
+        threading.Thread(
+            target=self._stop_repeat_worker,
+            args=(idents, gen, reason),
+            name="stop-repeat",
+            daemon=True,
+        ).start()
+
+    def _broadcast_enabled(self):
+        """Broadcast control (T27) is opt-in: the dongle must support it and
+        the protocol config must set `use_broadcast_control` (it depends on
+        every nRF24 module in the fleet honouring no-ACK frames, which needs
+        a bench test first)."""
+        caps = int(getattr(self.parent, 'dongle_caps', 0) or 0)
+        return bool(caps & DONGLE_CAP_BCAST) and bool(self.config.get('use_broadcast_control', False))
+
+    def _broadcast(self, op, show_id=0, at_ms=0):
+        """Send one broadcast control command ahead of the unicast fan-out.
+        Additive: the unicast commands still follow, so a receiver that
+        missed the broadcast is covered either way. Returns True if sent."""
+        if not self._broadcast_enabled():
+            return False
+        self._send_batch([f"bcast {int(op)} {int(show_id or 0)} {int(at_ms or 0)}"],
+                         priority=True, legacy_spacing_s=0, retry=0, wait=False)
+        return True
+
+    def _receiver_playing(self, ident):
+        """True / False from the receiver's reported play state, or None
+        when it doesn't report one (older firmware)."""
+        status = self.receivers.get(ident, {}).get('status') or {}
+        if 'playing' not in status:
+            return None
+        return bool(status.get('playing'))
+
+    def _stop_repeat_worker(self, idents, gen, reason):
+        t0 = time.monotonic()
+        for offset in STOP_REPEAT_OFFSETS_S:
+            delay = (t0 + offset) - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            if gen != self._stop_generation:
+                return
+            # Repeat only where the stop isn't confirmed: receivers still
+            # reporting playing, plus every receiver that can't report.
+            targets = [i for i in idents if self._receiver_playing(i) is not False]
+            if not targets:
+                break
+            try:
+                self._send_stop_pass(targets)
+            except Exception as e:
+                print(f"stop_all repeat ({reason}) failed: {e}")
+                return
+        delay = (t0 + STOP_CONFIRM_TIMEOUT_S) - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        if gen != self._stop_generation:
+            return
+        still_playing = [i for i in idents if self._receiver_playing(i)]
+        if still_playing:
+            self.parent.write_error(
+                f"Stop not confirmed: still reporting playing "
+                f"{STOP_CONFIRM_TIMEOUT_S:.0f}s after stop: {', '.join(still_playing)}"
+            )
+
+    def _stop_from_show_thread(self, reason):
+        """run_show()'s own stop path. Skipped when stop_all() already ran
+        for this stop (the operator path calls it directly); still needed
+        when the stop event was set by something that does not send, such as
+        a protocol-handler swap."""
+        if time.monotonic() - self._last_stop_all_mono < STOP_DEDUPE_WINDOW_S:
+            return
+        self.stop_all(reason)
+
+    def send_to_active_nodes(self, cmdpre, cmdpost="", repeat=1, rcv_dict_override=None,
+                             require_connected=True, wait=True):
+        """Send `cmdpre IDENT cmdpost repeat` to receivers.
+
+        `rcv_dict_override` (when not None) limits the fan-out to those
+        idents; an empty dict sends nothing. `require_connected=False` also
+        targets receivers the host has not heard from recently. stop and
+        pause go out as priority commands. Returns [(cmd, result)] for
+        commands the dongle reported as not delivered (after one retry);
+        always [] on a dongle without command acks.
+        """
+        receiver_dict = list(self.receivers.items())
+        if rcv_dict_override is not None:
+            receiver_dict = list(rcv_dict_override.items())
+
+        cmds = []
+        for rcv, _statusdata in receiver_dict:
+            if self.receivers.get(rcv, {}).get('type') == 'BILUSOCN_433_TX_ONLY':
+                continue
+            if (not require_connected) or self.receiver_is_connected(rcv):
+                cmds.append(f"{cmdpre} {rcv}{cmdpost} {repeat}")
             else:
-                print(f"Not sendinf to {rcv} as not connected.")
-        
-
+                print(f"Not sending to {rcv} as not connected.")
+        if not cmds:
+            return []
+        if self.parent.debug_mode:
+            print(f"Sending {len(cmds)}x {cmdpre} (repeat={repeat})")
+        failures = self._send_batch(cmds, priority=cmdpre in ("stop", "pause"),
+                                    wait=wait)
+        if failures:
+            print(f"{cmdpre}: not delivered to {self._describe_failures(failures)}")
+        return failures
 
     def unload_show(self):
         self.time_cursor=-1
@@ -1758,9 +2148,78 @@ class BYHProtocolHandler:
         return errors
 
 
+    def _abort_show(self, reason, send_stop=True):
+        """Common exit for every stop / abort branch of run_show()."""
+        print(reason)
+        self.running_show = False
+        self.status = START_SEQUENCE_STEPS.ABORTED
+        self.parent.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
+        if send_stop:
+            self._stop_from_show_thread(reason)
+
+    def _timed_pause_supported(self):
+        """(dongle forwards timestamps, every show receiver honours them)."""
+        dongle = bool(int(getattr(self.parent, 'dongle_caps', 0) or 0) & DONGLE_CAP_TIMED_PAUSE)
+        receivers = all(
+            int((self.receivers.get(ident, {}).get('status') or {}).get('rxCaps', 0) or 0)
+            & RX_CAP_TIMED_PAUSE
+            for ident in self.async_load_targets
+        )
+        return dongle, dongle and receivers
+
+    def _wait_while_paused(self):
+        """Block while the show is paused. Sends PAUSE to the show's
+        receivers on entry and PLAY on resume. Returns the seconds spent
+        paused, or None when the show was stopped while paused.
+
+        T25: PAUSE and PLAY carry the synchronized time they take effect at,
+        so a receiver's delivery delay no longer becomes a permanent offset.
+        When every show receiver supports it, the resume is scheduled
+        RESUME_LEAD_S ahead and the host waits for that instant too, so 433
+        cues and the audio cursor stay aligned with the receivers. Without
+        full support the lead is 0 (legacy receivers resume on arrival)."""
+        print("Schedule paused.")
+        pause_mono = time.monotonic()
+        pause_at_ms = int(time.time() * 1000)
+        dongle_timed, all_timed = self._timed_pause_supported()
+        stamp = pause_at_ms if dongle_timed else 0
+        self._broadcast(BCAST_PAUSE, self.show_id, stamp)
+        self.send_to_active_nodes("pause", f" {stamp}", 5, self.async_load_targets,
+                                  require_connected=False)
+        while self.schedule_pause_event.is_set():
+            if self.schedule_stop_event.wait(0.1):
+                # M4: ABORTED so the UI doesn't show a stale step after a
+                # stop-during-pause.
+                self._abort_show("Schedule stopped while paused.")
+                return None
+        dongle_timed, all_timed = self._timed_pause_supported()
+        lead = 0.0
+        if all_timed:
+            lead = RESUME_LEAD_S + RESUME_LEAD_PER_RECEIVER_S * len(self.async_load_targets)
+        # Express the resume instant in both clock domains from the same
+        # monotonic reading: paused_for is then exact on both sides.
+        paused_for = (time.monotonic() - pause_mono) + lead
+        resume_at_ms = pause_at_ms + int(round(paused_for * 1000))
+        paused_for = (resume_at_ms - pause_at_ms) / 1000.0
+        print(f"Schedule resuming (lead {lead:.2f}s).")
+        self._broadcast(BCAST_PLAY, self.show_id, resume_at_ms if dongle_timed else 0)
+        self.send_to_active_nodes("play", f" {resume_at_ms if dongle_timed else 0}", 5,
+                                  self.async_load_targets, require_connected=False)
+        # Hold the host timeline until the receivers resume.
+        while time.monotonic() < pause_mono + paused_for:
+            if self.schedule_stop_event.wait(min(0.05, max(0.0, pause_mono + paused_for - time.monotonic()))):
+                self._abort_show("Schedule stopped while resuming.")
+                return None
+        print("Schedule resumed.")
+        self.parent.led_handler.update("show_run_state", RUN_STATE.RUNNING.value)
+        return paused_for
+
     def run_show(self):
         self.schedule_stop_event.clear()  # Reset the stop event
         self.schedule_pause_event.clear()  # Reset the stop event
+        # A stop_all() repeat pass still in flight from an earlier stop must
+        # not land after this start's SHOW_START.
+        self.cancel_pending_stop_repeats()
         self.parent.led_handler.update("show_run_state", RUN_STATE.RUNNING.value)
         self.status = START_SEQUENCE_STEPS.START_PENDING
         self.parent.led_handler.update("show_run_state", RUN_STATE.PRECHECK.value)
@@ -1781,6 +2240,26 @@ class BYHProtocolHandler:
             self.parent.write_error("Precheck failed. Aborting show.")
             return
 
+        try:
+            self._run_show_body()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"Error in schedule: {e}")
+            # The receivers keep running their loaded schedule whatever
+            # happened to this thread, so stop them before reporting.
+            try:
+                self.stop_all("schedule error")
+            except Exception as stop_err:
+                print(f"stop_all after schedule error failed: {stop_err}")
+            self.running_show = False
+            self.status = START_SEQUENCE_STEPS.ABORTED
+            self.parent.led_handler.update("error_state", ERR_STATE.DAEMON.value)
+            self.parent.write_error(f"Error in schedule: {e}")
+            self.parent.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
+            return
+
+    def _run_show_body(self):
         # Re-sync the host->dongle wall clock immediately before every show
         # start. This is the recovery path for the case where the dongle has
         # rebooted WITHOUT the daemon noticing -- most commonly a USB hot-replug
@@ -1801,7 +2280,10 @@ class BYHProtocolHandler:
         # dongle's CLOCK_SYNC frames time to propagate the new offset to every
         # receiver well before T-0.
         self.sync_tx_clock()
-        time.sleep(0.2)  # let the dongle apply tsOffset before we sample time()
+        # Let the dongle apply tsOffset before we sample time().
+        if self.schedule_stop_event.wait(0.2):
+            self._abort_show("Schedule stopped before show start.")
+            return
 
         # `show_start_time` is sent to receivers over the wire, so it
         # has to be in the wall-clock (epoch ms) domain that msync set
@@ -1820,6 +2302,7 @@ class BYHProtocolHandler:
         # trusting stale status (e.g. a showstart dropped over a flaky post-
         # replug link).
         self.invalidate_cached_start_ready()
+        self._broadcast(BCAST_SHOW_START, self.show_id, self.show_start_time)
         self.send_to_active_nodes("showstart",f" {self.show_start_time} 0 {self.show_id}", 6, self.async_load_targets)
 
         print("Waiting on start accept")
@@ -1836,10 +2319,14 @@ class BYHProtocolHandler:
                 self.status = START_SEQUENCE_STEPS.ABORTED
                 for shitty_node in not_ready_nodes:
                     self.errors.append(f"Start: {shitty_node} did not signal start ready by {ABORT_PRE_START_SECONDS} before start. Aborting show.")
+                # Receivers that did accept SHOW_START are armed; disarm them.
+                self.stop_all("start not confirmed")
                 return
             print("Async nodes have not reported back. Still Waiting on: ")
             print(not_ready_nodes)
-            time.sleep(1)
+            if self.schedule_stop_event.wait(1):
+                self._abort_show("Schedule stopped while waiting for start accept.")
+                return
             if(nrnct > 5):
                 print("Nodes not ready, reissuing start command")
                 nrnct = 0
@@ -1848,157 +2335,113 @@ class BYHProtocolHandler:
                 self.send_to_active_nodes("showstart",f" {self.show_start_time} 0 {self.show_id}", 5, not_ready_targets)
             not_ready_nodes = self.get_async_load_targets_not_with_status('startReady', True)
             nrnct=nrnct+1
-        try:
-            time.sleep(1)
-            self.status = START_SEQUENCE_STEPS.START_CONFIRMED
-            self.parent.led_handler.update("show_run_state", RUN_STATE.COUNTDOWN.value)
-            print("Waiting for show start.")
 
-            # Pre-start countdown on the monotonic clock. Receivers are
-            # waiting against their msynced wall clocks (= the same
-            # instant in wall-clock terms), so as long as nothing steps
-            # the Pi's wall clock between msync and showstart they fire
-            # together. If something DOES step the wall clock the host
-            # NTP guard re-msyncs (see byh-timesync-guard.service); the
-            # monotonic wait here keeps THIS process honest in the
-            # meantime.
-            while(time.monotonic() < show_start_monotonic):
-                self.send_to_active_nodes("play", " 0", 5, self.async_load_targets)
-                time.sleep(3)
+        if self.schedule_stop_event.wait(1):
+            self._abort_show("Schedule stopped before countdown.")
+            return
+        self.status = START_SEQUENCE_STEPS.START_CONFIRMED
+        self.parent.led_handler.update("show_run_state", RUN_STATE.COUNTDOWN.value)
+        print("Waiting for show start.")
+
+        # Pre-start countdown on the monotonic clock. Receivers are
+        # waiting against their msynced wall clocks (= the same
+        # instant in wall-clock terms), so as long as nothing steps
+        # the Pi's wall clock between msync and showstart they fire
+        # together. If something DOES step the wall clock the host
+        # NTP guard re-msyncs (see byh-timesync-guard.service); the
+        # monotonic wait here keeps THIS process honest in the
+        # meantime. The waits are capped at the remaining countdown so
+        # the host's own timeline starts at T-0 rather than up to 3s
+        # late, and wake immediately on a stop.
+        while(time.monotonic() < show_start_monotonic):
+            self.send_to_active_nodes("play", " 0", 5, self.async_load_targets)
+            remaining = show_start_monotonic - time.monotonic()
+            if remaining <= 0:
+                break
+            if self.schedule_stop_event.wait(min(3.0, remaining)):
+                self._abort_show("Schedule stopped during countdown.")
+                return
+        self.status = START_SEQUENCE_STEPS.STARTED
+        self.parent.led_handler.update("show_run_state", RUN_STATE.RUNNING.value)
+        print("Started show!")
+        self.running_show = True  # Set running state
+        print(self.firing_array)
+        pause_offset = 0
+        # All in-show timing is on the monotonic clock. firing_array
+        # items carry RELATIVE offsets from t=0 so the wall clock
+        # never enters the calculation again until the show ends.
+        # Anchored on the planned T-0 (not "now"), which is the instant
+        # the receivers count from.
+        start_time_monotonic = show_start_monotonic
+        last_write_time = time.monotonic()  # Track last file write time
+
+        for item in self.firing_array:
+            delay = item['startTime']  # Convert to MS
+            while (time.monotonic() - start_time_monotonic) < (delay + pause_offset):
                 if self.schedule_stop_event.is_set():
-                    print("Schedule stopped signaling nodes.")
-                    self.running_show = False
-                    self.status = START_SEQUENCE_STEPS.ABORTED
-                    self.parent.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
-                    self.send_to_active_nodes("stop", " 0", 5)
-                    return
-            self.status = START_SEQUENCE_STEPS.STARTED
-            self.parent.led_handler.update("show_run_state", RUN_STATE.RUNNING.value)
-            print("Started show!")
-            self.running_show = True  # Set running state
-            print(self.firing_array)
-            pause_start = 0
-            pause_offset = 0
-            # All in-show timing is on the monotonic clock. firing_array
-            # items carry RELATIVE offsets from t=0 so the wall clock
-            # never enters the calculation again until the show ends.
-            start_time_monotonic = time.monotonic()
-            last_write_time = start_time_monotonic  # Track last file write time
-
-            for item in self.firing_array:
-                delay = item['startTime']  # Convert to MS
-                while (time.monotonic() - start_time_monotonic) < (delay + pause_offset):
-                    if self.schedule_stop_event.is_set():
-                        print("Schedule stopped signaling nodes.")
-                        self.running_show = False
-                        self.status = START_SEQUENCE_STEPS.ABORTED
-                        self.parent.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
-                        self.send_to_active_nodes("stop", " 0", 5)
-                        return
-                    if self.schedule_pause_event.is_set():
-                        print("Schedule paused.")
-                        pause_start = time.monotonic()
-                        self.send_to_active_nodes("pause", " 0", 5)
-                        while self.schedule_pause_event.is_set():  # Stay in paused state
-                            time.sleep(0.1)
-                            if self.schedule_stop_event.is_set():
-                                print("Schedule stopped.")
-                                self.send_to_active_nodes("stop", " 0", 5)
-
-                                self.parent.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
-                                self.running_show = False
-                                # M4: set ABORTED so the UI doesn't show a
-                                # stale step after a stop-during-pause.
-                                self.status = START_SEQUENCE_STEPS.ABORTED
-                                return
-
-                        if pause_start:
-                            pause_offset += (time.monotonic() - pause_start)
-                            pause_start = 0
-
-                        print("Schedule resumed.")
-                        self.parent.led_handler.update("show_run_state", RUN_STATE.RUNNING.value)
-                        self.send_to_active_nodes("play", " 0", 5)
-
-                    time.sleep(0.01)  # Check stop event frequently
-                    self.time_cursor = round((time.monotonic() - start_time_monotonic + pause_offset),2)
-
-                    # Overwrite file every second
-                    if time.monotonic() - last_write_time >= 1:
-                        self.parent.write_time_cursor(self.time_cursor)
-                        last_write_time = time.monotonic()
-
-                self.fire_item(item)
-                print(f"Executing scheduled command: {item}")
-            print("All commands fired.")
-
-            # The last cue FIRING is not the end of the show. Each cue keeps
-            # playing for its `duration` (a shell's rise+break, a cake's run,
-            # etc.), so the real content end is the latest cue end across the
-            # whole array -- not just the last-fired cue, since an earlier cue
-            # with a long duration can outlast it. On top of that the operator
-            # can configure a grace period so the host keeps reporting the show
-            # as running for a few extra seconds (song tails, finale smoke,
-            # etc.). Receivers finishing after their last cue is expected and
-            # fine; this wait only governs how long the HOST considers the show
-            # live so the UI (audio playback, cursor) doesn't stop early.
-            content_end = max(
-                (it['startTime'] + it.get('duration', 0) for it in self.firing_array),
-                default=0,
-            )
-            grace_seconds = 0.0
-            try:
-                grace_seconds = max(0.0, float(self.config.get('show_end_grace_seconds', 0) or 0))
-            except (TypeError, ValueError):
-                grace_seconds = 0.0
-            show_end = content_end + grace_seconds
-            print(
-                f"Last cue fired. Holding show live until content end "
-                f"{content_end:.2f}s + grace {grace_seconds:.2f}s = {show_end:.2f}s"
-            )
-
-            while (time.monotonic() - start_time_monotonic) < (show_end + pause_offset):
-                if self.schedule_stop_event.is_set():
-                    print("Schedule stopped during post-show grace.")
-                    self.running_show = False
-                    self.status = START_SEQUENCE_STEPS.ABORTED
-                    self.parent.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
-                    self.send_to_active_nodes("stop", " 0", 5)
+                    self._abort_show("Schedule stopped signaling nodes.")
                     return
                 if self.schedule_pause_event.is_set():
-                    print("Schedule paused during post-show grace.")
-                    pause_start = time.monotonic()
-                    self.send_to_active_nodes("pause", " 0", 5)
-                    while self.schedule_pause_event.is_set():
-                        time.sleep(0.1)
-                        if self.schedule_stop_event.is_set():
-                            print("Schedule stopped.")
-                            self.send_to_active_nodes("stop", " 0", 5)
-                            self.parent.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
-                            self.running_show = False
-                            self.status = START_SEQUENCE_STEPS.ABORTED
-                            return
-                    if pause_start:
-                        pause_offset += (time.monotonic() - pause_start)
-                        pause_start = 0
-                    print("Schedule resumed.")
-                    self.parent.led_handler.update("show_run_state", RUN_STATE.RUNNING.value)
-                    self.send_to_active_nodes("play", " 0", 5)
+                    paused_for = self._wait_while_paused()
+                    if paused_for is None:
+                        return
+                    pause_offset += paused_for
 
-                time.sleep(0.01)
-                self.time_cursor = round((time.monotonic() - start_time_monotonic + pause_offset), 2)
+                time.sleep(0.01)  # Check stop event frequently
+                self.time_cursor = round((time.monotonic() - start_time_monotonic - pause_offset),2)
+
+                # Overwrite file every second
                 if time.monotonic() - last_write_time >= 1:
                     self.parent.write_time_cursor(self.time_cursor)
                     last_write_time = time.monotonic()
 
-            print("Show grace period complete.")
-            self.running_show = False
-            self.parent.led_handler.update("show_run_state", RUN_STATE.OFF.value)
-            self.status = START_SEQUENCE_STEPS.LOADED
-            return
-        except Exception as e:
-            print(f"Error in schedule: {e}")
-            self.parent.led_handler.update("error_state", ERR_STATE.DAEMON.value)
-            self.parent.write_error(f"Error in schedule: {e}")
-            self.parent.led_handler.update("show_run_state", RUN_STATE.STOPPED.value)
-            return
+            self.fire_item(item)
+            print(f"Executing scheduled command: {item}")
+        print("All commands fired.")
+
+        # The last cue FIRING is not the end of the show. Each cue keeps
+        # playing for its `duration` (a shell's rise+break, a cake's run,
+        # etc.), so the real content end is the latest cue end across the
+        # whole array -- not just the last-fired cue, since an earlier cue
+        # with a long duration can outlast it. On top of that the operator
+        # can configure a grace period so the host keeps reporting the show
+        # as running for a few extra seconds (song tails, finale smoke,
+        # etc.). Receivers finishing after their last cue is expected and
+        # fine; this wait only governs how long the HOST considers the show
+        # live so the UI (audio playback, cursor) doesn't stop early.
+        content_end = max(
+            (it['startTime'] + it.get('duration', 0) for it in self.firing_array),
+            default=0,
+        )
+        grace_seconds = 0.0
+        try:
+            grace_seconds = max(0.0, float(self.config.get('show_end_grace_seconds', 0) or 0))
+        except (TypeError, ValueError):
+            grace_seconds = 0.0
+        show_end = content_end + grace_seconds
+        print(
+            f"Last cue fired. Holding show live until content end "
+            f"{content_end:.2f}s + grace {grace_seconds:.2f}s = {show_end:.2f}s"
+        )
+
+        while (time.monotonic() - start_time_monotonic) < (show_end + pause_offset):
+            if self.schedule_stop_event.is_set():
+                self._abort_show("Schedule stopped during post-show grace.")
+                return
+            if self.schedule_pause_event.is_set():
+                paused_for = self._wait_while_paused()
+                if paused_for is None:
+                    return
+                pause_offset += paused_for
+
+            time.sleep(0.01)
+            self.time_cursor = round((time.monotonic() - start_time_monotonic - pause_offset), 2)
+            if time.monotonic() - last_write_time >= 1:
+                self.parent.write_time_cursor(self.time_cursor)
+                last_write_time = time.monotonic()
+
+        print("Show grace period complete.")
+        self.running_show = False
+        self.parent.led_handler.update("show_run_state", RUN_STATE.OFF.value)
+        self.status = START_SEQUENCE_STEPS.LOADED
+        return

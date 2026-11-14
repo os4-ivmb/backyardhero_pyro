@@ -11,9 +11,12 @@ from enum import Enum
 from led_control import *
 import socket
 import select
+import errno
+from collections import deque
 
 from config_loader import load_system_config
-from protocol_handler.BYHProtocolHandler import BYHProtocolHandler
+from protocol_handler.BYHProtocolHandler import BYHProtocolHandler, START_SEQUENCE_STEPS
+from protocol_handler.CommandWindow import CommandWindow
 
 # Configuration
 #
@@ -29,6 +32,13 @@ LED_FILE_PATH = os.path.join(_DATA_DIR, "ledstate")
 LED_FILE_PATH_WEB = os.path.join(_DATA_DIR, "webactstate")
 COMMAND_DIR = os.path.join(_RUN_DIR, "d_cmd")
 COMMAND_POLL_INTERVAL_S = 0.05
+# Command types that can run for seconds (cue sends, DB reloads, flash
+# staging). They run one at a time on the slow lane so stop, abort and
+# manual fire are never queued behind them (T16).
+SLOW_LANE_COMMANDS = {
+    'load_show', 'unload_show', 'reload_receivers',
+    'ota_flash_start', 'dongle_flash_start',
+}
 CURSOR_FILE = os.path.join(_RUN_DIR, "fw_cursor")
 SERIAL_PORT = os.environ.get("SERIAL_PORT", "/dev/ttyACM0")
 BAUD_RATE = int(os.environ.get("SERIAL_BAUD", "115200"))
@@ -318,6 +328,14 @@ class FireworkDaemon:
     def __init__(self):
         self.serial_connection = None
         self.running = True
+        # Serialises writes to the bridge socket. send_serial_command is
+        # called from the command thread, the show thread, the read thread,
+        # stop_all's repeat thread and LED updates; without this, two
+        # sendall() calls can interleave and corrupt both lines.
+        self._serial_send_lock = threading.Lock()
+        # Acknowledged, windowed command sending (T14). Inactive until the
+        # dongle's status tick advertises command acks (`caps` bit 0).
+        self.command_window = CommandWindow(self.send_serial_command)
         self.running_show = False
         self.command_timer_threads = []  # Tracks all schedule threads
         self.schedule_stop_event = threading.Event()  # Used to stop schedules
@@ -386,6 +404,12 @@ class FireworkDaemon:
         # `csim`). UI uses this to confirm the operator's edit took
         # effect (or got clamped).
         self.dongle_clock_sync_interval_ms = None
+        # Registered receivers the dongle is currently polling less often
+        # because they stopped answering (`off` in the status tick). None
+        # until a dongle that reports it is heard.
+        self.dongle_backed_off_receivers = None
+        # Dongle capability bits from its status tick (`caps`).
+        self.dongle_caps = 0
         # The dongle's own FW_VERSION, as reported in each per-second
         # status frame. None until the first frame arrives. Surfaced in
         # /data/state so the dongle update flow can show
@@ -404,6 +428,15 @@ class FireworkDaemon:
 
         self.led_handler = LEDHandler(self)
 
+        # T16 command intake. The command directory stays the durable
+        # queue; `_cmd_wake` is set by a filesystem watcher so a new command
+        # file is picked up immediately instead of on the next 50ms poll.
+        # Long-running commands go to a single slow-lane worker.
+        self._cmd_wake = threading.Event()
+        self._slow_cv = threading.Condition()
+        self._slow_queue = deque()
+        self._slow_running_type = None
+
         # State-publish plumbing. `_state_dirty` is a threading.Event the
         # state flusher coalesces on -- any code path that mutates state
         # the UI cares about should call mark_state_dirty() rather than
@@ -414,6 +447,13 @@ class FireworkDaemon:
         self._state_dirty = threading.Event()
         self._state_pub_sock = None
         self._state_pub_warned = False
+        self._state_oversize_warned = False
+        self._last_state_size_log = 0.0
+        # monitor_switch only marks state dirty when one of the values it
+        # derives changes (T18); the flusher's 1s timeout is the heartbeat.
+        self._last_switch_snapshot = None
+        # mtime of the webact file at the last read (skip unchanged reads).
+        self._webact_mtime = None
         # Last value we stamped into /data/byh_show_state. Cached so
         # update_state_file() only writes the marker file when the
         # high-level show state actually transitions, not on every tick.
@@ -440,6 +480,8 @@ class FireworkDaemon:
         self._state_dirty.set()
 
     def _publish_state_to_socket(self, state_json_bytes):
+        """Returns False when the snapshot is too big for one datagram, so
+        the caller writes the state file right away instead."""
         """Best-effort fire-and-forget push to the WS server.
 
         Uses an abstract-namespace-free unix datagram so the WS server
@@ -460,14 +502,33 @@ class FireworkDaemon:
                 self._state_pub_sock.setblocking(False)
             self._state_pub_sock.sendto(state_json_bytes, STATE_SOCKET_PATH)
             self._state_pub_warned = False
+            self._state_oversize_warned = False
         except (FileNotFoundError, ConnectionRefusedError, BlockingIOError):
             # Most common case: WS server hasn't bound yet. The file
             # write is the fallback; don't spam the log.
             pass
+        except OSError as e:
+            if e.errno == errno.EMSGSIZE:
+                # Snapshot bigger than the socket send buffer. Live updates
+                # would otherwise silently fall back to the rate-limited
+                # file, ~1.5s behind. Tell the operator once; the caller
+                # writes the file immediately for this snapshot.
+                if not self._state_oversize_warned:
+                    self._state_oversize_warned = True
+                    self.write_error(
+                        f"State snapshot too large for the live socket "
+                        f"({len(state_json_bytes)} bytes); UI updates fall back "
+                        f"to the state file."
+                    )
+                return False
+            if not self._state_pub_warned:
+                print(f"State socket publish failed (will keep trying): {e}")
+                self._state_pub_warned = True
         except Exception as e:
             if not self._state_pub_warned:
                 print(f"State socket publish failed (will keep trying): {e}")
                 self._state_pub_warned = True
+        return True
 
     def _publish_show_state_marker(self, show_loaded, show_running):
         """Write /data/byh_show_state when the high-level show state changes.
@@ -561,6 +622,14 @@ class FireworkDaemon:
             file.write('0')
 
     def load_webact_state_and_settings(self):
+        # Called every 100ms; only re-read when the file actually changed.
+        try:
+            mtime = os.stat(LED_FILE_PATH_WEB).st_mtime_ns
+        except OSError:
+            mtime = None
+        if mtime is not None and mtime == self._webact_mtime:
+            return
+        self._webact_mtime = mtime
         try:
             # Try to open and read the file
             with open(LED_FILE_PATH_WEB, 'r') as file:
@@ -625,6 +694,7 @@ class FireworkDaemon:
             }
 
             sock.sendall((json.dumps(config_cmd) + '\n').encode('utf-8'))
+            self._reset_command_window()
             self.tcp_socket = sock
             return True
 
@@ -634,6 +704,16 @@ class FireworkDaemon:
             self.led_handler.update("tx_active", TX_ACTIVE_STATE.DEVICE_ERROR.value)
             self.tcp_socket = None
             return False
+
+    def _reset_command_window(self):
+        """The dongle on the other end may have rebooted or changed: fail
+        every outstanding command and wait for its next status tick to
+        re-enable acks."""
+        try:
+            self.command_window.note_caps(0)
+            self.command_window.reset()
+        except Exception as e:
+            print(f"command window reset failed: {e}")
 
     def _close_tcp_socket(self):
         """Tear down the current bridge socket and reset line buffers so a
@@ -645,6 +725,7 @@ class FireworkDaemon:
             except Exception:
                 pass
         self.tcp_socket = None
+        self._reset_command_window()
         # A partial line from the dead connection must not be prepended to
         # data from the new one.
         self.tcp_recv_buffer = bytearray()
@@ -703,6 +784,7 @@ class FireworkDaemon:
         # A successful reopen clears a "couldn't find the hub" error from
         # the previous attempt, even when this event is debounced away.
         self.link_error = None
+        self._reset_command_window()
         self.mark_state_dirty()
         now = time.monotonic()
         last = getattr(self, '_last_dongle_resync_ts', 0.0)
@@ -731,6 +813,8 @@ class FireworkDaemon:
 
     def read_from_tcp(self):
         """Read data from the TCP socket and process it like serial data."""
+        # This thread delivers command acks, so it must never wait on one.
+        self.command_window.mark_no_wait_thread()
         while self.running:
             try:
                 if hasattr(self, 'tcp_socket') and self.tcp_socket:
@@ -817,6 +901,20 @@ class FireworkDaemon:
                                             # + re-register so firing self-heals.
                                             bypass = True
                                             self._handle_serial_reopened(tcpsrvmsg)
+                                        elif(tcpsrvmsg.get('type') == 'bridge_event'):
+                                            # The bridge dropped outbound lines
+                                            # because the dongle link was down
+                                            # (rate-limited to one event a
+                                            # second). A stop or fire may be
+                                            # among them: tell the operator.
+                                            bypass = True
+                                            if tcpsrvmsg.get('event') == 'tx_dropped':
+                                                self.write_error(
+                                                    f"Bridge dropped {tcpsrvmsg.get('count', '?')} "
+                                                    f"command(s) to the dongle: "
+                                                    f"{tcpsrvmsg.get('reason') or 'link down'}"
+                                                )
+                                                self.mark_state_dirty()
                                         elif('gpio' in tcpsrvmsg):
                                             if(self.debug_enabled()):
                                                 print("GPIO set")
@@ -880,10 +978,12 @@ class FireworkDaemon:
     # Replace send_serial_command as well:
     def send_serial_command(self, data):
         """Send a command over the TCP connection."""
-        if hasattr(self, 'tcp_socket') and self.tcp_socket:
+        sock = getattr(self, 'tcp_socket', None)
+        if sock:
             try:
-                wd=(data + '\n').encode('utf-8')
-                self.tcp_socket.sendall((data + '\n').encode('utf-8'))
+                wd = (data + '\n').encode('utf-8')
+                with self._serial_send_lock:
+                    sock.sendall(wd)
                 if(self.debug_enabled()):
                     # Skip echoing OTA chunk bodies to stdout -- a single
                     # transfer is 13K+ lines of opaque hex which buries
@@ -1007,9 +1107,14 @@ class FireworkDaemon:
                 self.last_switch_state = switch_state
                 self.last_arming_state = arming_state
                 self.last_man_fire_state = man_fire_state
-                # The flusher will coalesce this with any other dirty
-                # signal that arrived in the last debounce window.
-                self.mark_state_dirty()
+                # Publish only when something this loop derives changed; the
+                # flusher's 1s timeout already sends a heartbeat snapshot.
+                # (Marking dirty every 100ms forced 10 full snapshots/s.)
+                snapshot = (switch_state, arming_state, man_fire_state,
+                            self.start_sw_active, self.man_fire_enabled, self.is_armed)
+                if snapshot != self._last_switch_snapshot:
+                    self._last_switch_snapshot = snapshot
+                    self.mark_state_dirty()
                 time.sleep(0.1)  # Check every 100ms
             except Exception as e:
                 # Never swallow silently: a broad except here is exactly
@@ -1027,6 +1132,10 @@ class FireworkDaemon:
                     os.makedirs(COMMAND_DIR)
 
                 for filename in sorted(os.listdir(COMMAND_DIR)):
+                    # cmd_daemon.js writes `.<name>.tmp` and renames it into
+                    # place; never read a file that is still being written.
+                    if filename.startswith('.') or filename.endswith('.tmp'):
+                        continue
                     file_path = os.path.join(COMMAND_DIR, filename)
                     if os.path.isfile(file_path):
                         with open(file_path, 'r') as file:
@@ -1052,7 +1161,81 @@ class FireworkDaemon:
 
             if handled_command:
                 self.mark_state_dirty()
-            time.sleep(COMMAND_POLL_INTERVAL_S)
+            # Woken at once by the directory watcher; the timeout keeps the
+            # old 50ms poll as a fallback (no watchfiles, missed event).
+            self._cmd_wake.wait(COMMAND_POLL_INTERVAL_S)
+            self._cmd_wake.clear()
+
+    def watch_command_dir(self):
+        """Set _cmd_wake whenever the command directory changes. Without
+        watchfiles the poll loop just keeps its 50ms cadence."""
+        try:
+            from watchfiles import watch
+        except ImportError:
+            print("watchfiles not installed; command intake polls every 50ms")
+            return
+        os.makedirs(COMMAND_DIR, exist_ok=True)
+        stop = threading.Event()
+        while self.running:
+            try:
+                for _changes in watch(COMMAND_DIR, debounce=10, step=1,
+                                      stop_event=stop, yield_on_timeout=False,
+                                      raise_interrupt=False):
+                    self._cmd_wake.set()
+                    if not self.running:
+                        stop.set()
+            except Exception as e:
+                print(f"command dir watcher failed ({e}); retrying in 1s")
+                time.sleep(1.0)
+
+    # ------------------------------------------------------------------
+    # Slow lane (T16)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _is_slow_command(command):
+        ctype = command.get('type')
+        if ctype in SLOW_LANE_COMMANDS:
+            return True
+        # Fetching every receiver's config sends one query per receiver.
+        return ctype == 'fetch_receiver_config' and not command.get('ident')
+
+    def _enqueue_slow(self, command):
+        with self._slow_cv:
+            if command.get('type') == 'load_show' and (
+                self._slow_running_type == 'load_show'
+                or any(c.get('type') == 'load_show' for c in self._slow_queue)
+            ):
+                self.write_error("A show load is already in progress; ignoring the second load_show.")
+                return
+            self._slow_queue.append(command)
+            self._slow_cv.notify()
+
+    def _drop_queued_loads(self):
+        """Abort: a load still waiting in the slow lane never starts."""
+        with self._slow_cv:
+            before = len(self._slow_queue)
+            self._slow_queue = deque(c for c in self._slow_queue if c.get('type') != 'load_show')
+            return before - len(self._slow_queue)
+
+    def slow_lane_worker(self):
+        while self.running:
+            with self._slow_cv:
+                while self.running and not self._slow_queue:
+                    self._slow_cv.wait(0.5)
+                if not self.running:
+                    return
+                command = self._slow_queue.popleft()
+                self._slow_running_type = command.get('type')
+            try:
+                self._handle_command_now(command)
+            except Exception as e:
+                tb = traceback.format_exc()
+                print(f"Slow-lane command {command.get('type')} failed: {e}\n{tb}")
+                self.write_error(f"Command {command.get('type')} failed: {e}")
+            finally:
+                with self._slow_cv:
+                    self._slow_running_type = None
+                self.mark_state_dirty()
 
     def write_error(self, err_msg):
         """Appends a line to a file with a timestamp prepended in square brackets."""
@@ -1105,6 +1288,14 @@ class FireworkDaemon:
             self.protocol_handler.handle_manual_fire(zone, target, kind=kind)
 
     def handle_command(self, command):
+        """Handle a single command: long-running ones are queued on the slow
+        lane, everything else runs here on the intake thread."""
+        if isinstance(command, dict) and self._is_slow_command(command):
+            self._enqueue_slow(command)
+            return
+        self._handle_command_now(command)
+
+    def _handle_command_now(self, command):
         """Handle a single command."""
         if 'type' in command:
             if command['type'] == 'serial':
@@ -1122,8 +1313,12 @@ class FireworkDaemon:
                 if(self.delegate_start_to_client and self.waiting_for_client_start):
                     self.start_schedule(True)
             elif command['type'] == 'stop_show':
-                if(self.delegate_start_to_client and not self.waiting_for_client_start):
-                    self.stop_schedule(True)
+                # Stop is always honoured. It used to be ignored while
+                # waiting_for_client_start was set, which is also the state
+                # a running show is in after a pause from the box switch,
+                # so the UI's Abort did nothing on a paused show.
+                self.waiting_for_client_start = False
+                self.stop_schedule(True)
             elif command['type'] == 'pause_show':
                 if(self.delegate_start_to_client and not self.waiting_for_client_start):
                     self.led_handler.update("show_run_state", RUN_STATE.DELEGATE_WAIT.value)
@@ -1148,6 +1343,10 @@ class FireworkDaemon:
                 # thread, but the hang we actually care about is the async
                 # wait (receivers never confirming loadComplete) -- during
                 # which this thread is free, so the cancel lands promptly.
+                dropped = self._drop_queued_loads()
+                if dropped:
+                    self.write_error("Queued show load cancelled by operator.")
+                    self.led_handler.update("show_load_state", LOAD_STATE.OFF.value)
                 if self.protocol_handler:
                     aborted, msg = self.protocol_handler.abort_show_load()
                     if aborted:
@@ -1494,7 +1693,8 @@ class FireworkDaemon:
         """Load a show from the database, process it, and save the runtime payload."""
         self.led_handler.update("show_load_state", LOAD_STATE.LOADING.value)
         self.led_handler.update("error_state", ERR_STATE.OFF.value)
-        time.sleep(1)
+        # (A 1s sleep used to sit here; it only held the LOADING LED and
+        # blocked the command thread. Loads now run on the slow lane.)
         if(not self.protocol_handler):
             self.write_error("Cannot load a show as there is no available protocol to run")
             self.led_handler.update("show_load_state", LOAD_STATE.LOAD_ERROR.value)
@@ -1566,6 +1766,8 @@ class FireworkDaemon:
                 else:
                     if(self.protocol_handler.load_waiting):
                         print("Waiting on load success")
+                    elif self.protocol_handler.status == START_SEQUENCE_STEPS.ABORTED:
+                        print(f"Show ID {show_id} load aborted.")
                     else:
                         print(f"Error loading show ID {show_id}")
                         self.led_handler.update("show_load_state", LOAD_STATE.LOAD_ERROR.value)
@@ -1638,6 +1840,17 @@ class FireworkDaemon:
             self.write_error("No show is loaded. Cannot start.")
             return
 
+        if (self.protocol_handler.running_show
+                and self.protocol_handler.schedule_pause_event.is_set()):
+            # A paused show resumes rather than starting again. In delegated
+            # mode the box switch only arms the resume; the client confirms.
+            if self.delegate_start_to_client and not from_delegate:
+                self.led_handler.update("show_run_state", RUN_STATE.DELEGATE_WAIT.value)
+                self.waiting_for_client_start = True
+                return
+            self.resume_schedule()
+            return
+
         if self.protocol_handler.running_show:
             print("A show is already running. Cannot start another.")
             self.write_error(f"A show is already running. Cannot start another.")
@@ -1676,11 +1889,31 @@ class FireworkDaemon:
         if(self.protocol_handler):
             self.protocol_handler.schedule_pause_event.set()  # Signal all schedules to pause
 
-    def stop_schedule(self, update_led=True):
-        """Stop all running schedules."""
+    def resume_schedule(self):
+        """Resume a paused show. run_show() notices the cleared pause event
+        and sends PLAY to the show's receivers."""
+        if not self.protocol_handler:
+            return
+        print("Resuming schedule...")
+        self.waiting_for_client_start = False
+        self.led_handler.update("show_run_state", RUN_STATE.RUNNING.value)
+        self.protocol_handler.schedule_pause_event.clear()
+
+    def stop_schedule(self, update_led=True, reason="operator stop"):
+        """Stop all running schedules.
+
+        The radio STOP goes out directly from here (stop_all), not from the
+        show thread, so it is sent even when that thread has already ended
+        or died, and it reaches receivers the host has not heard from
+        recently."""
         print("Stopping all schedules...")
         if(self.protocol_handler):
             self.protocol_handler.schedule_stop_event.set()  # Signal all schedules to stop
+            try:
+                self.protocol_handler.stop_all(reason)
+            except Exception as e:
+                print(f"stop_all failed: {e}")
+                self.write_error(f"Sending stop to receivers failed: {e}")
 
         # Wait for all schedule threads to terminate, but never block the
         # operator's stop indefinitely if a thread is wedged.
@@ -1739,6 +1972,7 @@ class FireworkDaemon:
             # actually accepted, e.g. when their config request was
             # out-of-range and got bounded.
             "dongle_clock_sync_interval_ms": self.dongle_clock_sync_interval_ms,
+            "dongle_backed_off_receivers": self.dongle_backed_off_receivers,
             "device_is_armed": gpio_handler.read_key(ARMING_GPIO_KEY) == LOW,
             "manual_fire_active": gpio_handler.read_key(MAN_FIRE_GPIO_KEY) == LOW,
             "start_sw_active": self.start_sw_active,
@@ -1850,16 +2084,22 @@ class FireworkDaemon:
         # datagram socket (for sub-millisecond delivery to the WS server
         # when it's bound).
         try:
-            state_bytes = json.dumps(state, indent=4).encode("utf-8")
+            # Compact: every reader parses JSON. indent=4 made the snapshot
+            # ~4x larger (78KB vs 19KB at 32 receivers x 64 cues).
+            state_bytes = json.dumps(state, separators=(",", ":")).encode("utf-8")
         except Exception as e:
             print(f"Error serializing daemon state: {e}")
             return
+        if self.debug_mode and time.monotonic() - self._last_state_size_log >= 60:
+            self._last_state_size_log = time.monotonic()
+            print(f"State snapshot size: {len(state_bytes)} bytes")
 
         # Best-effort push to the in-process WS subscriber FIRST. This
         # gives the lowest-latency path priority; the file write is the
         # robust fallback. Order matters because the file write does
         # disk I/O which can take milliseconds on a busy SD card.
-        self._publish_state_to_socket(state_bytes)
+        if not self._publish_state_to_socket(state_bytes):
+            force_file = True
 
         # Stamp the show-state marker for the host NTP guard. We pull
         # the booleans straight out of the snapshot we just built so
@@ -1957,6 +2197,8 @@ class FireworkDaemon:
 
         threads = [
             threading.Thread(target=self.poll_command_dir),
+            threading.Thread(target=self.watch_command_dir, daemon=True),
+            threading.Thread(target=self.slow_lane_worker, daemon=True),
             threading.Thread(target=self.read_from_tcp),
             #threading.Thread(target=self.listen_serial),
             threading.Thread(target=self.monitor_switch),

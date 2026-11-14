@@ -17,8 +17,10 @@ import com.backyardhero.hub.proto.WifiConfig
 import com.backyardhero.hub.show.Show
 import com.backyardhero.hub.show.StepFireMode
 import com.backyardhero.hub.show.swapZone
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -32,6 +34,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
 
 /** Same freshness rule as the daemon (LATENCY_TO_CONSIDER_ONLINE_MS). */
 const val RECEIVER_ONLINE_MS = 8_000L
@@ -41,6 +47,15 @@ private const val ABORT_PRE_START_MS = 10_000L
 private const val LOAD_TIMEOUT_MS = 60_000L
 private const val LOAD_RESEND_MS = 5_000L
 private const val SEND_SPACING_MS = 30L
+/** Commands in flight when the dongle acknowledges them (`caps` bit 0). */
+private const val ACK_WINDOW = 16
+private const val ACK_TIMEOUT_MS = 2_000L
+/** Stop is sent twice, this far apart, before anything else goes to the receivers. */
+private const val STOP_REPEAT_MS = 300L
+/** After the second stop pass, wait at most this long for every receiver to be heard from. */
+private const val STOP_SETTLE_TIMEOUT_MS = 1_500L
+/** Timed resume is scheduled this far ahead (plus 5 ms per receiver). */
+private const val RESUME_LEAD_MS = 1_500L
 private const val STEP_LOCKOUT_MS = 250L
 
 data class ReceiverState(
@@ -62,7 +77,16 @@ data class ReceiverState(
     val cuesAvailable: Int? = null,
     val fireDurationMs: Int? = null,
     val continuity: LongArray? = null,
+    /** Playing / paused flags (`pf`); null when the receiver doesn't report them. */
+    val stateFlags: Int? = null,
+    /** Average auto-retries per delivered frame x10 (`rt`). */
+    val retryAvgX10: Int? = null,
+    /** Capability bits from the config response (`rc`). */
+    val rxCaps: Int? = null,
 ) {
+    /** null when unknown (older receiver firmware). */
+    val playing: Boolean? get() = stateFlags?.let { (it and 1) != 0 }
+    val paused: Boolean? get() = stateFlags?.let { (it and 2) != 0 }
     fun online(nowMs: Long): Boolean = lastSeenMs != null && nowMs - lastSeenMs < RECEIVER_ONLINE_MS
     fun ageMs(nowMs: Long): Long? = lastSeenMs?.let { nowMs - it }
     val batteryPct: Int? get() = battery?.let { (it * 100 / 256).coerceIn(0, 100) }
@@ -226,11 +250,9 @@ class HubSession(
     private fun onConnected() {
         lastLed = null
         scope.launch {
-            send(Cmd.msync(System.currentTimeMillis()))
-            delay(SEND_SPACING_MS)
+            sendPaced(Cmd.msync(System.currentTimeMillis()))
             for (ident in _registered.value) {
-                send(Cmd.register(ident))
-                delay(SEND_SPACING_MS)
+                sendPaced(Cmd.register(ident))
             }
             send(Cmd.WIFI_GET)
             pushLedState(force = true)
@@ -238,8 +260,71 @@ class HubSession(
     }
 
     private fun onDisconnected() {
+        failPendingAcks()
         _switches.value = Switches()
         _dongle.update { it.copy(lastTickPhoneMs = null) }
+    }
+
+    // ------------------------------------------------------------------
+    // Paced sending. A dongle that advertises command acks answers every
+    // `#<seq> ` line with `K <seq> <result> <q>`; up to ACK_WINDOW commands
+    // are kept in flight and the next one goes out as soon as a slot frees,
+    // instead of a fixed 30 ms per line. Older dongles keep the fixed
+    // spacing. Priority commands (stop, pause) never wait for a slot.
+    // ------------------------------------------------------------------
+    @Volatile private var dongleAcks = false
+    /** Dongle forwards timestamped play / pause (`caps` bit 1). */
+    @Volatile private var dongleTimedPause = false
+    private val ackSlots = Semaphore(ACK_WINDOW)
+    private val pendingAcks = ConcurrentHashMap<Int, CompletableDeferred<Int>>()
+    private var nextSeq = 1
+
+    private suspend fun sendPaced(line: String, priority: Boolean = false, legacyDelayMs: Long = SEND_SPACING_MS) {
+        if (!dongleAcks) {
+            send(line)
+            delay(legacyDelayMs)
+            return
+        }
+        if (priority) {
+            sendSequenced(line)
+            return
+        }
+        ackSlots.acquire()
+        val ack = sendSequenced(line)
+        scope.launch {
+            try {
+                withTimeoutOrNull(ACK_TIMEOUT_MS) { ack.await() }
+            } finally {
+                ackSlots.release()
+            }
+        }
+    }
+
+    private fun sendSequenced(line: String): CompletableDeferred<Int> {
+        val seq = synchronized(pendingAcks) {
+            val s = nextSeq
+            nextSeq = if (nextSeq >= 65_535) 1 else nextSeq + 1
+            s
+        }
+        val ack = CompletableDeferred<Int>()
+        pendingAcks.put(seq, ack)?.complete(-1)
+        if (!send("#$seq $line")) {
+            pendingAcks.remove(seq)
+            ack.complete(-2)
+        }
+        return ack
+    }
+
+    private fun onAck(seq: Int, result: Int) {
+        pendingAcks.remove(seq)?.complete(result)
+        if (result == 2) _events.tryEmit("Dongle queue full: a command was dropped")
+    }
+
+    private fun failPendingAcks() {
+        dongleAcks = false
+        val all = pendingAcks.values.toList()
+        pendingAcks.clear()
+        all.forEach { it.complete(-2) }
     }
 
     private fun send(line: String): Boolean {
@@ -276,12 +361,17 @@ class HubSession(
                 }
             }
             is Inbound.OtherJson -> appendLog(LogLine(now, false, line))
+            is Inbound.Ack -> onAck(msg.seq, msg.result)
         }
         afterStateChange(now)
     }
 
     private fun onTick(tick: DongleTick, now: Long) {
         dongleClockOffset = now - tick.timestamp
+        val acks = (tick.caps and 1) != 0
+        if (!acks && dongleAcks) failPendingAcks()
+        dongleAcks = acks
+        dongleTimedPause = (tick.caps and 2) != 0
         _dongle.value = DongleState(
             lastTickPhoneMs = now,
             fw = tick.fw,
@@ -322,6 +412,9 @@ class HubSession(
                 cuesAvailable = u.cuesAvailable ?: old.cuesAvailable,
                 fireDurationMs = u.fireDurationMs ?: old.fireDurationMs,
                 continuity = u.continuity ?: old.continuity,
+                stateFlags = u.stateFlags ?: old.stateFlags,
+                retryAvgX10 = u.retryAvgX10 ?: old.retryAvgX10,
+                rxCaps = u.rxCaps ?: old.rxCaps,
             )
             map + (u.ident to merged)
         }
@@ -464,8 +557,7 @@ class HubSession(
         prefs.edit().putStringSet(KEY_RECEIVERS, _registered.value.toSet()).apply()
         scope.launch {
             for (ident in added) {
-                send(Cmd.register(ident))
-                delay(SEND_SPACING_MS)
+                sendPaced(Cmd.register(ident))
             }
         }
     }
@@ -736,7 +828,7 @@ class HubSession(
         radioRun++
         radioFired.clear()
         if (previous != null && !previous.isSequence) {
-            scope.launch { previous.receivers.forEach { send(Cmd.reset(it)); delay(SEND_SPACING_MS) } }
+            scope.launch { previous.receivers.forEach { sendPaced(Cmd.reset(it)) } }
         }
         addReceivers(show.receivers)
         addBilusocn(show.bilusocnZones)
@@ -770,8 +862,7 @@ class HubSession(
             val now = System.currentTimeMillis()
             if (now - started > LOAD_TIMEOUT_MS) {
                 for (ident in pending) {
-                    send(Cmd.reset(ident))
-                    delay(SEND_SPACING_MS)
+                    sendPaced(Cmd.reset(ident))
                 }
                 _show.update {
                     it.copy(phase = ShowPhase.LOAD_ERROR, message = "Load timed out on ${pending.joinToString()}")
@@ -791,12 +882,10 @@ class HubSession(
     private suspend fun sendLoad(show: Show, ident: String, skipStartLoad: Boolean) {
         val cues = show.cuesFor(ident)
         if (!skipStartLoad) {
-            send(Cmd.startLoad(ident, cues.size, show.id))
-            delay(50)
+            sendPaced(Cmd.startLoad(ident, cues.size, show.id), legacyDelayMs = 50)
         }
         for (chunk in cues.chunked(Cmd.SHOW_LOADN_MAX_CUES)) {
-            send(Cmd.showLoadN(ident, chunk.map { it.fireTimeMs to it.target }))
-            delay(SEND_SPACING_MS)
+            sendPaced(Cmd.showLoadN(ident, chunk.map { it.fireTimeMs to it.target }))
         }
     }
 
@@ -870,8 +959,7 @@ class HubSession(
             if (now - lastRetry > 2_000) {
                 lastRetry = now
                 for (ident in notReady) {
-                    send(Cmd.showStart(ident, startAt, show.id, repeat = 5))
-                    delay(SEND_SPACING_MS)
+                    sendPaced(Cmd.showStart(ident, startAt, show.id, repeat = 5))
                 }
             }
             delay(200)
@@ -880,8 +968,7 @@ class HubSession(
         _show.update { it.copy(phase = ShowPhase.COUNTDOWN) }
         while (scope.isActive && System.currentTimeMillis() < startAt) {
             for (ident in show.receivers) {
-                send(Cmd.play(ident))
-                delay(SEND_SPACING_MS)
+                sendPaced(Cmd.play(ident))
             }
             val remaining = startAt - System.currentTimeMillis()
             delay(minOf(3_000L, remaining.coerceAtLeast(0)))
@@ -935,8 +1022,7 @@ class HubSession(
 
     private suspend fun broadcastShowStart(show: Show, startAt: Long, repeat: Int) {
         for (ident in show.receivers) {
-            send(Cmd.showStart(ident, startAt, show.id, repeat))
-            delay(SEND_SPACING_MS)
+            sendPaced(Cmd.showStart(ident, startAt, show.id, repeat))
         }
     }
 
@@ -945,8 +1031,12 @@ class HubSession(
         val show = st.show ?: return
         if (st.phase != ShowPhase.RUNNING) return
         showJob?.cancel()
-        _show.update { it.copy(phase = ShowPhase.PAUSED, pausedAtMs = System.currentTimeMillis()) }
-        scope.launch { show.receivers.forEach { send(Cmd.pause(it)); delay(SEND_SPACING_MS) } }
+        val pausedAt = System.currentTimeMillis()
+        _show.update { it.copy(phase = ShowPhase.PAUSED, pausedAtMs = pausedAt) }
+        // Timestamped so every receiver pauses at the same show instant,
+        // whatever its delivery delay.
+        val at = if (dongleTimedPause) pausedAt else 0L
+        scope.launch { show.receivers.forEach { sendPaced(Cmd.pause(it, at), priority = true) } }
     }
 
     fun resumeShow() {
@@ -954,12 +1044,22 @@ class HubSession(
         val show = st.show ?: return
         if (st.phase != ShowPhase.PAUSED) return
         if (!_switches.value.armed) { _events.tryEmit("Arm switch is off"); return }
-        val pausedFor = System.currentTimeMillis() - (st.pausedAtMs ?: System.currentTimeMillis())
-        val startAt = (st.startAtMs ?: System.currentTimeMillis()) + pausedFor
+        val now = System.currentTimeMillis()
+        // With timed pause on the dongle and every receiver, schedule the
+        // resume RESUME_LEAD_MS ahead so all receivers have the PLAY before it
+        // takes effect; the phone's 433 cues follow the same instant.
+        // Otherwise resume now (legacy receivers resume on arrival).
+        val allTimed = dongleTimedPause && show.receivers.all {
+            ((_receivers.value[it]?.rxCaps ?: 0) and 2) != 0
+        }
+        val resumeAt = if (allTimed) now + RESUME_LEAD_MS + 5L * show.receivers.size else now
+        val pausedFor = resumeAt - (st.pausedAtMs ?: now)
+        val startAt = (st.startAtMs ?: now) + pausedFor
         val run = radioRun
         _show.update { it.copy(phase = ShowPhase.RUNNING, startAtMs = startAt, pausedAtMs = null) }
+        val at = if (dongleTimedPause) resumeAt else 0L
         showJob = scope.launch {
-            show.receivers.forEach { send(Cmd.play(it)); delay(SEND_SPACING_MS) }
+            show.receivers.forEach { sendPaced(Cmd.play(it, at)) }
             runUntilShowEnd(show, startAt, run)
         }
     }
@@ -975,6 +1075,10 @@ class HubSession(
         radioRun++
         showJob?.cancel()
         val wasLive = st.isLive
+        // A stop that lands while an earlier stop's reload (or any load) is
+        // still running cancels that job below, so it has to finish the
+        // reload itself; otherwise the show would sit in LOADING forever.
+        val reload = wasLive || st.phase == ShowPhase.LOADING
         _show.update {
             it.copy(
                 phase = if (wasLive) ShowPhase.LOADED else it.phase,
@@ -984,26 +1088,76 @@ class HubSession(
             )
         }
         if (reason != null) _events.tryEmit("Show stopped: $reason")
-        scope.launch { show.receivers.forEach { send(Cmd.stop(it)); delay(SEND_SPACING_MS) } }
-        // Receivers need a fresh load after a stop; mirror the host by
-        // treating the show as loaded only once they report it again.
-        if (wasLive) {
-            showJob = scope.launch { runLoad(show) }
-            _show.update { it.copy(phase = ShowPhase.LOADING) }
+        // One job, in order: stop, stop again, wait for the receivers, then
+        // reload. A reload must never overtake the stops (a receiver that
+        // missed STOP could otherwise run the new load against its old
+        // play state). showJob points at this job so a second stop cancels
+        // it cleanly before starting its own.
+        if (reload) _show.update { it.copy(phase = ShowPhase.LOADING, loadStartedMs = System.currentTimeMillis()) }
+        showJob = scope.launch {
+            val stoppedAt = sendStopPasses(show.receivers)
+            if (reload) {
+                // Receivers need a fresh load after a stop; mirror the host by
+                // treating the show as loaded only once they report it again.
+                awaitReceiversHeardSince(show.receivers, stoppedAt)
+                runLoad(show)
+            }
+        }
+    }
+
+    /**
+     * Sends STOP to every receiver, then the whole pass again after
+     * [STOP_REPEAT_MS]. The first pass completes even if the calling job is
+     * cancelled. Returns the phone time the first pass started.
+     */
+    private suspend fun sendStopPasses(receivers: List<String>): Long {
+        val startedAt = System.currentTimeMillis()
+        withContext(NonCancellable) {
+            receivers.forEach { sendPaced(Cmd.stop(it), priority = true) }
+        }
+        delay(STOP_REPEAT_MS)
+        receivers.forEach { sendPaced(Cmd.stop(it), priority = true) }
+        return startedAt
+    }
+
+    /**
+     * Waits until every receiver has confirmed the stop, or [STOP_SETTLE_TIMEOUT_MS].
+     * A receiver that reports its playing flag confirms by being heard since
+     * [sinceMs] with the flag clear; one that doesn't report it (older
+     * firmware) by being heard since [sinceMs] at all.
+     */
+    private suspend fun awaitReceiversHeardSince(receivers: List<String>, sinceMs: Long) {
+        val deadline = System.currentTimeMillis() + STOP_SETTLE_TIMEOUT_MS
+        while (System.currentTimeMillis() < deadline) {
+            val waiting = receivers.filter { ident ->
+                val r = _receivers.value[ident]
+                r == null || (r.lastSeenMs ?: 0L) < sinceMs || r.playing == true
+            }
+            if (waiting.isEmpty()) return
+            delay(50)
+        }
+        val stillPlaying = receivers.filter { _receivers.value[it]?.playing == true }
+        if (stillPlaying.isNotEmpty()) {
+            _events.tryEmit("Still reporting playing after stop: ${stillPlaying.joinToString()}")
         }
     }
 
     fun unloadShow() {
         val st = _show.value
         val show = st.show ?: return
-        if (st.isLive) stopShow("Unloaded")
+        val wasLive = st.isLive
         val sequence = show.isSequence
         radioRun++
         showJob?.cancel()
         radioFired.clear()
         _show.value = ShowState()
+        if (wasLive) _events.tryEmit("Show stopped: Unloaded")
         if (!sequence) {
-            scope.launch { show.receivers.forEach { send(Cmd.reset(it)); delay(SEND_SPACING_MS) } }
+            // Stop (when the show was live), then reset, in one job.
+            showJob = scope.launch {
+                if (wasLive) sendStopPasses(show.receivers)
+                show.receivers.forEach { sendPaced(Cmd.reset(it)) }
+            }
         }
     }
 

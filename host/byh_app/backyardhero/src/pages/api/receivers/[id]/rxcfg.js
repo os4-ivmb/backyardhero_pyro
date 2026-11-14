@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { ensureHardware } from '@/util/apiGuards';
 import { COMMAND_DIR } from '@/util/paths';
+import { writeCommandFile } from '@/util/commandFile';
 
 /**
  * POST /api/receivers/:id/rxcfg
@@ -48,7 +49,7 @@ export default function handler(req, res) {
       fs.mkdirSync(folderPath, { recursive: true });
     }
     const filePath = path.join(folderPath, `${Date.now()}-rxcfg-${id}.json`);
-    fs.writeFileSync(filePath, JSON.stringify(cmd, null, 2));
+    writeCommandFile(filePath, cmd);
     return res.status(200).json({ message: `rxcfg queued for ${id}.` });
   } catch (error) {
     console.error(`Failed to queue rxcfg(${id}):`, error);

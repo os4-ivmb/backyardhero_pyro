@@ -90,6 +90,7 @@ export default function StatusBar() {
   // --- WS lifecycle (preserved from Status.jsx) -----------------------------
   const stateData = useStateAppStore((s) => s.stateData);
   const setStateData = useStateAppStore((s) => s.setStateData);
+  const handleSocketMessage = useStateAppStore((s) => s.handleSocketMessage);
   const patchStateData = useStateAppStore((s) => s.patchStateData);
   const {
     mode,
@@ -142,11 +143,7 @@ export default function StatusBar() {
     socket.onmessage = (event) => {
       let payload;
       try { payload = JSON.parse(event.data); } catch { return; }
-      if (payload && payload._hb) {
-        patchStateData({ fw_last_update: payload.fw_last_update });
-      } else {
-        setStateData(payload);
-      }
+      handleSocketMessage(payload);
     };
     socket.onerror = () => {};
     socket.onclose = () => {
@@ -155,7 +152,7 @@ export default function StatusBar() {
       scheduleReconnect();
     };
     socketRef.current = socket;
-  }, [setStateData, patchStateData, scheduleReconnect]);
+  }, [handleSocketMessage, scheduleReconnect]);
 
   useEffect(() => { connectWebSocketRef.current = connectWebSocket; }, [connectWebSocket]);
 

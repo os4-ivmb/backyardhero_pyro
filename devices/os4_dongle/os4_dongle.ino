@@ -4,6 +4,7 @@
 #include <ArduinoJson.h>
 #include <esp_task_wdt.h>
 #include <esp_system.h>   // esp_restart() for the host-requested soft reboot
+#include <esp_timer.h>    // esp_timer_get_time() for TX timing
 
 // FW_VERSION: Firmware version tracking for os4_dongle
 // v1: Initial version - Basic mesh networking and command queuing (date unknown)
@@ -204,7 +205,54 @@
 //   per receiver and emit it as `bt` on rxcfg and on each status receivers[]
 //   entry; the heartbeat also carries the dongle's own `bt` (0) and `bv`.
 //   The host uses it to pick os4_receiver vs byh_omni for OTA.
-#define FW_VERSION 31
+// v32: 2026-11-13 - Communication speed / reliability pass:
+//   * STOP and PAUSE are queued with priority. STOP scrubs queued
+//     PLAY / SHOW_START / load frames for its node; PAUSE scrubs queued PLAY.
+//     A full queue evicts the newest non-priority command instead of
+//     dropping a priority one.
+//   * auto-retry delay 2ms (was 4ms); polls get 2 retries, other
+//     frames 8. JSON config `rf_ard`, `rf_arc_poll`, `rf_arc_cmd`.
+//   * stays in TX mode between frames (no stopListening() settle
+//     per frame); isChipConnected() once a second or after a failed write;
+//     latency measured around radio.write only.
+//   * host-module pixels are pushed only on change or an active
+//     blink / pulse tick, at most every 20ms.
+//   * receivers that miss 3 polls in a row are polled every 2nd /
+//     3rd / 5th round; poll spacing counts only answering receivers; an
+//     explicit `sync` ends the backoff. Soft radio recovery needs 20 failed
+//     frames in a row across 2+ receivers (one dead receiver no longer
+//     triggers it).
+//   * follow-up poll 10ms after a state-changing command so
+//     loadComplete / startReady reach the host promptly; rxcfg uses the same
+//     follow-up instead of a blocking delay(8).
+//   * the per-second status line carries a rotating slice of at
+//     most 8 receivers (`rn` registered, `ro` slice offset) from one static
+//     document serialised straight to the host link; `off` counts receivers
+//     in poll backoff.
+//   * receiver table holds 128 (ident stored inline, success
+//     history as a 64-bit mask, 16-bit latency samples); queue holds 256.
+//     Boot prints the table / queue sizes and free heap.
+//   * reads the receiver status flags byte and the config-response
+//     capability byte (reserved[3]); emits `pf` (bit0 playing, bit1 paused)
+//     only for receivers that advertise it, and `rt` (average auto-retries
+//     per delivered frame x10) in rxupd and the status slice.
+//   * Command acks. A host line may start with `#<seq> `; each such
+//     line gets exactly one `K <seq> <result> <q>` (1 delivered / handled,
+//     0 not delivered, 2 dropped or scrubbed, 3 rejected). Advertised as
+//     `caps` bit 0 in the status tick. Unprefixed lines are unchanged.
+//   * CLOCK_SYNC polls are stamped immediately before radio.write
+//     from the microsecond timer; CLOCK_SYNC carries an `epoch` byte bumped
+//     on every msync.
+//   * `play|pause IDENT <at> <rep>` forwards a non-zero <at> as a
+//     9-byte timed PLAY / PAUSE (caps bit 1); rxcfg and the status slice
+//     carry the receiver capability byte as `rc`.
+//   * rxcfg carries the receiver's stored `ch` / `sid` when it
+//     reports them.
+//   * `bcast <op> <showId> <at>` sends a BCAST_CONTROL frame to the
+//     broadcast address without auto-ACK (5x at 3ms, again after 100ms);
+//     caps bit 2. Needs a bench test with every nRF24 module type in the
+//     fleet before the host turns it on.
+#define FW_VERSION 32
 
 // Board type (product family), reported in RECEIVER_CONFIG_RESPONSE
 // reserved[1] and as `bt` in host JSON. The host keys its firmware catalog
@@ -249,7 +297,8 @@ enum MessageType {
   OTA_ABORT                = 16,
   RECEIVER_OTA_STATUS      = 17,
   RECEIVER_CONFIG_QUERY    = 18,  // dongle -> receiver (paired with FW v22+)
-  RECEIVER_CONFIG_RESPONSE = 19   // receiver -> dongle (in ACK payload)
+  RECEIVER_CONFIG_RESPONSE = 19,  // receiver -> dongle (in ACK payload)
+  BCAST_CONTROL            = 20   // T27: dongle -> every receiver, no ACK
 };
 
 // Bit flags for ReceiverConfigSetMessage.flags. flags == 0 is a pure
@@ -266,6 +315,10 @@ struct ManualFireMessage {
 struct ClockSyncMessage {
   uint8_t type;
   uint64_t timestamp;
+  // T23: bumped on every msync so receivers drop their sync window at a
+  // host clock step. Receivers read it only when the frame is >= 10 bytes;
+  // older receivers ignore the trailing byte.
+  uint8_t epoch;
 } __attribute__((packed));
 
 struct StartLoadMessage {
@@ -300,6 +353,23 @@ struct GenericMessage {
   uint8_t type;
 } __attribute__((packed));
 
+// T25: PLAY / PAUSE with the synchronized time they take effect at. Sent
+// when the host gives a non-zero timestamp; older receivers read only the
+// type byte.
+struct GenericTimedMessage {
+  uint8_t  type;
+  uint64_t at;
+} __attribute__((packed));
+
+// T27 broadcast control frame (see the receiver for the semantics).
+struct BroadcastControlMessage {
+  uint8_t  type;     // BCAST_CONTROL
+  uint8_t  op;       // 1 stop, 2 pause, 3 play, 4 show_start
+  uint8_t  seq;      // same on every repeat of one command
+  uint16_t showId;   // 0 = every receiver
+  uint64_t at;
+} __attribute__((packed));
+
 struct ShowStartMessage {
   uint8_t type;
   uint64_t targetStartTime;
@@ -314,13 +384,24 @@ struct ReceiverStatusMessage {
   uint8_t nodeID;            // low byte; legacy offset preserved
   uint8_t batteryLevel;
   uint16_t showState;
-  char ident[10];
+  // ident used to be char[10]; receivers always NUL-terminated it at [9]
+  // and idents are at most 8 characters, so the last byte now carries
+  // state flags (T12). A pre-T12 receiver sends 0 there; only trust the
+  // flags once the config response advertises RX_CAP_STATUS_FLAGS.
+  char ident[9];             // NUL-terminated, max 8 characters
+  uint8_t stateFlags;        // STATE_FLAG_*
   uint64_t cont64_0;
   uint64_t cont64_1;
   uint8_t nodeIDHigh;        // v30 optional trailing byte
 } __attribute__((packed));
 
 #define LEGACY_RECEIVER_STATUS_SIZE 31
+#define STATE_FLAG_PLAYING 0x01
+#define STATE_FLAG_PAUSED  0x02
+// ReceiverConfigResponseMessage.reserved[3] capability bits (T12).
+#define RX_CAP_STATUS_FLAGS 0x01
+#define RX_CAP_TIMED_PAUSE  0x02
+#define RX_CAP_RF_CONFIG    0x04   // reserved[4] channel, reserved[5] system ID
 static_assert(sizeof(ReceiverStatusMessage) == 32, "receiver status wire layout changed");
 
 // dongle -> receiver: fetch config (and optionally apply settings).
@@ -347,6 +428,7 @@ struct ReceiverConfigResponseMessage {
   uint16_t fireDurationMs;    // currently-effective fire pulse width (ms)
   uint8_t  reserved[8];       // reserved[0] = v30 nodeID high byte
                               // reserved[1] = board type (0 dedicated, 1 omni)
+                              // reserved[3] = capability bits (RX_CAP_*)
 } __attribute__((packed));
 
 static_assert(sizeof(ReceiverConfigResponseMessage) == 17, "config response wire layout changed");
@@ -399,9 +481,13 @@ static_assert(sizeof(ReceiverOtaStatusMessage) == 11, "OTA status wire layout ch
 // ~1-2s, so 30s is generous.
 #define OTA_REJOIN_TIMEOUT_MS 30000UL
 
+// Receiver idents are "RX<nodeID>" (at most 7 characters for 16-bit IDs);
+// the table stores them inline instead of as a heap String (T11).
+#define RECEIVER_IDENT_CAP 10
+
 struct ReceiverInfo {
   uint16_t nodeID;
-  String ident;
+  char ident[RECEIVER_IDENT_CAP];
   uint8_t batteryLevel;
   uint16_t showId;
   bool loadComplete;
@@ -409,16 +495,39 @@ struct ReceiverInfo {
   uint64_t lastMessageTime;
   uint64_t continuity[CONTINUITY_INDEX_CT];
 
-  uint32_t latencies[MAX_LATENCY_SAMPLES];
+  // Radio round-trip samples in ms (single digits in practice).
+  uint16_t latencies[MAX_LATENCY_SAMPLES];
   uint8_t latencyNextIndex;
   uint8_t latencySampleCount;
 
-  // Success tracking: circular buffer of command results (1 = success, 0 = failure/timeout)
-  bool successHistory[MAX_SUCCESS_SAMPLES];
-  uint8_t successHead;
+  // Success tracking: the last MAX_SUCCESS_SAMPLES command results as a
+  // shift register, newest in bit 0 (1 = success).
+  uint64_t successBits;
   uint8_t successCount;
 
+  // T12: STATE_FLAG_* from the latest status frame, and the receiver's
+  // capability bits from its config response (RX_CAP_*).
+  uint8_t stateFlags;
+  uint8_t caps;
+  // T26: the receiver's stored RF channel / system ID (valid with
+  // RX_CAP_RF_CONFIG). It answered us, so they match ours today; reported so
+  // the host can show and persist them.
+  uint8_t rxRfChannel;
+  uint8_t rxRfSystemId;
+
   uint8_t consecutiveFailures;
+
+  // T08 poll backoff: polls in a row that went unanswered, and how many
+  // more poll rounds to skip before trying this receiver again. Any
+  // successful exchange zeroes both.
+  uint8_t  pollMisses;
+  uint8_t  skipRounds;
+  // T13: moving average of auto-retries per delivered frame, scaled x16.
+  uint16_t retryAvg16;
+  // T09: millis() at which a follow-up poll is due (0 = none) so a state
+  // change (loadComplete, startReady) reaches the host without waiting a
+  // full poll cycle.
+  uint32_t followUpDueMs;
 
   // FW v16: cached receiver-side config from the most recent
   // RECEIVER_CONFIG_RESPONSE. configValid is false until the first
@@ -449,6 +558,7 @@ struct ReceiverInfo {
   uint16_t lastEmitShowId;
   bool     lastEmitLoad;
   bool     lastEmitReady;
+  uint8_t  lastEmitFlags;
   uint64_t lastEmitContinuity[CONTINUITY_INDEX_CT];
 };
 
@@ -456,8 +566,10 @@ struct ReceiverInfo {
 // the latency/success fields changed. Operator-visible changes bypass this.
 #define RXUPD_MIN_INTERVAL_MS 100UL
 
-// Bumped from 10 to 32 to support 20+ receivers per the throughput target.
-#define MAX_RECEIVERS 32
+// Bumped from 10 to 32 to support 20+ receivers per the throughput target,
+// then to 128 once the table was slimmed and the status tick sliced (T11).
+// numReceivers / nextPollReceiverIdx are uint8_t, so stay below 256.
+#define MAX_RECEIVERS 128
 ReceiverInfo receivers[MAX_RECEIVERS];
 uint8_t numReceivers = 0;
 
@@ -532,17 +644,27 @@ struct QueuedCommand {
   // 0 means a pure fetch.
   uint8_t  cfg_flags;
   uint16_t cfg_fire_duration_ms;
+
+  // QF_* bits: where the command came from. Background polls are counted
+  // toward a receiver's poll backoff (T08); follow-up polls are not (T09).
+  uint8_t  qflags;
+  // T14: host sequence number (0 = none). The command's K line is emitted
+  // when it is dispatched, dropped or scrubbed.
+  uint16_t seq;
 };
+#define QF_POLL      0x01
+#define QF_FOLLOWUP  0x02
 
 // Bumped from 40 to 128 — show-start can enqueue ~300 commands at once.
-#define MAX_COMMANDS_IN_QUEUE 128
+// 256 since T11: one fan-out to 128 receivers alone would fill 128.
+#define MAX_COMMANDS_IN_QUEUE 256
 QueuedCommand commandBuffer[MAX_COMMANDS_IN_QUEUE];
 int cmdQueueHead = 0;
 int cmdQueueTail = 0;
 int cmdQueueCount = 0;
 
 // Aggregate latency stats (not per-receiver).
-uint32_t latencies[MAX_LATENCY_SAMPLES];
+uint16_t latencies[MAX_LATENCY_SAMPLES];
 uint8_t latencyNextIndex = 0;
 uint8_t latencySampleCount = 0;
 
@@ -659,8 +781,14 @@ uint32_t COLOR_CYAN = pixels.Color(0, 255, 255);
 
 uint8_t ledStates[NUM_PIXELS] = {0};
 uint8_t ledEffects[NUM_PIXELS] = {0};
+// T07: set whenever a pixel state, effect or the brightness changes;
+// updateLEDs() only pushes pixels when this is set or an active blink /
+// pulse effect ticks.
+bool ledDirty = true;
 
 uint64_t tsOffset = 0;
+// T23: incremented on every msync, carried in each CLOCK_SYNC.
+uint8_t clockEpoch = 0;
 uint64_t lastPrintTime = 0;
 
 #define SERIAL_BUFFER_SIZE 512
@@ -722,10 +850,79 @@ static inline uint64_t masterReadAddress() {
   // makes the salt-merge intent explicit.
   return MASTER_READ_BASE | systemSalt();
 }
+// T27: shared address all receivers also listen on (pipe 1).
+#define BROADCAST_BASE 0x7EB14CD39AULL
+static inline uint64_t broadcastAddress() {
+  return BROADCAST_BASE ^ systemSalt();
+}
 static inline uint64_t receiverAddress(uint16_t nodeID) {
   // See the IMPORTANT note above re: arithmetic add vs. bitwise OR, and
   // RF_ADDR_ENTROPY_MASK for the H8 entropy XOR (applied on both ends).
   return RF_ADDR_ENTROPY_MASK ^ (systemSalt() + RECEIVER_BASE + (uint64_t)nodeID);
+}
+
+// ---------------------------------------------------------------------------
+// Auto-retry policy (v32/v36). ARD is the auto-retransmit delay in 250us
+// steps, ARC the retry count. The nRF24L01+ minimum ARD for a 32-byte ACK
+// payload at 250kbps is 1.5ms; (7 + 1) * 250us = 2ms keeps margin. Polls to
+// a dead receiver get few retries (one costs ~6ms instead of ~24ms); real
+// commands get more (8 retries at 2ms spans ~22ms, the same window as the
+// old 5 x 4ms). All three are settable from the JSON config line
+// (`rf_ard`, `rf_arc_poll`, `rf_arc_cmd`) for field comparison. The OTA path
+// keeps its own fixed values.
+// ---------------------------------------------------------------------------
+#define RF_ARD_STEPS_DEFAULT   7
+#define RF_ARC_POLL_DEFAULT    2
+#define RF_ARC_COMMAND_DEFAULT 8
+#define RF_OTA_ARD             15
+#define RF_OTA_ARC             5
+uint8_t rfArdSteps = RF_ARD_STEPS_DEFAULT;
+uint8_t rfArcPoll  = RF_ARC_POLL_DEFAULT;
+uint8_t rfArcCmd   = RF_ARC_COMMAND_DEFAULT;
+static uint8_t currentArd = 0xFF;
+static uint8_t currentArc = 0xFF;
+
+// One SPI register write, only when the policy actually changes.
+static inline void applyRetries(uint8_t ard, uint8_t arc) {
+  if (ard == currentArd && arc == currentArc) return;
+  radio.setRetries(ard, arc);
+  currentArd = ard;
+  currentArc = arc;
+}
+static inline void setRetryPolicy(uint8_t arc) { applyRetries(rfArdSteps, arc); }
+// Call after anything that rewrites SETUP_RETR behind applyRetries' back
+// (radio.begin(), a raw setRetries) so the next frame re-applies its policy.
+static inline void invalidateRetryPolicy() { currentArd = 0xFF; currentArc = 0xFF; }
+
+// ---------------------------------------------------------------------------
+// Radio mode (v32/v36). The dongle never needs to be in RX mode: status
+// arrives as the ACK payload, which lands in the RX FIFO in TX mode too. It
+// stays in TX standby so each frame skips stopListening()'s ~0.5ms settle
+// delay at 250kbps. Only the RF scan listens. Every listen / stop-listen
+// goes through these so the cached state stays correct.
+// ---------------------------------------------------------------------------
+static bool radioListening = false;
+static inline void radioEnterTx() {
+  if (radioListening) { radio.stopListening(); radioListening = false; }
+}
+static inline void radioEnterRx() { radio.startListening(); radioListening = true; }
+
+// T14 command-ack state; see processSerialCommand.
+#define CMD_NOT_DELIVERED 0
+#define CMD_HANDLED       1
+#define CMD_DROPPED       2
+#define CMD_REJECTED      3
+#define DONGLE_CAPS_CMD_ACKS   0x01
+#define DONGLE_CAPS_TIMED_PAUSE 0x02   // forwards `play/pause IDENT <at>` (T25)
+#define DONGLE_CAPS_BCAST       0x04   // `bcast <op> <showId> <at>` (T27)
+uint16_t pendingSeq = 0;
+uint8_t  cmdResult = CMD_HANDLED;
+
+void emitCmdResult(uint16_t seq, uint8_t result) {
+  if (seq == 0) return;
+  char buf[32];
+  int n = snprintf(buf, sizeof(buf), "K %u %u %d\n", (unsigned)seq, (unsigned)result, cmdQueueCount);
+  if (n > 0 && n < (int)sizeof(buf)) Serial.write((const uint8_t*)buf, (size_t)n);
 }
 
 bool isQueueFull() { return cmdQueueCount >= MAX_COMMANDS_IN_QUEUE; }
@@ -733,7 +930,9 @@ bool isQueueEmpty() { return cmdQueueCount == 0; }
 
 void enqueueCommand(const QueuedCommand& cmd) {
   if (isQueueFull()) {
-    Serial.println(F("ERR: Command queue full. Command dropped."));
+    // A sequenced command is reported (and retried) through its K line.
+    if (cmd.seq != 0) emitCmdResult(cmd.seq, CMD_DROPPED);
+    else Serial.println(F("ERR: Command queue full. Command dropped."));
     return;
   }
   commandBuffer[cmdQueueTail] = cmd;
@@ -741,9 +940,48 @@ void enqueueCommand(const QueuedCommand& cmd) {
   cmdQueueCount++;
 }
 
+// STOP, PAUSE and MANUAL_FIRE jump the queue (enqueuePriorityCommand) and
+// are never evicted to make room for another command.
+static inline bool isPriorityType(uint8_t t) {
+  return t == MANUAL_FIRE || t == GENERIC_STOP || t == GENERIC_PAUSE;
+}
+
+// Queue full: make room for a priority command by dropping the newest
+// non-priority entry (walking back from the tail). Returns false when every
+// queued entry is itself a priority command.
+bool evictNewestNonPriority() {
+  int idx = (cmdQueueTail - 1 + MAX_COMMANDS_IN_QUEUE) % MAX_COMMANDS_IN_QUEUE;
+  for (int k = 0; k < cmdQueueCount; k++) {
+    if (!isPriorityType(commandBuffer[idx].messageType)) {
+      if (commandBuffer[idx].seq != 0) {
+        emitCmdResult(commandBuffer[idx].seq, CMD_DROPPED);
+      } else {
+        Serial.print(F("ERR: Command queue full. Evicted queued command type="));
+        Serial.print((int)commandBuffer[idx].messageType);
+        Serial.print(F(" N"));
+        Serial.println(commandBuffer[idx].targetNodeID);
+      }
+      // Close the gap: shift every newer entry one slot toward the head.
+      int cur = idx;
+      int next = (cur + 1) % MAX_COMMANDS_IN_QUEUE;
+      while (next != cmdQueueTail) {
+        commandBuffer[cur] = commandBuffer[next];
+        cur = next;
+        next = (next + 1) % MAX_COMMANDS_IN_QUEUE;
+      }
+      cmdQueueTail = cur;
+      cmdQueueCount--;
+      return true;
+    }
+    idx = (idx - 1 + MAX_COMMANDS_IN_QUEUE) % MAX_COMMANDS_IN_QUEUE;
+  }
+  return false;
+}
+
 void enqueuePriorityCommand(const QueuedCommand& cmd) {
-  if (isQueueFull()) {
+  if (isQueueFull() && !evictNewestNonPriority()) {
     Serial.println(F("ERR: Command queue full. Priority command dropped."));
+    emitCmdResult(cmd.seq, CMD_DROPPED);
     return;
   }
   cmdQueueHead = (cmdQueueHead - 1 + MAX_COMMANDS_IN_QUEUE) % MAX_COMMANDS_IN_QUEUE;
@@ -767,12 +1005,21 @@ void setupLEDs() {
   pixels.show();
 }
 
+// Minimum spacing between pixels.show() calls. Each show() holds the loop
+// for the strip's latch gap plus the data time (~0.3-0.5ms), which used to
+// be paid on every loop pass.
+#define LED_SHOW_MIN_INTERVAL_MS 20
+
 void updateLEDs() {
+  static unsigned long lastLedShowMs = 0;
   unsigned long currentMillis = millis();
+  bool blinkTick = false;
+  bool pulseTick = false;
 
   if (currentMillis - lastBlinkTime >= 500) {
     blinkState = !blinkState;
     lastBlinkTime = currentMillis;
+    blinkTick = true;
   }
 
   if (currentMillis - lastPulseTime >= 50) {
@@ -780,7 +1027,20 @@ void updateLEDs() {
     if (pulseValue >= 100) { pulseValue = 100; pulseDirection = -1; }
     else if (pulseValue <= 0) { pulseValue = 0; pulseDirection = 1; }
     lastPulseTime = currentMillis;
+    pulseTick = true;
   }
+
+  bool usesBlink = false;
+  bool usesPulse = false;
+  for (int i = 0; i < NUM_PIXELS; i++) {
+    if (ledEffects[i] == 1) usesBlink = true;
+    else if (ledEffects[i] == 2) usesPulse = true;
+  }
+  if ((blinkTick && usesBlink) || (pulseTick && usesPulse)) ledDirty = true;
+  if (!ledDirty) return;
+  if (currentMillis - lastLedShowMs < LED_SHOW_MIN_INTERVAL_MS) return;  // stays dirty
+  ledDirty = false;
+  lastLedShowMs = currentMillis;
 
   for (int i = 0; i < NUM_PIXELS; i++) {
     uint32_t color;
@@ -824,6 +1084,13 @@ void parseLedJSON(const String& json) {
     Serial.print(F(" JSON length: "));
     Serial.println(json.length());
     return;
+  }
+
+  if (doc.containsKey("led_brightness") || doc.containsKey("daemon_act") ||
+      doc.containsKey("web_act_state") || doc.containsKey("tx_active") ||
+      doc.containsKey("show_load_state") || doc.containsKey("show_run_state") ||
+      doc.containsKey("error_state") || doc.containsKey("arm_state")) {
+    ledDirty = true;
   }
 
   if (doc.containsKey("led_brightness")) {
@@ -871,6 +1138,24 @@ void parseLedJSON(const String& json) {
     }
   }
   if (doc.containsKey("debug_mode"))             debugMode                   = doc["debug_mode"].as<uint8_t>();
+
+  // Auto-retry policy (T05). ARD in 250us steps, counts are retries per
+  // frame; all are 4-bit fields on the chip. The ARD floor keeps it at or
+  // above the 1.5ms the datasheet requires for a 32-byte ACK at 250kbps.
+  bool retryChanged = false;
+  if (doc.containsKey("rf_ard")) {
+    rfArdSteps = (uint8_t)CLAMP_U32(doc["rf_ard"].as<uint32_t>(), 5UL, 15UL);
+    retryChanged = true;
+  }
+  if (doc.containsKey("rf_arc_poll")) {
+    rfArcPoll = (uint8_t)CLAMP_U32(doc["rf_arc_poll"].as<uint32_t>(), 0UL, 15UL);
+    retryChanged = true;
+  }
+  if (doc.containsKey("rf_arc_cmd")) {
+    rfArcCmd = (uint8_t)CLAMP_U32(doc["rf_arc_cmd"].as<uint32_t>(), 1UL, 15UL);
+    retryChanged = true;
+  }
+  if (retryChanged) invalidateRetryPolicy();
 
   bool rfChanged = false;
   if (doc.containsKey("rf_channel")) {
@@ -931,9 +1216,13 @@ ReceiverInfo* getReceiverByIdent(const String &ident, bool createIfNotExist) {
   if (ident.length() == 0 || ident.charAt(0) != 'R') return nullptr;
 
   for (uint8_t i = 0; i < numReceivers; i++) {
-    if (receivers[i].ident == ident) return &receivers[i];
+    if (strcmp(receivers[i].ident, ident.c_str()) == 0) return &receivers[i];
   }
   if (!createIfNotExist) return nullptr;
+  if (ident.length() >= RECEIVER_IDENT_CAP) {
+    Serial.print(F("ERR: ident too long: ")); Serial.println(ident);
+    return nullptr;
+  }
 
   if (numReceivers < MAX_RECEIVERS) {
     uint16_t newNodeID = nodeIDFromIdent(ident);
@@ -964,7 +1253,8 @@ ReceiverInfo* getReceiverByIdent(const String &ident, bool createIfNotExist) {
     }
 
     ReceiverInfo &r = receivers[numReceivers];
-    r.ident = ident;
+    memset(&r, 0, sizeof(r));
+    strlcpy(r.ident, ident.c_str(), sizeof(r.ident));
     // Bootstrap nodeID from the ident pattern so we can address the receiver
     // before its first ACK-payload status comes back. The next ACK payload
     // will overwrite this with the receiver's authoritative value.
@@ -978,10 +1268,15 @@ ReceiverInfo* getReceiverByIdent(const String &ident, bool createIfNotExist) {
     r.latencyNextIndex = 0;
     r.latencySampleCount = 0;
     for (uint8_t k = 0; k < MAX_LATENCY_SAMPLES; k++) r.latencies[k] = 0;
-    r.successHead = 0;
+    r.successBits = 0;
     r.successCount = 0;
-    for (uint8_t k = 0; k < MAX_SUCCESS_SAMPLES; k++) r.successHistory[k] = false;
+    r.stateFlags = 0;
+    r.caps = 0;
     r.consecutiveFailures = 0;
+    r.pollMisses = 0;
+    r.skipRounds = 0;
+    r.retryAvg16 = 0;
+    r.followUpDueMs = 0;
     // FW v16: queue an automatic CONFIG_QUERY for the next poll slot
     // assigned to this receiver. Covers initial connect AND post-prune
     // re-discovery (the operator turned the unit off, swapped a cue
@@ -1004,6 +1299,7 @@ ReceiverInfo* getReceiverByIdent(const String &ident, bool createIfNotExist) {
     r.lastEmitShowId = 0;
     r.lastEmitLoad = false;
     r.lastEmitReady = false;
+    r.lastEmitFlags = 0;
     for (uint8_t j = 0; j < CONTINUITY_INDEX_CT; j++) r.lastEmitContinuity[j] = 0;
     numReceivers++;
     return &receivers[numReceivers - 1];
@@ -1026,10 +1322,15 @@ ReceiverInfo* getReceiverByNodeID(uint16_t nodeID) {
 // never succeed. Compacts the ring in-place to preserve queue ordering
 // for everyone else.
 //
+// `typeMask` selects which message types are dropped (bit = 1 << type);
+// SCRUB_ALL_TYPES drops everything for the node.
+//
 // Returns the number of commands dropped.
-uint8_t scrubQueueForNode(uint16_t nodeID) {
+#define SCRUB_ALL_TYPES 0xFFFFFFFFUL
+#define TYPE_BIT(t) (1UL << (uint8_t)(t))
+uint16_t scrubQueueForNodeTypes(uint16_t nodeID, uint32_t typeMask) {
   if (cmdQueueCount == 0 || nodeID == 0) return 0;
-  uint8_t dropped = 0;
+  uint16_t dropped = 0;
   // Walk the live range and copy survivors back to a fresh head.
   // This works even with the wrap-around layout because we read in
   // order and write in order to indices we've already read past.
@@ -1038,8 +1339,9 @@ uint8_t scrubQueueForNode(uint16_t nodeID) {
   int remaining = cmdQueueCount;
   while (remaining-- > 0) {
     QueuedCommand& src = commandBuffer[readIdx];
-    if (src.targetNodeID == nodeID) {
+    if (src.targetNodeID == nodeID && (typeMask & TYPE_BIT(src.messageType))) {
       dropped++;
+      emitCmdResult(src.seq, CMD_DROPPED);
     } else {
       if (writeIdx != readIdx) commandBuffer[writeIdx] = src;
       writeIdx = (writeIdx + 1) % MAX_COMMANDS_IN_QUEUE;
@@ -1051,6 +1353,10 @@ uint8_t scrubQueueForNode(uint16_t nodeID) {
   return dropped;
 }
 
+uint16_t scrubQueueForNode(uint16_t nodeID) {
+  return scrubQueueForNodeTypes(nodeID, SCRUB_ALL_TYPES);
+}
+
 // Remove a receiver by ident. Used for the host-driven `forget IDENT` serial
 // command (host edited the Receivers DB table, told us this one is no longer
 // in scope). Returns true if the receiver was found and removed. Also
@@ -1059,7 +1365,7 @@ uint8_t scrubQueueForNode(uint16_t nodeID) {
 // burn ~22ms of radio time per cmd on TX-FAIL retries.
 bool removeReceiverByIdent(const String &ident) {
   for (uint8_t i = 0; i < numReceivers; i++) {
-    if (receivers[i].ident == ident) {
+    if (strcmp(receivers[i].ident, ident.c_str()) == 0) {
       uint16_t goneNodeID = receivers[i].nodeID;
       // Shift the tail down to keep the array compact.
       for (uint8_t j = i; j < numReceivers - 1; ++j) receivers[j] = receivers[j + 1];
@@ -1067,7 +1373,7 @@ bool removeReceiverByIdent(const String &ident) {
       // Reset the round-robin pointer to a safe slot — it might have pointed
       // past the end after the shift.
       if (nextPollReceiverIdx >= numReceivers) nextPollReceiverIdx = 0;
-      uint8_t dropped = scrubQueueForNode(goneNodeID);
+      uint16_t dropped = scrubQueueForNode(goneNodeID);
       if (dropped > 0 && debugMode > 0) {
         Serial.print(F("INFO: forget scrubbed ")); Serial.print(dropped);
         Serial.print(F(" queued cmd(s) for N")); Serial.println(goneNodeID);
@@ -1080,21 +1386,29 @@ bool removeReceiverByIdent(const String &ident) {
 
 void pushCommandResult(ReceiverInfo* rinfo, bool success) {
   if (!rinfo) return;
-  rinfo->successHistory[rinfo->successHead] = success;
-  rinfo->successHead = (rinfo->successHead + 1) % MAX_SUCCESS_SAMPLES;
+  rinfo->successBits = (rinfo->successBits << 1) | (success ? 1ULL : 0ULL);
   if (rinfo->successCount < MAX_SUCCESS_SAMPLES) rinfo->successCount++;
 }
 
-uint8_t calculateSuccessPercent(ReceiverInfo* rinfo) {
+uint8_t calculateSuccessPercent(const ReceiverInfo* rinfo) {
   if (!rinfo || rinfo->successCount == 0) return 0;
-  uint8_t cnt = 0;
-  uint8_t startIdx = 0;
-  if (rinfo->successCount == MAX_SUCCESS_SAMPLES) startIdx = rinfo->successHead;
-  for (uint8_t i = 0; i < rinfo->successCount; i++) {
-    uint8_t idx = (startIdx + i) % MAX_SUCCESS_SAMPLES;
-    if (rinfo->successHistory[idx]) cnt++;
-  }
+  uint64_t mask = (rinfo->successCount >= 64) ? ~0ULL
+                                              : ((1ULL << rinfo->successCount) - 1ULL);
+  uint32_t cnt = (uint32_t)__builtin_popcountll(rinfo->successBits & mask);
   return (uint8_t)((cnt * 100) / rinfo->successCount);
+}
+
+// Mean of a receiver's latency samples, rounded (ms).
+uint16_t receiverAvgLatency(const ReceiverInfo* r) {
+  if (r->latencySampleCount == 0) return 0;
+  uint32_t sum = 0;
+  for (uint8_t k = 0; k < r->latencySampleCount; k++) sum += r->latencies[k];
+  return (uint16_t)((sum + r->latencySampleCount / 2) / r->latencySampleCount);
+}
+
+// Average auto-retries per delivered frame x10 (T13), for the `rt` key.
+static inline uint16_t receiverRetryAvgX10(const ReceiverInfo* r) {
+  return (uint16_t)(((uint32_t)r->retryAvg16 * 10U + 8U) / 16U);
 }
 
 // Stream a single-receiver update line to the host the instant we have
@@ -1124,7 +1438,8 @@ void emitRxUpd(const ReceiverInfo* r, bool includeFreshLatency) {
                || rw->loadComplete != rw->lastEmitLoad
                || rw->startReady   != rw->lastEmitReady
                || rw->showId       != rw->lastEmitShowId
-               || rw->batteryLevel != rw->lastEmitBattery;
+               || rw->batteryLevel != rw->lastEmitBattery
+               || ((rw->caps & RX_CAP_STATUS_FLAGS) && rw->stateFlags != rw->lastEmitFlags);
   if (!material) {
     for (uint8_t j = 0; j < CONTINUITY_INDEX_CT; j++) {
       if (rw->continuity[j] != rw->lastEmitContinuity[j]) { material = true; break; }
@@ -1139,6 +1454,7 @@ void emitRxUpd(const ReceiverInfo* r, bool includeFreshLatency) {
   rw->lastEmitReady = rw->startReady;
   rw->lastEmitShowId = rw->showId;
   rw->lastEmitBattery = rw->batteryLevel;
+  rw->lastEmitFlags = rw->stateFlags;
   for (uint8_t j = 0; j < CONTINUITY_INDEX_CT; j++) {
     rw->lastEmitContinuity[j] = rw->continuity[j];
   }
@@ -1158,7 +1474,11 @@ void emitRxUpd(const ReceiverInfo* r, bool includeFreshLatency) {
                       MAX_LATENCY_SAMPLES;
     d["x"] = r->latencies[lastIdx];
   }
-  d["sp"] = calculateSuccessPercent((ReceiverInfo*)r);
+  d["sp"] = calculateSuccessPercent(r);
+  // Playing / paused flags only from receivers that advertise them; without
+  // the capability the host can't tell "not playing" from "unknown" (T12).
+  if (r->caps & RX_CAP_STATUS_FLAGS) d["pf"] = r->stateFlags;
+  d["rt"] = receiverRetryAvgX10(r);
   JsonArray ca = d.createNestedArray("c");
   for (uint8_t j = 0; j < CONTINUITY_INDEX_CT; j++) ca.add(r->continuity[j]);
   serializeJson(d, Serial);
@@ -1190,6 +1510,8 @@ ReceiverInfo* ingestStatusFrame(const uint8_t* buf, uint8_t len, uint64_t now) {
   }
 
   // ident must be a printable, NUL-terminated string starting with 'R'.
+  // Copy 9 bytes: the 10th wire byte is stateFlags (T12). A pre-T12
+  // receiver NUL-terminates at [9], so its idents (max 8 chars) fit too.
   char identBuf[sizeof(status->ident) + 1];
   memcpy(identBuf, status->ident, sizeof(status->ident));
   identBuf[sizeof(status->ident)] = '\0';
@@ -1236,6 +1558,7 @@ ReceiverInfo* ingestStatusFrame(const uint8_t* buf, uint8_t len, uint64_t now) {
   r->lastMessageTime = now;
   r->continuity[0] = status->cont64_0;
   r->continuity[1] = status->cont64_1;
+  r->stateFlags = status->stateFlags;
   return r;
 }
 
@@ -1246,7 +1569,7 @@ ReceiverInfo* ingestStatusFrame(const uint8_t* buf, uint8_t len, uint64_t now) {
 //   nbd=noBoardsDetected ca=cuesAvailable fd=fireDurationMs t=lastMsgTime
 void emitRxCfg(const ReceiverInfo* r) {
   if (!r || !r->configValid) return;
-  StaticJsonDocument<192> d;
+  StaticJsonDocument<256> d;
   d["type"] = "rxcfg";
   d["i"]    = r->ident;
   d["n"]    = r->nodeID;
@@ -1257,6 +1580,11 @@ void emitRxCfg(const ReceiverInfo* r) {
   d["nbd"]  = r->noBoardsDetected;
   d["ca"]   = r->cuesAvailable;
   d["fd"]   = r->fireDurationMs;
+  d["rc"]   = r->caps;
+  if (r->caps & RX_CAP_RF_CONFIG) {
+    d["ch"]  = r->rxRfChannel;
+    d["sid"] = r->rxRfSystemId;
+  }
   d["t"]    = r->lastMessageTime;
   serializeJson(d, Serial);
   Serial.write('\n');
@@ -1295,6 +1623,9 @@ ReceiverInfo* ingestConfigResponse(const uint8_t* buf, uint8_t len, uint64_t now
   r->fwVersion         = cr->fwVersion;
   r->boardVersion      = cr->boardVersion;
   r->boardType         = cr->reserved[1];
+  r->caps              = cr->reserved[3];
+  r->rxRfChannel       = cr->reserved[4];
+  r->rxRfSystemId      = cr->reserved[5];
   r->numBoards         = cr->numBoards;
   r->noBoardsDetected  = cr->noBoardsDetected;
   r->cuesAvailable     = cr->cuesAvailable;
@@ -1331,7 +1662,8 @@ void softRadioRecovery() {
   radio.flush_rx();
   // Re-apply core settings in case a glitch corrupted a register.
   radio.setChannel(rfChannel);
-  radio.setRetries(15, 5);
+  invalidateRetryPolicy();
+  setRetryPolicy(rfArcCmd);
   radio.setPALevel(RF24_PA_MAX);
   radio.setDataRate(RF24_250KBPS);
   radio.setCRCLength(RF24_CRC_16);
@@ -1341,6 +1673,7 @@ void softRadioRecovery() {
   // silently demote us to the legacy single-frame protocol.
   radio.enableDynamicPayloads();
   radio.enableAckPayload();
+  radio.enableDynamicAck();   // broadcast frames are sent without auto-ACK (T27)
 }
 
 // Apply current rfChannel/rfSystemId to the live radio without a full reboot.
@@ -1349,10 +1682,11 @@ void applyRfConfig() {
     Serial.print(F("INFO: RF reconfigure ch=")); Serial.print(rfChannel);
     Serial.print(F(" sid=")); Serial.println(rfSystemId);
   }
-  radio.stopListening();
+  radioEnterTx();
   radio.setChannel(rfChannel);
+  // The reading pipe is kept for legacy unsolicited frames, but the dongle
+  // stays in TX mode (see radioEnterTx).
   radio.openReadingPipe(0, masterReadAddress());
-  radio.startListening();
 }
 
 // Spectrum scan using the nRF24L01+'s RPD (Received Power Detector) register.
@@ -1380,7 +1714,7 @@ void runRadioScan(uint16_t passes, uint8_t chStart, uint8_t chEnd) {
 
   // Park the radio in a known state. Drain any pending TX/RX so leftover
   // ACK payloads don't pollute the first-channel RPD reading.
-  radio.stopListening();
+  radioEnterTx();
   radio.flush_tx();
   radio.flush_rx();
 
@@ -1388,12 +1722,12 @@ void runRadioScan(uint16_t passes, uint8_t chStart, uint8_t chEnd) {
     for (uint16_t i = 0; i < nCh; i++) {
       uint8_t ch = chStart + i;
       radio.setChannel(ch);
-      radio.startListening();
+      radioEnterRx();
       // Trx2rx is ~130us on nRF24L01+. 180us gives us the settle + a
       // ~50us RPD latch window with margin.
       delayMicroseconds(180);
       if (radio.testRPD()) hits[i]++;
-      radio.stopListening();
+      radioEnterTx();
     }
   }
 
@@ -1425,27 +1759,71 @@ void runRadioScan(uint16_t passes, uint8_t chStart, uint8_t chEnd) {
   Serial.println(out);
 }
 
+// Link-health bookkeeping for the global radio-recovery trigger (T08). A
+// single powered-off receiver used to trigger softRadioRecovery() every 10
+// polls although the radio was fine; recovery now needs a run of failures
+// that spans at least two receivers with no success in between.
+#define RECOVERY_FAIL_STREAK    20
+static uint16_t globalFailStreak = 0;
+static uint16_t globalFailFirstNode = 0;
+static bool     globalFailMultiNode = false;
+
+// isChipConnected() is an SPI round trip; check it once a second or right
+// after a failed write instead of before every frame (T06).
+static uint32_t lastChipCheckMs = 0;
+static bool     chipConnected = true;
+
+// Debug-only throughput stats (debugMode > 0): time spent in
+// sendCommandFrame per frame and frames per second over 100 frames.
+static uint32_t txStatFrames = 0;
+static uint64_t txStatUs = 0;
+static uint32_t txStatStartMs = 0;
+
 // Core send-and-collect-status routine. With ACK-payloads enabled, radio.write()
 // returns true once the receiver auto-ACKs. If that ACK carried a payload
 // (which it should, since the receiver pre-loads its status), we read it out
 // and ingest it as a status update.
 bool sendCommandFrame(uint16_t nodeID, const void* msg, uint8_t msgLen, uint64_t now) {
-  if (!radio.isChipConnected()) {
+  int64_t fnStartUs = esp_timer_get_time();
+  uint32_t nowMs = millis();
+  if (!chipConnected || nowMs - lastChipCheckMs >= 1000) {
+    chipConnected = radio.isChipConnected();
+    lastChipCheckMs = nowMs;
+  }
+  if (!chipConnected) {
     if (debugMode > 0) {
       Serial.print(F("TX ERR: radio not connected, N")); Serial.println(nodeID);
     }
     return false;
   }
 
-  // Master is normally in PRX mode (listening). RF24 library handles the
-  // transition for us inside write(); no manual stopListening/startListening
-  // needed in the common path. We do still need to point at the right writing
-  // pipe per-target.
-  radio.stopListening();
+  // Polls (CLOCK_SYNC) get the short retry policy, everything else the long
+  // one. The dongle stays in TX mode between frames (radioEnterTx is a
+  // no-op unless an RF scan left it listening).
+  uint8_t msgType = ((const uint8_t*)msg)[0];
+  setRetryPolicy(msgType == CLOCK_SYNC ? rfArcPoll : rfArcCmd);
+  radioEnterTx();
   radio.openWritingPipe(receiverAddress(nodeID));
 
-  uint64_t txStart = now;
-  bool ok = radio.write(msg, msgLen);
+  // A CLOCK_SYNC queued with timestamp 0 is stamped here, as late as
+  // possible, from the microsecond timer rounded to the nearest ms (T23).
+  uint8_t frame[32];
+  const void* txMsg = msg;
+  if (msgType == CLOCK_SYNC && msgLen >= 9 && msgLen <= sizeof(frame) &&
+      ((const ClockSyncMessage*)msg)->timestamp == 0) {
+    memcpy(frame, msg, msgLen);
+    uint64_t stamp = (uint64_t)((esp_timer_get_time() + 500) / 1000) + tsOffset;
+    memcpy(frame + 1, &stamp, sizeof(stamp));
+    txMsg = frame;
+  }
+
+  // Latency is the radio exchange only, not LED / host-input time earlier
+  // in this loop pass.
+  int64_t txStartUs = esp_timer_get_time();
+  bool ok = radio.write(txMsg, msgLen);
+  int64_t txEndUs = esp_timer_get_time();
+  // Auto-retries the last frame needed (OBSERVE_TX ARC_CNT).
+  uint8_t arc = radio.getARC();
 
   // Drain anything in the RX FIFO. With ACK payloads enabled, a successful
   // write deposits the receiver's status here. Use radio.available() rather
@@ -1465,12 +1843,10 @@ bool sendCommandFrame(uint16_t nodeID, const void* msg, uint8_t msgLen, uint64_t
     if (maybeR) updatedR = maybeR;
   }
 
-  // Return to RX standby for inbound traffic from receivers we haven't polled
-  // yet, e.g. legacy unsolicited frames during transition.
-  radio.startListening();
-
   if (ok) {
-    uint32_t latency = (uint32_t)(millis() + tsOffset - txStart);
+    globalFailStreak = 0;
+    globalFailMultiNode = false;
+    uint32_t latency = (uint32_t)((txEndUs - txStartUs + 500) / 1000);
     latencies[latencyNextIndex] = latency;
     latencyNextIndex = (latencyNextIndex + 1) % MAX_LATENCY_SAMPLES;
     if (latencySampleCount < MAX_LATENCY_SAMPLES) latencySampleCount++;
@@ -1482,6 +1858,11 @@ bool sendCommandFrame(uint16_t nodeID, const void* msg, uint8_t msgLen, uint64_t
       if (r->latencySampleCount < MAX_LATENCY_SAMPLES) r->latencySampleCount++;
       pushCommandResult(r, true);
       r->consecutiveFailures = 0;
+      // Any successful exchange ends a backoff (T08).
+      r->pollMisses = 0;
+      r->skipRounds = 0;
+      // Moving average of auto-retries per delivered frame, x16 (T13).
+      r->retryAvg16 = r->retryAvg16 - r->retryAvg16 / 8 + arc * 2;
     }
     // Emit AFTER the latency/success bookkeeping so the just-arrived
     // sample is what the host sees. Prefer the pointer the ACK actually
@@ -1492,20 +1873,43 @@ bool sendCommandFrame(uint16_t nodeID, const void* msg, uint8_t msgLen, uint64_t
     if (debugMode > 0) {
       Serial.print(F("TX FAIL: N")); Serial.println(nodeID);
     }
+    chipConnected = radio.isChipConnected();
+    lastChipCheckMs = millis();
+    if (globalFailStreak == 0) {
+      globalFailFirstNode = nodeID;
+      globalFailMultiNode = false;
+    } else if (nodeID != globalFailFirstNode) {
+      globalFailMultiNode = true;
+    }
+    if (globalFailStreak < 0xFFFF) globalFailStreak++;
+    if (globalFailStreak >= RECOVERY_FAIL_STREAK && globalFailMultiNode) {
+      softRadioRecovery();
+      globalFailStreak = 0;
+      globalFailMultiNode = false;
+    }
     ReceiverInfo* r = getReceiverByNodeID(nodeID);
     if (r) {
       pushCommandResult(r, false);
-      r->consecutiveFailures++;
-      const uint8_t RECOVERY_THRESHOLD = 10;
-      if (r->consecutiveFailures >= RECOVERY_THRESHOLD) {
-        softRadioRecovery();
-        r->consecutiveFailures = 0;
-      }
+      if (r->consecutiveFailures < 0xFF) r->consecutiveFailures++;
       // Push the success% delta to the host even on TX fail, so the
       // displayed success rate dips in real time. Skip the fresh latency
       // sample (we don't have one) and don't update lmt — freshness is
       // still bounded by the most recent successful poll.
       emitRxUpd(r, false);
+    }
+  }
+
+  if (debugMode > 0) {
+    if (txStatFrames == 0) txStatStartMs = millis();
+    txStatUs += (uint64_t)(esp_timer_get_time() - fnStartUs);
+    if (++txStatFrames >= 100) {
+      uint32_t spanMs = millis() - txStatStartMs;
+      Serial.print(F("INFO: txstat n=100 avg_us="));
+      Serial.print((uint32_t)(txStatUs / txStatFrames));
+      Serial.print(F(" fps="));
+      Serial.println(spanMs > 0 ? (uint32_t)(100000UL / spanMs) : 0);
+      txStatFrames = 0;
+      txStatUs = 0;
     }
   }
   return ok;
@@ -1517,12 +1921,14 @@ bool sendManualFire(uint16_t nodeID, uint8_t position, uint64_t now) {
 }
 
 bool sendClockSync(uint16_t nodeID, uint64_t timestamp, uint64_t now) {
-  // Stamp timestamp as late as possible to minimize the offset the receiver
-  // must compensate for. The receiver applies ADDITIONAL_CLOCK_TX_OFFSET to
-  // account for residual TX/decode latency.
+  // timestamp 0 = stamp at TX time: sendCommandFrame writes it immediately
+  // before radio.write (T23), so the switch to TX and any queueing don't
+  // make it stale. The receiver applies ADDITIONAL_CLOCK_TX_OFFSET for the
+  // residual stamp-to-apply latency.
   ClockSyncMessage msg;
   msg.type = CLOCK_SYNC;
-  msg.timestamp = timestamp ? timestamp : (millis() + tsOffset);
+  msg.timestamp = timestamp;
+  msg.epoch = clockEpoch;
   return sendCommandFrame(nodeID, &msg, sizeof(msg), now);
 }
 
@@ -1558,41 +1964,29 @@ bool sendGeneric(uint16_t nodeID, uint8_t commandType, uint64_t now) {
   return sendCommandFrame(nodeID, &msg, sizeof(msg), now);
 }
 
-// FW v16: send a RECEIVER_CONFIG_QUERY then immediately a CLOCK_SYNC to
-// fetch the receiver's CONFIG_RESPONSE. The query's auto-ACK carries
-// the receiver's previously-loaded RECEIVER_STATUS (ingested as
-// normal); the receiver loads the CONFIG_RESPONSE into its ACK FIFO
-// during the brief gap before the follow-up CLOCK_SYNC, so the
-// CLOCK_SYNC's auto-ACK carries the response. ingestAckPayload routes
-// it to ingestConfigResponse, which emits the `rxcfg` line.
+// PLAY / PAUSE with a synchronized effect time (T25); `at` 0 = legacy form.
+bool sendGenericTimed(uint16_t nodeID, uint8_t commandType, uint64_t at, uint64_t now) {
+  if (at == 0) return sendGeneric(nodeID, commandType, now);
+  GenericTimedMessage msg = { commandType, at };
+  return sendCommandFrame(nodeID, &msg, sizeof(msg), now);
+}
+
+// FW v16: send a RECEIVER_CONFIG_QUERY. Its auto-ACK carries the
+// receiver's previously-loaded RECEIVER_STATUS (ingested as normal); the
+// receiver then loads its CONFIG_RESPONSE into the ACK FIFO and keeps it
+// there until the next inbound frame. dispatchOneCommand arms a follow-up
+// poll (CONFIG_FOLLOWUP_MS later, T09) whose auto-ACK carries the response;
+// ingestAckPayload routes it to ingestConfigResponse, which emits `rxcfg`.
+// This used to block the loop with delay(8) between the two frames.
 //
-// Returns true if BOTH writes succeeded. The CLOCK_SYNC failing means
-// we definitely lost the response; the host can re-issue rxcfg.
+// If the follow-up is lost, configQueryPending stays set and the next poll
+// slot for the receiver re-issues the query.
 bool sendConfigQuery(uint16_t nodeID, uint8_t flags, uint16_t fire_dur_ms, uint64_t now) {
   ReceiverConfigSetMessage q;
   q.type = RECEIVER_CONFIG_QUERY;
   q.flags = flags;
   q.fire_duration_ms = fire_dur_ms;
-  bool ok1 = sendCommandFrame(nodeID, &q, sizeof(q), now);
-  if (!ok1) return false;
-
-  // Inter-frame gap to give the receiver's main loop time to dispatch
-  // the CONFIG_QUERY and call loadConfigResponseIntoAck() before our
-  // follow-up CLOCK_SYNC's auto-ACK fires. radio.write() returns the
-  // moment the CONFIG_QUERY's auto-ACK arrives (~1ms after TX start)
-  // -- by then the receiver's loop has only just barely *received*
-  // the frame, not processed it. Without this delay the CLOCK_SYNC
-  // can arrive before the response is loaded and we get the stale
-  // RECEIVER_STATUS instead.
-  //
-  // 8ms mirrors handleFlashBegin's "wait for the receiver to settle"
-  // delay (15ms there, but that includes Update.begin + radio rate
-  // hop). For a plain config query the receiver has nothing slow to
-  // do, so 8ms gives ~5ms of headroom over the worst observed loop
-  // iteration time (LED animations + show housekeeping).
-  delay(8);
-
-  return sendClockSync(nodeID, 0, (uint64_t)(millis() + tsOffset));
+  return sendCommandFrame(nodeID, &q, sizeof(q), now);
 }
 
 // 433 MHz Bilusocn TX path (unchanged).
@@ -1863,7 +2257,8 @@ bool sendOtaFrame(const void* payload, uint8_t payloadLen,
                   ReceiverOtaStatusMessage* ackOut, bool* gotAck) {
   *gotAck = false;
   if (otaTargetNodeID == 0) return false;
-  radio.stopListening();
+  applyRetries(RF_OTA_ARD, RF_OTA_ARC);
+  radioEnterTx();
   radio.openWritingPipe(receiverAddress(otaTargetNodeID));
   bool ok = radio.write(payload, payloadLen);
   ReceiverOtaStatusMessage tmp;
@@ -1871,7 +2266,6 @@ bool sendOtaFrame(const void* payload, uint8_t payloadLen,
     if (ackOut) *ackOut = tmp;
     *gotAck = true;
   }
-  radio.startListening();
   // radio.write blocks up to ~95ms on a failed link (RF24 FAILURE_HANDLING
   // backstop). Yield so the USB-CDC service task can drain the dongle's
   // TX ring buffer between attempts -- otherwise multiple back-to-back
@@ -1884,21 +2278,22 @@ bool sendOtaFrame(const void* payload, uint8_t payloadLen,
 }
 
 void otaReassertRadioConfig(rf24_datarate_e rate) {
-  radio.stopListening();
+  radioEnterTx();
   radio.flush_tx();
   radio.flush_rx();
   radio.setChannel(rfChannel);
   radio.setDataRate(rate);
   radio.setPALevel(RF24_PA_MAX);
-  radio.setRetries(15, 5);
+  invalidateRetryPolicy();
+  applyRetries(RF_OTA_ARD, RF_OTA_ARC);
   radio.setCRCLength(RF24_CRC_16);
   radio.setAutoAck(true);
   radio.setAutoAck(0, true);
   radio.enableDynamicPayloads();
   radio.enableAckPayload();
+  radio.enableDynamicAck();
   radio.openReadingPipe(0, masterReadAddress());
   radio.openWritingPipe(receiverAddress(otaTargetNodeID));
-  radio.startListening();
   esp_task_wdt_reset();
   yield();
 }
@@ -1910,7 +2305,7 @@ void otaReassertRadioConfig(rf24_datarate_e rate) {
 //
 // Returns true if begin() reported the radio is responding.
 bool otaFullRadioRestart(rf24_datarate_e rate) {
-  radio.stopListening();
+  radioEnterTx();
   radio.powerDown();
   delay(10);
   bool ok = radio.begin();
@@ -1919,6 +2314,9 @@ bool otaFullRadioRestart(rf24_datarate_e rate) {
     delay(30);
     ok = radio.begin();
   }
+  // begin() leaves the chip in TX standby with its default retry setting.
+  radioListening = false;
+  invalidateRetryPolicy();
   if (ok) {
     otaReassertRadioConfig(rate);
   }
@@ -2031,7 +2429,7 @@ void otaFinishMode(const char* phase, const char* extraKey, const char* extraVal
   // fleet can be polled normally even if we left flash mode mid-stream.
   radio.setDataRate(RF24_250KBPS);
   radio.openReadingPipe(0, masterReadAddress());
-  radio.startListening();
+  radioEnterTx();
   // Bounce the radio's gap estimate by clearing TX/RX FIFOs.
   radio.flush_tx();
   radio.flush_rx();
@@ -2048,11 +2446,13 @@ void serviceOtaRejoin(uint64_t now) {
   static uint64_t lastRejoinPing = 0;
   if (now - lastRejoinPing >= 250) {
     lastRejoinPing = now;
-    radio.stopListening();
+    applyRetries(RF_OTA_ARD, RF_OTA_ARC);
+    radioEnterTx();
     radio.openWritingPipe(receiverAddress(otaTargetNodeID));
     ClockSyncMessage msg;
     msg.type = CLOCK_SYNC;
     msg.timestamp = now;
+    msg.epoch = clockEpoch;
     bool ok = radio.write(&msg, sizeof(msg));
     // If a normal-status ACK came back, the rebooted receiver is alive
     // again. Anything that ingestStatusFrame accepts counts.
@@ -2068,13 +2468,12 @@ void serviceOtaRejoin(uint64_t now) {
         if (len > 0 && buf[0] == RECEIVER_STATUS) {
           ReceiverInfo* r = ingestStatusFrame(buf, len, now);
           if (r) emitRxUpd(r, false);
-          // otaFinishMode below restores RX listening + 250kbps.
+          // otaFinishMode below restores 250kbps.
           otaFinishMode("done", nullptr, nullptr);
           return;
         }
       }
     }
-    radio.startListening();
   }
 
   if (now > otaRejoinDeadlineMs) {
@@ -2624,7 +3023,49 @@ void handleReboot() {
   esp_restart();
 }
 
-void processSerialCommand(String inStr) {
+// T27 broadcast control. `bcast <op> <showId> <at>` is handled at once (not
+// queued): the frame goes to broadcastAddress() without auto-ACK, 5 times
+// 3ms apart, then once more ~100ms later from loop(). Receivers apply a
+// given seq once. Delivery is confirmed per receiver from the status flags
+// (T12); the host follows up with unicast for receivers that didn't change.
+#define BCAST_BURST_COUNT     5
+#define BCAST_BURST_GAP_US    3000
+#define BCAST_LATE_REPEAT_MS  100
+static uint8_t bcastSeq = 0;
+static BroadcastControlMessage bcastPending;
+static uint32_t bcastRepeatDueMs = 0;   // 0 = none
+
+static void sendBroadcastFrame(const BroadcastControlMessage& m) {
+  radioEnterTx();
+  radio.openWritingPipe(broadcastAddress());
+  radio.write(&m, sizeof(m), true);   // multicast: NO_ACK bit set
+}
+
+bool sendBroadcastControl(uint8_t op, uint16_t showId, uint64_t at) {
+  if (op < 1 || op > 4) return false;
+  BroadcastControlMessage m;
+  m.type = BCAST_CONTROL;
+  m.op = op;
+  m.seq = ++bcastSeq;
+  m.showId = showId;
+  m.at = at;
+  for (uint8_t i = 0; i < BCAST_BURST_COUNT; i++) {
+    if (i > 0) delayMicroseconds(BCAST_BURST_GAP_US);
+    sendBroadcastFrame(m);
+  }
+  bcastPending = m;
+  uint32_t due = millis() + BCAST_LATE_REPEAT_MS;
+  bcastRepeatDueMs = due ? due : 1;
+  return true;
+}
+
+void serviceBroadcastRepeat() {
+  if (bcastRepeatDueMs == 0 || (int32_t)(millis() - bcastRepeatDueMs) < 0) return;
+  bcastRepeatDueMs = 0;
+  sendBroadcastFrame(bcastPending);
+}
+
+void processSerialCommandBody(String inStr) {
   inStr.trim();
   if (inStr.length() == 0) return;
 
@@ -2639,7 +3080,7 @@ void processSerialCommand(String inStr) {
   if (inStr == "reboot" || inStr == "restart") { handleReboot(); return; }
 
   int firstSpace = inStr.indexOf(' ');
-  if (firstSpace < 0) { Serial.println(F("C?NFS")); return; }
+  if (firstSpace < 0) { cmdResult = CMD_REJECTED; Serial.println(F("C?NFS")); return; }
   String cmdStr = inStr.substring(0, firstSpace);
   String args = inStr.substring(firstSpace + 1);
 
@@ -2650,6 +3091,19 @@ void processSerialCommand(String inStr) {
   if (cmdStr == "flash_begin") { handleFlashBegin(args); return; }
   if (cmdStr == "flash_data")  { handleFlashData(args);  return; }
   if (cmdStr == "flash_recover") { handleFlashRecover(args); return; }
+
+  if (cmdStr == "bcast") {
+    // bcast <op> <showId> <at>
+    if (otaActive) { cmdResult = CMD_REJECTED; Serial.println(F("CV BUSY OTA")); return; }
+    unsigned op = 0, showId = 0;
+    unsigned long long at = 0;
+    if (sscanf(args.c_str(), "%u %u %llu", &op, &showId, &at) < 2 ||
+        !sendBroadcastControl((uint8_t)op, (uint16_t)showId, (uint64_t)at)) {
+      cmdResult = CMD_REJECTED;
+      Serial.println(F("CV bcast"));
+    }
+    return;
+  }
 
   if (cmdStr == "433fire") {
     if (isValidMessage(args)) {
@@ -2662,7 +3116,7 @@ void processSerialCommand(String inStr) {
       for (int i = 0; i < repetitions; i++) sendBinaryString(binaryString);
       if (debugMode > 0) Serial.println(F("C+ 433"));
     } else {
-      Serial.println(F("CV 433"));
+      cmdResult = CMD_REJECTED; Serial.println(F("CV 433"));
     }
     return;
   }
@@ -2702,7 +3156,7 @@ void processSerialCommand(String inStr) {
   // when invoked as a pure fetch (no key/value tail). Everything else
   // requires `IDENT <params...>`.
   if (secondSpace < 0 && cmdStr != "msync" && cmdStr != "forget" && cmdStr != "rxcfg") {
-    Serial.println(F("C?NSS")); return;
+    cmdResult = CMD_REJECTED; Serial.println(F("C?NSS")); return;
   }
 
   String ident = (secondSpace > 0) ? args.substring(0, secondSpace) : args;
@@ -2711,6 +3165,7 @@ void processSerialCommand(String inStr) {
   if (cmdStr == "msync") {
     uint64_t ts = atoll(paramsStr.c_str());
     tsOffset = ts - millis();
+    clockEpoch++;
     Serial.println(F("C+ msync"));
     return;
   }
@@ -2721,7 +3176,7 @@ void processSerialCommand(String inStr) {
   // this ident in the queue, dispatchOneCommand will simply not find the
   // receiver and report no-route.
   if (cmdStr == "forget") {
-    if (ident.length() == 0) { Serial.println(F("CV forget")); return; }
+    if (ident.length() == 0) { cmdResult = CMD_REJECTED; Serial.println(F("CV forget")); return; }
     if (removeReceiverByIdent(ident)) {
       Serial.print(F("C+ forget ")); Serial.println(ident);
     } else {
@@ -2731,13 +3186,13 @@ void processSerialCommand(String inStr) {
   }
 
   ReceiverInfo* rinfo = getReceiverByIdent(ident, true);
-  if (!rinfo) { Serial.println(F("CV RNE")); return; }
+  if (!rinfo) { cmdResult = CMD_REJECTED; Serial.println(F("CV RNE")); return; }
 
   // Drop the previous "if nodeID==0 then targetNodeID=1" footgun. If we don't
   // know the receiver's nodeID yet (haven't heard from it), we can't address
   // it. Tell the operator clearly instead of misfiring on N1.
   if (rinfo->nodeID == 0) {
-    Serial.print(F("CV NID0 ")); Serial.println(ident);
+    cmdResult = CMD_REJECTED; Serial.print(F("CV NID0 ")); Serial.println(ident);
     return;
   }
   uint16_t targetNodeID = rinfo->nodeID;
@@ -2758,6 +3213,10 @@ void processSerialCommand(String inStr) {
     }
   } else if (cmdStr == "sync") {
     qc.messageType = CLOCK_SYNC;
+    // An explicit sync (registration, retry_receiver) ends any poll backoff
+    // so the operator can force an immediate retry (T08).
+    rinfo->pollMisses = 0;
+    rinfo->skipRounds = 0;
     int lastSpace = paramsStr.lastIndexOf(' ');
     if (lastSpace > 0) {
       qc.sync_timestamp = atoll(paramsStr.substring(0, lastSpace).c_str());
@@ -2774,7 +3233,7 @@ void processSerialCommand(String inStr) {
     // and rejecting the command (CV startload). That leaves the receiver with
     // currentShowId==0 even though cues still load (cyan LED, showId 0).
     int spaceIdx = paramsStr.indexOf(' ');
-    if (spaceIdx < 0) { Serial.println(F("CV startload")); return; }
+    if (spaceIdx < 0) { cmdResult = CMD_REJECTED; Serial.println(F("CV startload")); return; }
     qc.startload_numTargets = paramsStr.substring(0, spaceIdx).toInt();
     qc.startload_showId = paramsStr.substring(spaceIdx + 1).toInt();
   } else if (cmdStr == "showload") {
@@ -2799,7 +3258,7 @@ void processSerialCommand(String inStr) {
     qc.showload_time_2 = tokens[2];
     qc.showload_position_2 = tokens[3];
   } else if (cmdStr == "showloadn") {
-    if (!parseShowLoadN(paramsStr, qc)) { Serial.println(F("CV showloadn")); return; }
+    if (!parseShowLoadN(paramsStr, qc)) { cmdResult = CMD_REJECTED; Serial.println(F("CV showloadn")); return; }
   } else if (cmdStr == "showstart") {
     qc.messageType = SHOW_START;
     int lastSpace = paramsStr.lastIndexOf(' ');
@@ -2841,7 +3300,7 @@ void processSerialCommand(String inStr) {
       int sp = rest.indexOf(' ');
       String key = (sp > 0) ? rest.substring(0, sp) : rest;
       if (sp <= 0) {
-        Serial.print(F("CV rxcfg missing value for ")); Serial.println(key);
+        cmdResult = CMD_REJECTED; Serial.print(F("CV rxcfg missing value for ")); Serial.println(key);
         return;
       }
       String afterKey = rest.substring(sp + 1);
@@ -2853,13 +3312,13 @@ void processSerialCommand(String inStr) {
       if (key == "fd") {
         long fdv = val.toInt();
         if (fdv <= 0 || fdv > 65535) {
-          Serial.print(F("CV rxcfg fd out-of-range ")); Serial.println(val);
+          cmdResult = CMD_REJECTED; Serial.print(F("CV rxcfg fd out-of-range ")); Serial.println(val);
           return;
         }
         qc.cfg_flags |= CFG_FLAG_SET_FIRE_DURATION;
         qc.cfg_fire_duration_ms = (uint16_t)fdv;
       } else {
-        Serial.print(F("CV rxcfg unknown key ")); Serial.println(key);
+        cmdResult = CMD_REJECTED; Serial.print(F("CV rxcfg unknown key ")); Serial.println(key);
         return;
       }
       rest = tail;
@@ -2873,21 +3332,68 @@ void processSerialCommand(String inStr) {
     if (lastSpace > 0) {
       int rep = paramsStr.substring(lastSpace + 1).toInt();
       qc.repeat_count = rep > 0 ? rep : 1;
+      // `play|pause IDENT <at> <repeat>`: <at> was always a 0 placeholder;
+      // non-zero is the synchronized effect time (T25).
+      if (qc.messageType == GENERIC_PLAY || qc.messageType == GENERIC_PAUSE) {
+        qc.sync_timestamp = strtoull(paramsStr.substring(0, lastSpace).c_str(), nullptr, 10);
+      }
     }
   } else {
-    Serial.println(F("C?UK"));
+    cmdResult = CMD_REJECTED; Serial.println(F("C?UK"));
     return;
   }
 
   if (qc.messageType != 0) {
-    if (qc.messageType == MANUAL_FIRE) enqueuePriorityCommand(qc);
+    // The queue now owns the result for this sequence number (T14).
+    qc.seq = pendingSeq;
+    pendingSeq = 0;
+    if (qc.messageType == GENERIC_STOP) {
+      // Anything queued for this node that would re-arm or restart it after
+      // the stop goes: PLAY, SHOW_START and load frames.
+      scrubQueueForNodeTypes(targetNodeID,
+          TYPE_BIT(GENERIC_PLAY) | TYPE_BIT(SHOW_START) | TYPE_BIT(START_LOAD) |
+          TYPE_BIT(SHOW_LOAD) | TYPE_BIT(SHOW_LOADN));
+    } else if (qc.messageType == GENERIC_PAUSE) {
+      // PAUSE jumps the queue, so an older queued PLAY would otherwise run
+      // after it and undo the pause.
+      scrubQueueForNodeTypes(targetNodeID, TYPE_BIT(GENERIC_PLAY));
+    }
+    if (isPriorityType(qc.messageType)) enqueuePriorityCommand(qc);
     else enqueueCommand(qc);
     if (debugMode > 0) {
       Serial.print(F("C+ Q (repeat=")); Serial.print(qc.repeat_count); Serial.println(F(")"));
     }
   } else {
-    Serial.println(F("C? PE"));
+    cmdResult = CMD_REJECTED; Serial.println(F("C? PE"));
   }
+}
+
+// T14 command acks. A host line may start with `#<seq> ` (1..65535). For
+// every such line exactly one `K <seq> <result> <q>` follows:
+//   1 delivered (auto-ACK received) / handled, for immediate commands
+//   0 not delivered after all repeats
+//   2 dropped (queue full, evicted, or scrubbed by a later STOP / forget)
+//   3 rejected by the parser
+// q is the queue depth at the time. Lines without a prefix behave exactly
+// as before. Advertised as bit 0 of `caps` in the status tick.
+void processSerialCommand(String inStr) {
+  inStr.trim();
+  pendingSeq = 0;
+  if (inStr.length() > 1 && inStr.charAt(0) == '#') {
+    int sp = inStr.indexOf(' ');
+    long v = (sp > 1) ? inStr.substring(1, sp).toInt() : 0;
+    if (sp < 0 || v <= 0 || v > 65535) {
+      Serial.println(F("C?SEQ"));
+      return;
+    }
+    pendingSeq = (uint16_t)v;
+    inStr = inStr.substring(sp + 1);
+  }
+  cmdResult = CMD_HANDLED;
+  processSerialCommandBody(inStr);
+  // Not consumed by the queue: an immediate command or a rejection.
+  if (pendingSeq != 0) emitCmdResult(pendingSeq, cmdResult);
+  pendingSeq = 0;
 }
 
 void serviceSerialInput() {
@@ -2925,6 +3431,45 @@ void serviceSerialInput() {
   }
 }
 
+// Follow-up poll delays (T09). Status is one exchange behind: the ACK to a
+// command carries the status loaded before that command was processed.
+// A short follow-up poll after a state-changing command brings the new
+// state (loadComplete, startReady, ...) to the host without waiting for
+// the receiver's next round-robin poll. 10ms covers the receiver's status
+// rebuild (up to ~3ms with 8 boards); 8ms is the config-response gap the
+// blocking sendConfigQuery used to wait.
+#define FOLLOWUP_MS        10
+#define CONFIG_FOLLOWUP_MS  8
+
+// Backoff for registered receivers that don't answer (T08). After
+// POLL_BACKOFF_AFTER_MISSES unanswered polls in a row a receiver is polled
+// only every 2nd, 3rd, then 5th round (skipRounds 1, 2, then capped at 4),
+// so a powered-off unit stops costing a full retry burst every cycle. With
+// the cap, a receiver that comes back is found within ~5 cycles (~10s at
+// the default 2s interval). Host commands to it are never skipped.
+#define POLL_BACKOFF_AFTER_MISSES 3
+#define POLL_BACKOFF_MAX_ROUNDS   4
+
+static inline bool armsFollowUp(uint8_t t) {
+  switch (t) {
+    case START_LOAD: case SHOW_LOAD: case SHOW_LOADN: case SHOW_START:
+    case GENERIC_PLAY: case GENERIC_STOP: case GENERIC_RESET: case GENERIC_PAUSE:
+    case RESET_DVC: case RECEIVER_CONFIG_QUERY:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static inline bool nodeHasQueuedCommand(uint16_t nodeID) {
+  int idx = cmdQueueHead;
+  for (int k = 0; k < cmdQueueCount; k++) {
+    if (commandBuffer[idx].targetNodeID == nodeID) return true;
+    idx = (idx + 1) % MAX_COMMANDS_IN_QUEUE;
+  }
+  return false;
+}
+
 // Dispatch one command from the queue. With ACK payloads, this is non-blocking
 // in the sense that radio.write() returns within ~3ms (success) to ~22ms
 // (all-retry failure) — no 150ms application-level wait, no busy-poll loop.
@@ -2936,6 +3481,7 @@ void dispatchOneCommand(uint64_t now) {
 
   if (cmd.targetNodeID == 0 && cmd.messageType != CLOCK_SYNC) {
     Serial.print(F("WARN: cmd for N0 dropped, type=")); Serial.println(cmd.messageType);
+    emitCmdResult(cmd.seq, CMD_NOT_DELIVERED);
     return;
   }
 
@@ -2958,9 +3504,10 @@ void dispatchOneCommand(uint64_t now) {
         ok = sendShowStart(cmd.targetNodeID, cmd.showstart_targetStartTime,
                            cmd.showstart_numTargetsToFire, cmd.showstart_showId, now); break;
       case GENERIC_PLAY:
+      case GENERIC_PAUSE:
+        ok = sendGenericTimed(cmd.targetNodeID, cmd.messageType, cmd.sync_timestamp, now); break;
       case GENERIC_STOP:
       case GENERIC_RESET:
-      case GENERIC_PAUSE:
       case RESET_DVC:
         ok = sendGeneric(cmd.targetNodeID, cmd.messageType, now); break;
       case RECEIVER_CONFIG_QUERY:
@@ -2968,10 +3515,66 @@ void dispatchOneCommand(uint64_t now) {
                              cmd.cfg_fire_duration_ms, now); break;
       default:
         Serial.print(F("ERR: unknown cmd type=")); Serial.println(cmd.messageType);
+        emitCmdResult(cmd.seq, CMD_NOT_DELIVERED);
         return;
     }
     if (ok) gotAck = true;
   }
+  emitCmdResult(cmd.seq, gotAck ? CMD_HANDLED : CMD_NOT_DELIVERED);
+
+  ReceiverInfo* ri = getReceiverByNodeID(cmd.targetNodeID);
+  if (ri) {
+    if (gotAck && armsFollowUp(cmd.messageType)) {
+      uint32_t due = millis() + (cmd.messageType == RECEIVER_CONFIG_QUERY
+                                 ? CONFIG_FOLLOWUP_MS : FOLLOWUP_MS);
+      ri->followUpDueMs = due ? due : 1;
+    }
+    // T08: only background polls count toward the backoff; explicit host
+    // commands and follow-up polls never do.
+    if (!gotAck && (cmd.qflags & QF_POLL) && ri->pollMisses < 0xFF) {
+      ri->pollMisses++;
+      if (ri->pollMisses >= POLL_BACKOFF_AFTER_MISSES) {
+        uint8_t e = ri->pollMisses - POLL_BACKOFF_AFTER_MISSES;
+        ri->skipRounds = (e >= 2) ? POLL_BACKOFF_MAX_ROUNDS : (uint8_t)(1 << e);
+      }
+    }
+  }
+}
+
+static inline bool receiverBackedOff(const ReceiverInfo& r) {
+  return r.pollMisses >= POLL_BACKOFF_AFTER_MISSES;
+}
+
+uint8_t countBackedOffReceivers() {
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < numReceivers; i++) {
+    if (receivers[i].nodeID != 0 && receiverBackedOff(receivers[i])) n++;
+  }
+  return n;
+}
+
+// T09: queue a follow-up poll for one receiver whose follow-up is due and
+// that has nothing queued. Returns true if one was queued.
+static bool maybeQueueFollowUp() {
+  uint32_t nowMs = millis();
+  for (uint8_t i = 0; i < numReceivers; i++) {
+    ReceiverInfo& r = receivers[i];
+    if (r.followUpDueMs == 0 || r.nodeID == 0) continue;
+    if ((int32_t)(nowMs - r.followUpDueMs) < 0) continue;
+    // A queued command's own ACK carries the status (and re-arms the
+    // follow-up after it), so leave the field set and look again later.
+    if (nodeHasQueuedCommand(r.nodeID)) continue;
+    r.followUpDueMs = 0;
+    QueuedCommand qc = {};
+    qc.targetNodeID = r.nodeID;
+    qc.repeat_count = 1;
+    qc.messageType = CLOCK_SYNC;
+    qc.sync_timestamp = 0;
+    qc.qflags = QF_FOLLOWUP;
+    enqueueCommand(qc);
+    return true;
+  }
+  return false;
 }
 
 // TDMA-style poll: round-robin one receiver per pollInterval. The "poll"
@@ -2980,8 +3583,16 @@ void dispatchOneCommand(uint64_t now) {
 // and the master never bursts all syncs at once.
 void maybePollNextReceiver(uint64_t now) {
   if (numReceivers == 0) return;
-  // Spread one poll per (clockSyncIntervalMs / numReceivers).
-  uint32_t pollSpacingMs = clockSyncIntervalMs / numReceivers;
+  if (maybeQueueFollowUp()) return;
+
+  // Spread one poll per (clockSyncIntervalMs / receivers in the normal
+  // state). Backed-off receivers are visited between those polls without
+  // taking a slot of their own (T08).
+  uint8_t normal = 0;
+  for (uint8_t i = 0; i < numReceivers; i++) {
+    if (receivers[i].nodeID != 0 && !receiverBackedOff(receivers[i])) normal++;
+  }
+  uint32_t pollSpacingMs = clockSyncIntervalMs / (normal > 0 ? normal : 1);
   if (pollSpacingMs < 5) pollSpacingMs = 5;
   if (now - lastPollDispatchTime < pollSpacingMs) return;
 
@@ -2994,25 +3605,24 @@ void maybePollNextReceiver(uint64_t now) {
     tries++;
     if (r.nodeID == 0) continue;
 
+    if (receiverBackedOff(r) && r.skipRounds > 0) {
+      r.skipRounds--;
+      continue;
+    }
+
     // Don't double-poll if there's already a queued command for this node;
     // the queued command's ACK will carry status. Advance to the next slot.
-    bool alreadyQueued = false;
-    int idx = cmdQueueHead;
-    for (int k = 0; k < cmdQueueCount; k++) {
-      if (commandBuffer[idx].targetNodeID == r.nodeID) { alreadyQueued = true; break; }
-      idx = (idx + 1) % MAX_COMMANDS_IN_QUEUE;
-    }
-    if (alreadyQueued) continue;
+    if (nodeHasQueuedCommand(r.nodeID)) continue;
 
-    QueuedCommand qc = {0};
+    QueuedCommand qc = {};
     qc.targetNodeID = r.nodeID;
     qc.repeat_count = 1;
+    qc.qflags = QF_POLL;
     if (r.configQueryPending) {
       // FW v16: instead of the regular CLOCK_SYNC poll, dispatch a
-      // pure-fetch CONFIG_QUERY (flags=0). sendConfigQuery itself
-      // sends a follow-up CLOCK_SYNC under the hood to retrieve the
-      // CONFIG_RESPONSE from the ACK FIFO, so the clock-sync cadence
-      // for this receiver isn't actually skipped.
+      // pure-fetch CONFIG_QUERY (flags=0). Its follow-up poll (T09)
+      // retrieves the CONFIG_RESPONSE from the ACK FIFO and carries the
+      // clock sync, so the cadence for this receiver isn't skipped.
       qc.messageType = RECEIVER_CONFIG_QUERY;
       qc.cfg_flags = 0;
       qc.cfg_fire_duration_ms = 0;
@@ -3024,6 +3634,10 @@ void maybePollNextReceiver(uint64_t now) {
     lastPollDispatchTime = now;
     return;
   }
+  // Every receiver was skipped (all backed off or already queued). Count
+  // this as a slot so skipRounds count down once per spacing, not once per
+  // loop pass.
+  lastPollDispatchTime = now;
 }
 
 void setup() {
@@ -3095,10 +3709,11 @@ void setup() {
   radio.setDataRate(RF24_250KBPS);
   radio.setPALevel(RF24_PA_MAX);
   radio.setChannel(rfChannel);
-  // Retry config: 5 retries × 3.75ms ARD = ~22ms max blocking on a failed write.
-  // Was (15,15) = ~64ms; ARD must be >= ACK packet on-air time, which at
-  // 250kbps with a 32-byte ACK payload is ~1.3ms, so 3.75ms is plenty.
-  radio.setRetries(15, 5);
+  // Retry policy is applied per frame (setRetryPolicy, v32); start with the
+  // command policy. ARD must be >= ACK packet on-air time, which at 250kbps
+  // with a 32-byte ACK payload is ~1.3ms (datasheet minimum 1.5ms).
+  invalidateRetryPolicy();
+  setRetryPolicy(rfArcCmd);
   radio.setCRCLength(RF24_CRC_16);
   radio.setAutoAck(true);
   radio.setAutoAck(0, true);
@@ -3108,11 +3723,22 @@ void setup() {
   // collapsing what used to be a 4-frame transaction into 2 frames.
   radio.enableDynamicPayloads();
   radio.enableAckPayload();
+  // Broadcast control frames (T27) go out without auto-ACK.
+  radio.enableDynamicAck();
 
+  // The reading pipe is kept for legacy unsolicited frames, but the dongle
+  // stays in TX mode from here on (see radioEnterTx).
   radio.openReadingPipe(0, masterReadAddress());
-  radio.startListening();
+  radio.stopListening();
+  radioListening = false;
 
   Serial.println(F("M+ (RF24 Master Hub Online v4: ACK-payloads)"));
+
+  // Static memory check for the receiver table and command queue (T11).
+  Serial.print(F("INFO: rx_entry=")); Serial.print((unsigned)sizeof(ReceiverInfo));
+  Serial.print(F("B rx_table=")); Serial.print((unsigned)sizeof(receivers));
+  Serial.print(F("B queue=")); Serial.print((unsigned)sizeof(commandBuffer));
+  Serial.print(F("B free_heap=")); Serial.println((unsigned)ESP.getFreeHeap());
 
   for (int i = 0; i < NUM_PIXELS; i++) {
     pixels.setPixelColor(i, COLOR_GREEN); pixels.show(); delay(50);
@@ -3122,8 +3748,91 @@ void setup() {
   pixels.show();
   ledStates[0] = 1;
   for (int i = 1; i < NUM_PIXELS; i++) { ledStates[i] = 0; ledEffects[i] = 0; }
+  ledDirty = true;
 
   Serial.setTimeout(1);
+}
+
+// Per-second status line (T10). Top-level fields are unchanged; the
+// receivers[] array carries a rotating slice of at most STATUS_SLICE
+// receivers (`rn` = registered receivers, `ro` = this slice's offset) so the
+// line stays small whatever the fleet size: with 32 receivers the old full
+// dump was ~5KB and needed ~9KB of heap per tick, and in hub mode it broke
+// the 8KB host line limit above ~50 receivers. The host and the Android app
+// merge per entry; operator-visible changes still go out at once as rxupd,
+// so the slice only refreshes the slow fields (averaged latency, sp, rt).
+// One static document, serialised straight to the host link: no String
+// and no per-tick allocation.
+#define STATUS_SLICE 8
+static StaticJsonDocument<4096> statusDoc;
+static uint8_t statusSliceOffset = 0;
+
+void emitStatusTick(uint64_t now) {
+  statusDoc.clear();
+  JsonDocument& doc = statusDoc;
+  doc["timestamp"] = now;
+  doc["q"] = cmdQueueCount;
+  doc["qmax"] = MAX_COMMANDS_IN_QUEUE;
+  doc["fw"] = FW_VERSION;
+  doc["ch"] = rfChannel;
+  // Identify the dongle itself so the host flashes the right image.
+  doc["bt"] = BOARD_TYPE_DEDICATED;
+  doc["bv"] = BOARD_VERSION;
+  doc["csim"] = clockSyncIntervalMs;
+  // Receivers currently in poll backoff (T08).
+  doc["off"] = countBackedOffReceivers();
+  // Capability bits: bit 0 = `#<seq>` command acks (T14).
+  doc["caps"] = DONGLE_CAPS_CMD_ACKS | DONGLE_CAPS_TIMED_PAUSE | DONGLE_CAPS_BCAST;
+
+  uint32_t totalLat = 0; int avgLat = 0;
+  if (latencySampleCount > 0) {
+    for (uint8_t i = 0; i < latencySampleCount; i++) totalLat += latencies[i];
+    avgLat = (int)((totalLat + latencySampleCount / 2) / latencySampleCount);
+  }
+  doc["l"] = avgLat;
+
+  if (statusSliceOffset >= numReceivers) statusSliceOffset = 0;
+  doc["rn"] = numReceivers;
+  doc["ro"] = statusSliceOffset;
+  JsonArray arr = doc.createNestedArray("receivers");
+  uint8_t count = numReceivers < STATUS_SLICE ? numReceivers : STATUS_SLICE;
+  for (uint8_t k = 0; k < count; k++) {
+    const ReceiverInfo& r = receivers[(statusSliceOffset + k) % numReceivers];
+    JsonObject ro = arr.createNestedObject();
+    ro["i"] = (const char*)r.ident;
+    ro["n"] = r.nodeID;
+    ro["b"] = r.batteryLevel;
+    ro["s"] = r.showId;
+    ro["l"] = r.loadComplete ? 1 : 0;
+    ro["r"] = r.startReady   ? 1 : 0;
+    ro["t"] = r.lastMessageTime;
+    ro["x"] = receiverAvgLatency(&r);
+    ro["sp"] = calculateSuccessPercent(&r);
+    ro["rt"] = receiverRetryAvgX10(&r);
+    if (r.caps & RX_CAP_STATUS_FLAGS) ro["pf"] = r.stateFlags;
+
+    // FW v16: include the cached receiver-side config when valid.
+    // Skipped entirely on receivers we haven't queried yet so the
+    // host can tell "no answer yet" from "really has 0 cues".
+    if (r.configValid) {
+      ro["fw"]  = r.fwVersion;
+      ro["bv"]  = r.boardVersion;
+      ro["bt"]  = r.boardType;
+      ro["nb"]  = r.numBoards;
+      ro["nbd"] = r.noBoardsDetected;
+      ro["ca"]  = r.cuesAvailable;
+      ro["fd"]  = r.fireDurationMs;
+      ro["rc"]  = r.caps;
+    }
+
+    JsonArray ca = ro.createNestedArray("c");
+    for (uint8_t j = 0; j < CONTINUITY_INDEX_CT; j++) ca.add(r.continuity[j]);
+  }
+  if (numReceivers > 0) {
+    statusSliceOffset = (uint8_t)((statusSliceOffset + count) % numReceivers);
+  }
+  serializeJson(doc, Serial);
+  Serial.write('\n');
 }
 
 void loop() {
@@ -3183,6 +3892,7 @@ void loop() {
     // TDMA-style status polling — spreads one CLOCK_SYNC per slot across the
     // configured interval so all known receivers get updated regularly without
     // bursting.
+    serviceBroadcastRepeat();
     maybePollNextReceiver(now);
 
     // One queued command per loop iteration. radio.write() blocks at most
@@ -3225,69 +3935,7 @@ void loop() {
         otaEmitLineNonBlocking(buf, (size_t)n);
       }
     } else {
-      DynamicJsonDocument doc(1024 + (numReceivers * 256));
-      doc["timestamp"] = now;
-      doc["q"] = cmdQueueCount;
-      // Expose queue capacity so the UI can render q/qmax as a saturation
-      // bar without hardcoding the dongle constant on the host side.
-      // Cheap (one extra int per second).
-      doc["qmax"] = MAX_COMMANDS_IN_QUEUE;
-      doc["fw"] = FW_VERSION;
-      doc["ch"] = rfChannel;
-      // Identify the dongle itself so the host flashes the right image.
-      doc["bt"] = BOARD_TYPE_DEDICATED;
-      doc["bv"] = BOARD_VERSION;
-      // Echo the live (post-clamp) clock-sync interval so the UI can show
-      // the operator what the dongle is actually running with -- e.g. if
-      // they typed 0 in settings, they'll see CSIM_MIN_MS reflected here
-      // rather than wondering why polling didn't change.
-      doc["csim"] = clockSyncIntervalMs;
-
-      uint32_t totalLat = 0; int avgLat = 0;
-      if (latencySampleCount > 0) {
-        for (uint8_t i = 0; i < latencySampleCount; i++) totalLat += latencies[i];
-        avgLat = round((float)totalLat / latencySampleCount);
-      }
-      doc["l"] = avgLat;
-
-      JsonArray arr = doc.createNestedArray("receivers");
-      for (uint8_t i = 0; i < numReceivers; i++) {
-        JsonObject ro = arr.createNestedObject();
-        ro["i"] = receivers[i].ident;
-        ro["n"] = receivers[i].nodeID;
-        ro["b"] = receivers[i].batteryLevel;
-        ro["s"] = receivers[i].showId;
-        ro["l"] = receivers[i].loadComplete ? 1 : 0;
-        ro["r"] = receivers[i].startReady   ? 1 : 0;
-        ro["t"] = receivers[i].lastMessageTime;
-
-        uint32_t rsum = 0; int rAvg = 0;
-        if (receivers[i].latencySampleCount > 0) {
-          for (uint8_t k = 0; k < receivers[i].latencySampleCount; k++) rsum += receivers[i].latencies[k];
-          rAvg = round((float)rsum / receivers[i].latencySampleCount);
-        }
-        ro["x"] = rAvg;
-        ro["sp"] = calculateSuccessPercent(&receivers[i]);
-
-        // FW v16: include the cached receiver-side config when valid.
-        // Skipped entirely on receivers we haven't queried yet so the
-        // host can tell "no answer yet" from "really has 0 cues".
-        if (receivers[i].configValid) {
-          ro["fw"]  = receivers[i].fwVersion;
-          ro["bv"]  = receivers[i].boardVersion;
-          ro["bt"]  = receivers[i].boardType;
-          ro["nb"]  = receivers[i].numBoards;
-          ro["nbd"] = receivers[i].noBoardsDetected;
-          ro["ca"]  = receivers[i].cuesAvailable;
-          ro["fd"]  = receivers[i].fireDurationMs;
-        }
-
-        JsonArray ca = ro.createNestedArray("c");
-        for (uint8_t j = 0; j < CONTINUITY_INDEX_CT; j++) ca.add(receivers[i].continuity[j]);
-      }
-      String out;
-      serializeJson(doc, out);
-      Serial.println(out);
+      emitStatusTick(now);
     }
   }
 

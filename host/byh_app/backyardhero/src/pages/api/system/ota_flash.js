@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { ensureHardware } from '@/util/apiGuards';
 import { COMMAND_DIR, STAGING_DIR } from '@/util/paths';
+import { writeCommandFile } from '@/util/commandFile';
 import { getRepo } from '@/data';
 import { imageMismatchError } from '@/util/firmwareVersion';
 // Hard cap on the upload size. The receiver image today is ~340KB; we
@@ -109,7 +110,7 @@ export default async function handler(req, res) {
         file_name: cleanedName,
       };
       const cmdPath = path.join(COMMAND_DIR, `${Date.now()}-ota.json`);
-      fs.writeFileSync(cmdPath, JSON.stringify(cmd, null, 2));
+      writeCommandFile(cmdPath, cmd);
 
       return res.status(202).json({
         message: 'OTA flash queued.',
@@ -130,10 +131,7 @@ export default async function handler(req, res) {
         fs.mkdirSync(COMMAND_DIR, { recursive: true });
       }
       const cmdPath = path.join(COMMAND_DIR, `${Date.now()}-ota-abort.json`);
-      fs.writeFileSync(
-        cmdPath,
-        JSON.stringify({ type: 'ota_flash_abort' }, null, 2),
-      );
+      writeCommandFile(cmdPath, { type: 'ota_flash_abort' });
       return res.status(202).json({ message: 'OTA abort queued.' });
     } catch (error) {
       console.error('ota_flash DELETE failed:', error);

@@ -134,6 +134,22 @@ devices/utils/flash_receiver.py --full --port /dev/tty.usbmodem01 --node 146
 
 `--node` and `--ident` work with both `--full` and `--set-id`.
 
+### RF channel and system ID
+
+Receivers (receiver FW with `SETRF`: os4_receiver v32+, omni v36+) store
+their RF channel and system ID in NVS; a fresh unit uses channel 85,
+system ID 0. They must match the dongle's `rf_channel` / `rf_system_id`,
+or the receiver can't be reached. Set them with `--rf CHANNEL SYSTEM_ID`
+after any flash, or on their own:
+
+```bash
+devices/utils/flash_receiver.py --set-rf --rf 100 3 --port /dev/tty.usbmodem01
+devices/utils/set_node_id.py --set-rf --rf 100 3
+```
+
+(`flash_omni.py` takes the same options.) The receiver reports the values
+in its config response, and the Receivers page shows them.
+
 ### Re-provisioning a unit in the field (no flash)
 
 You don't need to re-flash to change `NODE_ID`. Use the dedicated

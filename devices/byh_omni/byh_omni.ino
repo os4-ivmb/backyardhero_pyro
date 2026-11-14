@@ -22,6 +22,86 @@
 //     boot. Starts a WiFi AP and serves the dongle protocol over a
 //     WebSocket instead of waiting for USB serial; see omni_hub.cpp.
 //
+// v36: 2026-11-13 - Communication speed / reliability pass (receiver and
+//   dongle roles):
+//   * Receiver: START_LOAD / RESET / RESET_DVC return to a fully idle state
+//     (isPlaying, pause state and the pause accumulator cleared, outputs
+//     de-energised). STOP clears pause state and startReady; PLAY needs a
+//     confirmed SHOW_START or a pause; a duplicate PAUSE is ignored; the
+//     play loop never runs without a SHOW_START time.
+//   * Dongle: STOP and PAUSE are queued with priority. STOP scrubs queued
+//     PLAY / SHOW_START / load frames for its node; PAUSE scrubs queued PLAY.
+//     A full queue evicts the newest non-priority command instead of
+//     dropping a priority one.
+//   * Dongle: auto-retry delay 2ms (was 4ms); polls get 2 retries, other
+//     frames 8. JSON config `rf_ard`, `rf_arc_poll`, `rf_arc_cmd`.
+//   * Dongle: stays in TX mode between frames (no stopListening() settle
+//     per frame); isChipConnected() once a second or after a failed write;
+//     latency measured around radio.write only.
+//   * Dongle: host-module pixels are pushed only on change or an active
+//     blink / pulse tick, at most every 20ms.
+//   * Dongle: receivers that miss 3 polls in a row are polled every 2nd /
+//     3rd / 5th round; poll spacing counts only answering receivers; an
+//     explicit `sync` ends the backoff. Soft radio recovery needs 20 failed
+//     frames in a row across 2+ receivers (one dead receiver no longer
+//     triggers it).
+//   * Dongle: follow-up poll 10ms after a state-changing command so
+//     loadComplete / startReady reach the host promptly; rxcfg uses the same
+//     follow-up instead of a blocking delay(8).
+//   * Dongle: the per-second status line carries a rotating slice of at
+//     most 8 receivers (`rn` registered, `ro` slice offset) from one static
+//     document serialised straight to the host link; `off` counts receivers
+//     in poll backoff.
+//   * Dongle: receiver table holds 128 (ident stored inline, success
+//     history as a 64-bit mask, 16-bit latency samples); queue holds 256.
+//     Boot prints the table / queue sizes and free heap.
+//   * Dongle: reads the receiver status flags byte and the config-response
+//     capability byte (reserved[3]); emits `pf` (bit0 playing, bit1 paused)
+//     only for receivers that advertise it, and `rt` (average auto-retries
+//     per delivered frame x10) in rxupd and the status slice.
+//   * Dongle: command acks. A host line may start with `#<seq> `; each such
+//     line gets exactly one `K <seq> <result> <q>` (1 delivered / handled,
+//     0 not delivered, 2 dropped or scrubbed, 3 rejected). Advertised as
+//     `caps` bit 0 in the status tick. Unprefixed lines are unchanged.
+//   * Dongle: CLOCK_SYNC polls are stamped immediately before radio.write
+//     from the microsecond timer; CLOCK_SYNC carries an `epoch` byte bumped
+//     on every msync.
+//   * Dongle: `play|pause IDENT <at> <rep>` forwards a non-zero <at> as a
+//     9-byte timed PLAY / PAUSE (caps bit 1); rxcfg and the status slice
+//     carry the receiver capability byte as `rc`.
+//   * Receiver: min-delay clock filter (largest of the last 8 offsets from
+//     the last 20s; a 50ms jump or a new sync epoch restarts it);
+//     ADDITIONAL_CLOCK_TX_OFFSET now 1ms (minimum path delay, re-tune).
+//   * Receiver: timed PLAY / PAUSE (pause point and resume point taken from
+//     the frame, capability bit 1 in reserved[3]).
+//   * Receiver: shorter continuity shift-in delays (2us clock, 5us latch),
+//     battery sampled every 500ms (4-sample average), status LEDs at most
+//     50Hz and pushed only on change, cue LEDs pushed only on change,
+//     periodic ACK refresh skipped when the status is unchanged.
+//     LOOP_TIMING_PRINT prints the longest loop pass once a second.
+//   * Dongle: rxcfg carries the receiver's stored `ch` / `sid` when it
+//     reports them.
+//   * Receiver: RF channel and system ID are stored in NVS (SETRF <ch> <sid>
+//     / GETRF over USB serial; default 85 / 0) and reported in the config
+//     response reserved[4] / [5] (capability bit 2).
+//   * Dongle: `bcast <op> <showId> <at>` sends a BCAST_CONTROL frame to the
+//     broadcast address without auto-ACK (5x at 3ms, again after 100ms);
+//     caps bit 2. Needs a bench test with every nRF24 module type in the
+//     fleet before the host turns it on.
+//   * Receiver: also listens on a shared broadcast address (pipe 1) for
+//     BCAST_CONTROL frames (stop / pause / play / show start, applied once
+//     per seq, optional show filter, no ACK payload work).
+//   * Hub: host lines are batched into one WebSocket message (flushed at
+//     1400 bytes, after 20ms, or at once for acks / gpio_status / ERR); an
+//     inbound line that is too long gets `ERR: line too long` instead of
+//     being dropped silently. The AP runs at 20MHz with a stored transmit
+//     power (default 8.5dBm, `wifi_set {"txpower":dBm}`), reported as
+//     `txpower_dbm` in wifi_cfg and /api/info.
+//   * Receiver: the status frame's 10th ident byte now carries state flags
+//     (bit0 playing, bit1 paused); idents are limited to 8 characters
+//     (SETID rejects longer ones). Config response reserved[3] bit0
+//     advertises the flags. The ACK payload is refreshed as soon as the
+//     flags change.
 // v35: 2026-11-13 - Report board type (BOARD_TYPE_OMNI) in config response
 //   reserved[1] and as `bt` in the dongle-mode rxcfg / status JSON, so the
 //   host can pick the byh_omni image for OTA and USB flashing instead of
@@ -36,7 +116,7 @@
 //   (code 1001) in the same loop that accepted it.
 // v31: 2026-11-XX - Receiver parity with os4_receiver v30 (16-bit IDs, NVS
 //   board version, v10 battery calibration) plus dongle / hub dongle modes.
-#define FW_VERSION 35
+#define FW_VERSION 36
 
 // Board type (product family), reported in RECEIVER_CONFIG_RESPONSE
 // reserved[1] and as `bt` in host JSON. The host keys its firmware catalog
@@ -96,6 +176,8 @@ static const char* CONFIG_KEY_BOARD_VERSION = "board_ver";
 // existing flash/wipe tooling keeps working. Add new keys here as more
 // per-receiver knobs land (kept short -- NVS keys cap at 15 chars).
 static const char* CONFIG_KEY_FIRE_DUR = "fire_dur";
+static const char* CONFIG_KEY_RF_CH     = "rf_ch";
+static const char* CONFIG_KEY_RF_SID    = "rf_sid";
 
 // Default fire-pulse width if NVS is empty (matches the legacy
 // FIRE_MS_DURATION #define so unflashed-config receivers behave
@@ -117,6 +199,8 @@ uint16_t fireDurationMs = DEFAULT_FIRE_DURATION_MS;
 const bool RECEIVER_USES_V1_CUES = false;
 
 // Set to 1 for verbose serial logging (helpful for bringup, costs ms per cmd).
+// 1 = print the longest loop pass (us) once a second over USB serial.
+#define LOOP_TIMING_PRINT 0
 #define DEBUG_PRINT 1
 #define DBG_PRINT(x)   do { if (DEBUG_PRINT) Serial.print(x);   } while (0)
 #define DBG_PRINTLN(x) do { if (DEBUG_PRINT) Serial.println(x); } while (0)
@@ -218,7 +302,8 @@ enum MessageType {
   OTA_ABORT                = 16,
   RECEIVER_OTA_STATUS      = 17,
   RECEIVER_CONFIG_QUERY    = 18,
-  RECEIVER_CONFIG_RESPONSE = 19
+  RECEIVER_CONFIG_RESPONSE = 19,
+  BCAST_CONTROL            = 20   // T27: dongle -> every receiver, pipe 1, no ACK
 };
 
 // Bit flags for ReceiverConfigSetMessage.flags. flags == 0 is the
@@ -341,6 +426,29 @@ struct GenericMessage {
   uint8_t type;
 } __attribute__((packed));
 
+// T25: PLAY / PAUSE may carry the synchronized time they take effect at, so
+// every receiver pauses and resumes at the same show instant whatever its
+// delivery delay. The 1-byte form keeps the arrival-time behaviour.
+struct GenericTimedMessage {
+  uint8_t  type;
+  uint64_t at;   // synchronized epoch ms
+} __attribute__((packed));
+
+// T27 broadcast control frame. Received on pipe 1 at broadcastAddress(),
+// sent by the dongle without auto-ACK and repeated; `seq` is the same on
+// every repeat of one command, so repeats are applied once.
+#define BCAST_OP_STOP       1
+#define BCAST_OP_PAUSE      2
+#define BCAST_OP_PLAY       3
+#define BCAST_OP_SHOW_START 4
+struct BroadcastControlMessage {
+  uint8_t  type;     // BCAST_CONTROL
+  uint8_t  op;       // BCAST_OP_*
+  uint8_t  seq;
+  uint16_t showId;   // 0 = every receiver
+  uint64_t at;       // pause time, resume time, or show start time
+} __attribute__((packed));
+
 struct ShowStartMessage {
   uint8_t type;
   uint64_t targetStartTime;
@@ -353,11 +461,22 @@ struct ReceiverStatusMessage {
   uint8_t nodeID;            // low byte; legacy offset preserved
   uint8_t batteryLevel;
   uint16_t showState;
-  char ident[10];
+  // Was char ident[10] with ident[9] always '\0'. Idents are at most 8
+  // characters, so the 10th byte now carries state flags (T12). An older
+  // dongle reads the ident as a C string and stops at ident[8]'s NUL.
+  char ident[9];             // NUL-terminated, max 8 characters
+  uint8_t stateFlags;        // STATE_FLAG_*
   uint64_t cont64_0;
   uint64_t cont64_1;
   uint8_t nodeIDHigh;        // v30 append-only byte; payload is exactly 32 bytes
 } __attribute__((packed));
+
+#define STATE_FLAG_PLAYING 0x01
+#define STATE_FLAG_PAUSED  0x02
+// ReceiverConfigResponseMessage.reserved[3] capability bits.
+#define RX_CAP_STATUS_FLAGS 0x01   // stateFlags in the status frame is valid
+#define RX_CAP_TIMED_PAUSE  0x02   // honours GenericTimedMessage for PLAY / PAUSE
+#define RX_CAP_RF_CONFIG    0x04   // reserved[4] = RF channel, reserved[5] = system ID
 
 static_assert(sizeof(ReceiverStatusMessage) == 32, "receiver status must fit one nRF24 payload");
 
@@ -429,6 +548,9 @@ uint64_t otaLastActivityMs = 0;
 // non-config inbound command -- whatever ACK that command rode away
 // with was the response, and we should resume normal status piggyback.
 bool configResponsePending = false;
+// Last RECEIVER_STATUS written to the ACK FIFO (refreshAckPayloadIfChanged).
+ReceiverStatusMessage lastAckPayload;
+bool lastAckPayloadValid = false;
 // Watchdog for stuck OTA: if we go this long without any inbound radio
 // activity in flash mode, abort and return to normal operation so a
 // hung host doesn't strand the receiver.
@@ -443,8 +565,13 @@ RF24 radio;
 // v10 receiver with NODE_ID=153 listens on 154, while a v9 receiver
 // with NODE_ID=153 listens on 153. Mixing the two on the same fleet
 // silently breaks polling.
-const uint8_t rfChannel = 85;
-const uint8_t rfSystemId = 0;
+// RF channel and system ID (T26). Stored in NVS (SETRF over USB serial) and
+// loaded at boot; defaults reproduce the old compiled-in values. Must match
+// the dongle, or the receiver is unreachable.
+#define DEFAULT_RF_CHANNEL   85
+#define DEFAULT_RF_SYSTEM_ID 0
+uint8_t rfChannel = DEFAULT_RF_CHANNEL;
+uint8_t rfSystemId = DEFAULT_RF_SYSTEM_ID;
 #define MASTER_WRITE_BASE 0x0000000000ULL
 #define RECEIVER_BASE     0x0000000001ULL
 
@@ -462,6 +589,13 @@ static inline uint64_t masterWriteAddress() {
   // make the salt-merge intent explicit.
   return MASTER_WRITE_BASE | systemSalt();
 }
+// T27: shared address every receiver also listens on (pipe 1). Mixed-bit
+// constant salted like the receiver addresses; its byte 4 (0x7E ^ sid)
+// never equals a receiver address's (0xA3 ^ sid), so it can't collide.
+#define BROADCAST_BASE 0x7EB14CD39AULL
+static inline uint64_t broadcastAddress() {
+  return BROADCAST_BASE ^ systemSalt();
+}
 static inline uint64_t receiverReadAddress() {
   // Arithmetic add (not OR) so each NODE_ID maps to a unique address; XOR
   // RF_ADDR_ENTROPY_MASK for H8 (applied identically on the dongle).
@@ -471,7 +605,10 @@ static inline uint64_t receiverReadAddress() {
 // ADDITIONAL_CLOCK_TX_OFFSET (ms): empirical compensation for the time between
 // the dongle stamping the timestamp and the receiver applying it. Tune by
 // observing show-firing alignment between receivers.
-const int64_t ADDITIONAL_CLOCK_TX_OFFSET = 2;
+// With the min-delay clock filter (T23) this is the MINIMUM path delay
+// (stamp-to-apply on a first-attempt frame), not the average: ~1ms. Re-tune
+// on the bench with two receivers on a scope.
+const int64_t ADDITIONAL_CLOCK_TX_OFFSET = 1;
 
 int64_t clock_offset = 0;
 uint32_t targetTimes[257];
@@ -599,11 +736,56 @@ void handleManualFire(ManualFireMessage* msg) {
   fireTarget(msg->position);
 }
 
-void handleClockSync(ClockSyncMessage* msg) {
-  // Apply ADDITIONAL_CLOCK_TX_OFFSET to compensate for the residual TX-to-RX
-  // latency that was previously unaccounted for.
-  uint64_t localTime64 = (uint64_t)millis();
-  clock_offset = (int64_t)msg->timestamp - (int64_t)localTime64 + ADDITIONAL_CLOCK_TX_OFFSET;
+// Min-delay clock filter (T23). Each sync gives a candidate offset
+// cand = masterTimestamp - localMillis; the true offset is cand + pathDelay,
+// and delay (a frame that got through on an auto-retry, loop latency) only
+// ever makes a candidate smaller. So the LARGEST recent candidate is the one
+// with the least delay. clock_offset = max(candidates younger than
+// SYNC_MAX_AGE_MS) + ADDITIONAL_CLOCK_TX_OFFSET. Relative crystal drift is
+// ~1ms over the 20s window, so don't lengthen it.
+#define SYNC_WIN 8
+#define SYNC_MAX_AGE_MS 20000UL
+// A candidate this far from the current best (either way) means the master
+// clock was re-set: start over from it.
+#define SYNC_STEP_RESET_MS 50
+int64_t  syncCand[SYNC_WIN];
+uint32_t syncCandAtMs[SYNC_WIN];
+uint8_t  syncCandCount = 0;
+uint8_t  syncCandNext = 0;
+int16_t  syncEpoch = -1;   // last ClockSyncMessage epoch byte seen; -1 = none
+
+bool bestSyncCandidate(uint32_t nowMs, int64_t* best) {
+  bool have = false;
+  for (uint8_t i = 0; i < syncCandCount; i++) {
+    if (nowMs - syncCandAtMs[i] > SYNC_MAX_AGE_MS) continue;
+    if (!have || syncCand[i] > *best) { *best = syncCand[i]; have = true; }
+  }
+  return have;
+}
+
+void handleClockSync(ClockSyncMessage* msg, uint8_t msgSize) {
+  uint32_t nowMs = millis();
+  int64_t cand = (int64_t)msg->timestamp - (int64_t)nowMs;
+  // Dongles with the epoch byte bump it on every msync, so a host clock
+  // step clears the window at once instead of after up to 20s. A legacy
+  // 9-byte frame has no epoch.
+  if (msgSize >= sizeof(ClockSyncMessage) + 1) {
+    uint8_t epoch = ((const uint8_t*)msg)[sizeof(ClockSyncMessage)];
+    if (syncEpoch >= 0 && epoch != (uint8_t)syncEpoch) syncCandCount = 0;
+    syncEpoch = epoch;
+  }
+  int64_t best;
+  if (bestSyncCandidate(nowMs, &best) &&
+      (cand - best > SYNC_STEP_RESET_MS || best - cand > SYNC_STEP_RESET_MS)) {
+    syncCandCount = 0;
+  }
+  if (syncCandCount == 0) syncCandNext = 0;
+  syncCand[syncCandNext] = cand;
+  syncCandAtMs[syncCandNext] = nowMs;
+  syncCandNext = (syncCandNext + 1) % SYNC_WIN;
+  if (syncCandCount < SYNC_WIN) syncCandCount++;
+  if (!bestSyncCandidate(nowMs, &best)) best = cand;
+  clock_offset = best + ADDITIONAL_CLOCK_TX_OFFSET;
 }
 
 void handleStartLoad(StartLoadMessage* msg) {
@@ -664,6 +846,39 @@ void handleShowLoadN(ShowLoadNMessage* msg, uint8_t msgSize) {
   recheckLoadComplete();
 }
 
+// T27: apply a broadcast control frame with the same state changes as the
+// unicast handlers (T01 guards, T25 timestamps). No ACK payload work: no
+// ACK is sent for these frames.
+uint8_t lastBroadcastSeq = 0;
+bool    haveBroadcastSeq = false;
+
+void handleBroadcast(const uint8_t* buf, uint8_t msgSize) {
+  if (msgSize < sizeof(BroadcastControlMessage)) return;
+  const BroadcastControlMessage* m = (const BroadcastControlMessage*)buf;
+  if (haveBroadcastSeq && m->seq == lastBroadcastSeq) return;   // a repeat
+  lastBroadcastSeq = m->seq;
+  haveBroadcastSeq = true;
+  if (m->showId != 0 && m->showId != currentShowId) return;
+  GenericTimedMessage g;
+  g.at = m->at;
+  switch (m->op) {
+    case BCAST_OP_STOP:  g.type = GENERIC_STOP;  handleGeneric((GenericMessage*)&g, sizeof(g)); break;
+    case BCAST_OP_PAUSE: g.type = GENERIC_PAUSE; handleGeneric((GenericMessage*)&g, sizeof(g)); break;
+    case BCAST_OP_PLAY:  g.type = GENERIC_PLAY;  handleGeneric((GenericMessage*)&g, sizeof(g)); break;
+    case BCAST_OP_SHOW_START: {
+      ShowStartMessage s;
+      s.type = SHOW_START;
+      s.targetStartTime = m->at;
+      s.numTargetsToFire = 0;
+      s.showId = m->showId;
+      handleShowStart(&s);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
 void handleShowStart(ShowStartMessage* msg) {
   if (msg->showId == currentShowId && loadComplete) {
     startReady = true;
@@ -675,13 +890,21 @@ void handleShowStart(ShowStartMessage* msg) {
   }
 }
 
+// Return the receiver to a fully idle state. START_LOAD, GENERIC_RESET and
+// RESET_DVC all come through here, so a receiver that missed a STOP cannot
+// carry isPlaying (or an old pause offset) into the next show.
 void resetSystem() {
+  isPlaying = false;
+  isPaused = false;
+  timePaused = 0;
+  showPauseTimeAcc = 0;
   expectedTargets = 0;
   currentShowId = 0;
   loadComplete = false;
   startReady = false;
   showStartTime = 0;
   zeroTargets();
+  refreshFiring();   // targetFiring[] is now all false: de-energise every output
 }
 
 void fireTarget(uint8_t target_pos) {
@@ -690,27 +913,42 @@ void fireTarget(uint8_t target_pos) {
   refreshFiring();
 }
 
-void handleGeneric(GenericMessage* msg) {
+void handleGeneric(GenericMessage* msg, uint8_t msgSize) {
+  // Timestamped PLAY / PAUSE (T25); 0 or a short frame = "now".
+  uint64_t at = 0;
+  if (msgSize >= sizeof(GenericTimedMessage)) at = ((GenericTimedMessage*)msg)->at;
   switch (msg->type) {
     case GENERIC_PLAY:
       if (isPlaying) { DBG_PRINTLN("dup play"); break; }
+      // Only a confirmed SHOW_START or a pause can be (re)started. A PLAY that
+      // was queued behind a STOP must not re-arm the show.
+      if (!startReady && !isPaused) { DBG_PRINTLN("play ignored: not armed"); break; }
       isPlaying = true;
       if (isPaused) {
-        showPauseTimeAcc = showPauseTimeAcc + (getSynchronizedTime() - timePaused);
+        // Resume at `at` when given. If it is still in the future the
+        // adjusted show time stays before the pause point until then, and
+        // those cues have already fired, so nothing more is needed.
+        uint64_t resumeAt = at ? at : getSynchronizedTime();
+        if (resumeAt > timePaused) showPauseTimeAcc += resumeAt - timePaused;
         timePaused = 0;
       }
       isPaused = false;
       break;
     case GENERIC_STOP:
       isPlaying = false;
+      isPaused = false;
+      timePaused = 0;
+      startReady = false;
       break;
     case GENERIC_RESET:
       resetSystem();
       break;
     case GENERIC_PAUSE:
+      // A duplicate PAUSE must not move the pause point later.
+      if (isPaused) { DBG_PRINTLN("dup pause"); break; }
       isPlaying = false;
       isPaused = true;
-      timePaused = getSynchronizedTime();
+      timePaused = at ? at : getSynchronizedTime();
       break;
     default:
       DBG_PRINTLN("Unknown Generic Cmd");
@@ -780,8 +1018,25 @@ uint8_t calculateBatteryLevelFromRaw(int rawAnalogValue) {
   return calculateLegacyBatteryLevelFromRaw(rawAnalogValue);
 }
 
+// Battery level is sampled every BATT_SAMPLE_INTERVAL_MS (4 readings
+// averaged) and cached (T24); it was an ADC read on every loop pass and in
+// every status build.
+#define BATT_SAMPLE_INTERVAL_MS 500
+#define BATT_SAMPLE_COUNT 4
+uint8_t  cachedBatteryLevel = 0;
+bool     batteryLevelValid = false;
+uint32_t lastBatterySampleMs = 0;
+
 uint8_t calculateBatteryLevel() {
-  return calculateBatteryLevelFromRaw(analogRead(BATT_VOLTAGE_PIN));
+  uint32_t nowMs = millis();
+  if (!batteryLevelValid || nowMs - lastBatterySampleMs >= BATT_SAMPLE_INTERVAL_MS) {
+    int32_t sum = 0;
+    for (uint8_t i = 0; i < BATT_SAMPLE_COUNT; i++) sum += analogRead(BATT_VOLTAGE_PIN);
+    cachedBatteryLevel = calculateBatteryLevelFromRaw((int)(sum / BATT_SAMPLE_COUNT));
+    batteryLevelValid = true;
+    lastBatterySampleMs = nowMs;
+  }
+  return cachedBatteryLevel;
 }
 
 void getBatteryColorRGB(uint8_t batteryLevel, uint8_t *r, uint8_t *g, uint8_t *b) {
@@ -864,6 +1119,7 @@ void refreshOtaAckPayload() {
   buildOtaStatus(&msg);
   radio.flush_tx();
   radio.writeAckPayload(0, &msg, sizeof(msg));
+  lastAckPayloadValid = false;
   lastAckPayloadRefresh = millis();
 }
 
@@ -1239,6 +1495,13 @@ void updateOtaStatusLEDs() {
 
 // Build a fresh ReceiverStatusMessage capturing current state. This is the
 // payload that piggybacks in the next auto-ACK back to the dongle.
+uint8_t currentStateFlags() {
+  uint8_t f = 0;
+  if (isPlaying) f |= STATE_FLAG_PLAYING;
+  if (isPaused)  f |= STATE_FLAG_PAUSED;
+  return f;
+}
+
 void buildStatus(ReceiverStatusMessage* msg) {
   uint8_t bval = calculateBatteryLevel();
   msg->type = RECEIVER_STATUS;
@@ -1251,6 +1514,7 @@ void buildStatus(ReceiverStatusMessage* msg) {
   msg->showState = s;
   strncpy(msg->ident, RECEIVER_IDENT, sizeof(msg->ident));
   msg->ident[sizeof(msg->ident) - 1] = '\0';
+  msg->stateFlags = currentStateFlags();
 
   uint8_t shiftInput[NUM_BOARDS];
   readInputShiftRegister(shiftInput, NUM_BOARDS);
@@ -1291,6 +1555,27 @@ void refreshAckPayload() {
   buildStatus(&msg);
   radio.flush_tx();
   radio.writeAckPayload(0, &msg, sizeof(msg));
+  lastAckPayload = msg;
+  lastAckPayloadValid = true;
+  lastAckPayloadRefresh = millis();
+}
+
+// Periodic refresh (T24): skip the flush + rewrite when the status is
+// unchanged. Each flush is a short window in which an arriving frame gets
+// an ACK with no payload. Every command still goes through
+// refreshAckPayload(), because the ACK that went out consumed the payload.
+void refreshAckPayloadIfChanged() {
+  if (configResponsePending) return;
+  ReceiverStatusMessage msg;
+  buildStatus(&msg);
+  if (lastAckPayloadValid && memcmp(&msg, &lastAckPayload, sizeof(msg)) == 0) {
+    lastAckPayloadRefresh = millis();
+    return;
+  }
+  radio.flush_tx();
+  radio.writeAckPayload(0, &msg, sizeof(msg));
+  lastAckPayload = msg;
+  lastAckPayloadValid = true;
   lastAckPayloadRefresh = millis();
 }
 
@@ -1312,6 +1597,10 @@ void buildConfigResponse(ReceiverConfigResponseMessage* msg) {
   msg->fireDurationMs   = fireDurationMs;
   msg->reserved[0]      = (uint8_t)(NODE_ID >> 8);
   msg->reserved[1]      = BOARD_TYPE;
+  msg->reserved[3]      = RX_CAP_STATUS_FLAGS | RX_CAP_TIMED_PAUSE | RX_CAP_RF_CONFIG;
+  // reserved[1] is the board type, so channel / system ID use [4] / [5].
+  msg->reserved[4]      = rfChannel;
+  msg->reserved[5]      = rfSystemId;
 }
 
 // FW v22: load the CONFIG_RESPONSE into the ACK TX FIFO so the dongle's
@@ -1324,6 +1613,7 @@ void loadConfigResponseIntoAck() {
   buildConfigResponse(&msg);
   radio.flush_tx();
   radio.writeAckPayload(0, &msg, sizeof(msg));
+  lastAckPayloadValid = false;
   configResponsePending = true;
   lastAckPayloadRefresh = millis();
 }
@@ -1477,6 +1767,24 @@ void loadFireDurationFromNVS() {
   }
 }
 
+void loadRfConfigFromNVS() {
+  identityPrefs.begin(IDENTITY_NS, true);  // read-only
+  uint8_t ch  = identityPrefs.getUChar(CONFIG_KEY_RF_CH, DEFAULT_RF_CHANNEL);
+  uint8_t sid = identityPrefs.getUChar(CONFIG_KEY_RF_SID, DEFAULT_RF_SYSTEM_ID);
+  identityPrefs.end();
+  rfChannel  = (ch <= 125) ? ch : DEFAULT_RF_CHANNEL;
+  rfSystemId = sid;
+}
+
+bool saveRfConfigToNVS(uint8_t ch, uint8_t sid) {
+  if (ch > 125) return false;
+  identityPrefs.begin(IDENTITY_NS, false);
+  bool ok = identityPrefs.putUChar(CONFIG_KEY_RF_CH, ch) > 0;
+  ok = (identityPrefs.putUChar(CONFIG_KEY_RF_SID, sid) > 0) && ok;
+  identityPrefs.end();
+  return ok;
+}
+
 bool saveFireDurationToNVS(uint16_t value) {
   if (value < FIRE_DURATION_MS_MIN) value = FIRE_DURATION_MS_MIN;
   if (value > FIRE_DURATION_MS_MAX) value = FIRE_DURATION_MS_MAX;
@@ -1527,6 +1835,37 @@ bool handleProvisioningLine(const char* line) {
     return true;
   }
 
+  // T26: RF channel / system ID. Must match the dongle's settings.
+  if (strncmp(line, "GETRF", 5) == 0) {
+    Serial.print(F("RF_CHANNEL="));
+    Serial.print(rfChannel);
+    Serial.print(F(" RF_SYSTEM_ID="));
+    Serial.println(rfSystemId);
+    return true;
+  }
+
+  if (strncmp(line, "SETRF ", 6) == 0) {
+    int ch = -1;
+    int sid = -1;
+    int n = sscanf(line + 6, "%d %d", &ch, &sid);
+    if (n != 2 || ch < 0 || ch > 125 || sid < 0 || sid > 255) {
+      Serial.println(F("ERR SETRF -- usage: SETRF <channel 0-125> <system_id 0-255>"));
+      return true;
+    }
+    if (!saveRfConfigToNVS((uint8_t)ch, (uint8_t)sid)) {
+      Serial.println(F("ERR SETRF -- save failed"));
+      return true;
+    }
+    Serial.print(F("OK SETRF RF_CHANNEL="));
+    Serial.print(ch);
+    Serial.print(F(" RF_SYSTEM_ID="));
+    Serial.print(sid);
+    Serial.println(F(" -- restarting"));
+    delay(100);
+    ESP.restart();
+    return true;
+  }
+
   if (strncmp(line, "GETBOARD", 8) == 0) {
     Serial.print(F("BOARD_VERSION="));
     Serial.println(boardVersion);
@@ -1569,6 +1908,12 @@ bool handleProvisioningLine(const char* line) {
     if ((n != 2 && n != 3) || newId < 1 || newId > 65535 ||
         (n == 3 && (newBoardVersion < 1 || newBoardVersion > 255))) {
       Serial.println(F("ERR SETID -- usage: SETID <1-65535> <ident> [board_version 1-255]"));
+      return true;
+    }
+    // The status frame carries at most 8 ident characters (the 10th byte
+    // of the old ident field now holds state flags).
+    if (strlen(newIdent) > 8) {
+      Serial.println(F("ERR SETID -- ident must be at most 8 characters"));
       return true;
     }
     if (n == 3 && !saveBoardVersionToNVS((uint8_t)newBoardVersion)) {
@@ -1616,7 +1961,9 @@ void updateUnprovisionedStatusLEDs() {
 }
 
 void runPlayLoop() {
-  if (isPlaying && !isPaused) {
+  // showStartTime == 0 means no SHOW_START has been accepted since the last
+  // reset; never fire against it.
+  if (isPlaying && !isPaused && showStartTime != 0) {
     uint64_t now = getSynchronizedTime();
     now = now - showPauseTimeAcc;
     if (now > showStartTime) {
@@ -1833,7 +2180,18 @@ void breatheStatusSolid(uint8_t r, uint8_t g, uint8_t b) {
   statusStrip.show();
 }
 
+// Status LEDs run at most at 50Hz and push the strip only when a pixel
+// changed (T24). Comparing against the strip's own buffer (not a private
+// cache) keeps this correct after other code (OTA / provisioning
+// animations) painted the strip.
+#define STATUS_LED_INTERVAL_MS 20
+
 void updateStatusLEDs() {
+  static uint32_t lastStatusLedMs = 0;
+  if (millis() - lastStatusLedMs < STATUS_LED_INTERVAL_MS) return;
+  lastStatusLedMs = millis();
+  uint32_t before[3];
+  for (uint8_t i = 0; i < 3; i++) before[i] = statusStrip.getPixelColor(i);
   uint64_t now = getSynchronizedTime();
   uint64_t currentMillis = millis();
 
@@ -1903,7 +2261,11 @@ void updateStatusLEDs() {
     statusStrip.setPixelColor(2, statusStrip.Color(0, 0, 0));
   }
 
-  statusStrip.show();
+  bool changed = false;
+  for (uint8_t i = 0; i < 3; i++) {
+    if (statusStrip.getPixelColor(i) != before[i]) { changed = true; break; }
+  }
+  if (changed) statusStrip.show();
 }
 
 // Averaged so a single noisy sample can't flip the boot role.
@@ -1984,11 +2346,17 @@ void writeOutputShiftRegister(uint8_t targets[], size_t numTargets) {
   digitalWrite(SHIFT_OUT_LATCH, HIGH);
 }
 
+// Continuity shift-in timing (T24). Was 20us per clock phase and 30us per
+// latch phase: ~2.6ms for 8 boards, paid in every buildStatus. Bench with
+// the longest supported ribbon before going lower.
+#define SHIFT_IN_DELAY_US 2
+#define SHIFT_IN_LATCH_DELAY_US 5
+
 void latchShiftRegister() {
   digitalWrite(SHIFT_IN_LATCH, LOW);
-  delayMicroseconds(30);
+  delayMicroseconds(SHIFT_IN_LATCH_DELAY_US);
   digitalWrite(SHIFT_IN_LATCH, HIGH);
-  delayMicroseconds(30);
+  delayMicroseconds(SHIFT_IN_LATCH_DELAY_US);
 }
 
 void readInputShiftRegister(uint8_t *buffer, uint8_t numBytes) {
@@ -2004,9 +2372,9 @@ void readInputShiftRegister(uint8_t *buffer, uint8_t numBytes) {
       }
       if (reading) buffer[pos] |= (1 << bit);
       digitalWrite(SHIFT_IN_CLOCK, HIGH);
-      delayMicroseconds(20);
+      delayMicroseconds(SHIFT_IN_DELAY_US);
       digitalWrite(SHIFT_IN_CLOCK, LOW);
-      delayMicroseconds(20);
+      delayMicroseconds(SHIFT_IN_DELAY_US);
     }
   }
 }
@@ -2015,6 +2383,10 @@ uint8_t inputPinToBitPosition(uint8_t physicalPin) { return physicalPin - 1; }
 uint8_t bitPositionToInputPin(uint8_t bitPosition) { return bitPosition + 1; }
 
 void displayInputStates(uint8_t *shiftInput) {
+  // Remember what the strip shows now and only push it if something
+  // changed (T24; a full push is ~2ms for 64 LEDs, every 100ms).
+  uint32_t before[NUM_LEDS];
+  for (int i = 0; i < NUM_LEDS; i++) before[i] = strip.getPixelColor(i);
   for (int i = 0; i < NUM_LEDS; i++) strip.setPixelColor(i, 0);
   for (int boardIndex = 0; boardIndex < NUM_BOARDS; boardIndex++) {
     for (int bitPosition = 0; bitPosition < 8; bitPosition++) {
@@ -2034,7 +2406,9 @@ void displayInputStates(uint8_t *shiftInput) {
       }
     }
   }
-  strip.show();
+  for (int i = 0; i < NUM_LEDS; i++) {
+    if (strip.getPixelColor(i) != before[i]) { strip.show(); return; }
+  }
 }
 
 void refreshFiring() {
@@ -2102,6 +2476,7 @@ void setup() {
 
   loadIdentityFromNVS();
   loadFireDurationFromNVS();
+  loadRfConfigFromNVS();
 
   pinMode(SHIFT_IN_CLOCK, OUTPUT);
   pinMode(SHIFT_IN_LATCH, OUTPUT);
@@ -2204,6 +2579,7 @@ void setup() {
   pinMode(15, OUTPUT);
 
   radio.openReadingPipe(0, receiverReadAddress());
+  radio.openReadingPipe(1, broadcastAddress());
   radio.startListening();
 
   Serial.print(F("Receiver address: 0x"));
@@ -2261,11 +2637,38 @@ void loop() {
     return;
   }
 
+#if LOOP_TIMING_PRINT
+  // Debug: longest gap between loop passes, printed once a second (T24).
+  {
+    static uint32_t lastLoopUs = 0, maxLoopUs = 0, lastReportMs = 0;
+    uint32_t nowUs = micros();
+    if (lastLoopUs != 0 && nowUs - lastLoopUs > maxLoopUs) maxLoopUs = nowUs - lastLoopUs;
+    lastLoopUs = nowUs;
+    if (millis() - lastReportMs >= 1000) {
+      Serial.print(F("loop max us: "));
+      Serial.println(maxLoopUs);
+      maxLoopUs = 0;
+      lastReportMs = millis();
+    }
+  }
+#endif
+
   runPlayLoop();
+
+  // Playing / paused changed outside a command (the show finished): put
+  // the new flags in the ACK payload now rather than at the next 250ms
+  // refresh, so a stop / completion is visible on the next exchange (T12).
+  static uint8_t lastAckFlags = 0;
+  uint8_t flagsNow = currentStateFlags();
+  if (flagsNow != lastAckFlags) {
+    lastAckFlags = flagsNow;
+    refreshAckPayload();
+  }
 
   uint64_t now = getSynchronizedTime();
 
-  while (radio.available()) {
+  uint8_t rxPipe = 0;
+  while (radio.available(&rxPipe)) {
     uint8_t buf[32];
     uint8_t msgSize = radio.getDynamicPayloadSize();
     if (msgSize == 0 || msgSize > sizeof(buf)) {
@@ -2275,6 +2678,12 @@ void loop() {
     }
     radio.read(&buf, msgSize);
     uint8_t mType = buf[0];
+    if (rxPipe == 1) {
+      // Broadcast control (T27): no ACK went out, so the ACK payload and
+      // the poll-contact bookkeeping are left alone.
+      if (mType == BCAST_CONTROL) handleBroadcast(buf, msgSize);
+      continue;
+    }
     gotCommand = true;
     everConnected = true;
     lastMessageReceivedTime = millis();
@@ -2288,7 +2697,7 @@ void loop() {
         if (msgSize >= sizeof(ManualFireMessage)) handleManualFire((ManualFireMessage*)buf);
         break;
       case CLOCK_SYNC:
-        if (msgSize >= sizeof(ClockSyncMessage)) handleClockSync((ClockSyncMessage*)buf);
+        if (msgSize >= sizeof(ClockSyncMessage)) handleClockSync((ClockSyncMessage*)buf, msgSize);
         break;
       case START_LOAD:
         if (msgSize >= sizeof(StartLoadMessage)) handleStartLoad((StartLoadMessage*)buf);
@@ -2306,7 +2715,7 @@ void loop() {
       case GENERIC_STOP:
       case GENERIC_RESET:
       case GENERIC_PAUSE:
-        if (msgSize >= sizeof(GenericMessage)) handleGeneric((GenericMessage*)buf);
+        if (msgSize >= sizeof(GenericMessage)) handleGeneric((GenericMessage*)buf, msgSize);
         break;
       case RESET_DVC:
         resetSystem();
@@ -2370,7 +2779,7 @@ void loop() {
   // Periodic ACK payload refresh so battery/continuity stays current even
   // during quiet periods.
   if (millis() - lastAckPayloadRefresh > ACK_PAYLOAD_REFRESH_MS) {
-    refreshAckPayload();
+    refreshAckPayloadIfChanged();
   }
 
   updateNonBlockingAnim();
@@ -2420,6 +2829,7 @@ void loop() {
     radio.flush_tx();
     radio.flush_rx();
     radio.openReadingPipe(0, receiverReadAddress());
+    radio.openReadingPipe(1, broadcastAddress());
     radio.startListening();
     refreshAckPayload();
     // Bump lastCmdReceivedMs so we don't re-trigger every loop iter

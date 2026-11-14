@@ -646,6 +646,45 @@ def set_board_version_and_confirm(port: str, board_version: int) -> None:
         )
 
 
+RF_BANNER_RE = re.compile(r"RF_CHANNEL=(\d+) RF_SYSTEM_ID=(\d+)")
+
+
+def set_rf_and_confirm(port: str, channel: int, system_id: int) -> None:
+    """Store the RF channel / system ID (SETRF, firmware with T26) and check
+    them with GETRF after the restart. They must match the dongle's
+    `rf_channel` / `rf_system_id`, or the receiver becomes unreachable."""
+    if not (0 <= channel <= 125) or not (0 <= system_id <= 255):
+        raise SystemExit(f"[flash_receiver] --rf needs channel 0-125 and system id 0-255")
+    log(f"opening {port} to set RF_CHANNEL={channel} RF_SYSTEM_ID={system_id}...")
+    ser = open_serial_with_retry(port)
+    cmd = f"\nSETRF {channel} {system_id}\n".encode()
+    log(f"sending: {cmd.decode().strip()}")
+    ser.write(cmd)
+    ser.flush()
+    ack_text, matched = read_until_any(ser, ["OK SETRF", "ERR SETRF"], timeout_s=5.0)
+    sys.stdout.write(ack_text)
+    sys.stdout.flush()
+    ser.close()
+    if matched != "OK SETRF":
+        raise SystemExit("[flash_receiver] receiver did not acknowledge SETRF (firmware too old?).")
+    log("receiver acknowledged SETRF, waiting for restart...")
+    time.sleep(1.0)
+    ser2 = open_serial_with_retry(port)
+    try:
+        read_boot_banner(ser2, timeout_s=12.0)
+        ser2.write(b"\nGETRF\n")
+        ser2.flush()
+        text, _ = read_until_any(ser2, ["RF_SYSTEM_ID="], timeout_s=3.0)
+        text += ser2.read(ser2.in_waiting or 1).decode(errors="replace")
+    finally:
+        ser2.close()
+    m = RF_BANNER_RE.search(text)
+    if m and int(m.group(1)) == channel and int(m.group(2)) == system_id:
+        log(f"SUCCESS -- receiver RF_CHANNEL={channel} RF_SYSTEM_ID={system_id}")
+    else:
+        log("WARNING: could not confirm the RF settings with GETRF. Verify manually.")
+
+
 def post_flash_confirm_identity(port: str) -> tuple[int | None, str | None, int | None]:
     """Open serial after a default (app-only) flash, read the boot banner,
     return what NODE_ID/IDENT/board version the receiver claims."""
@@ -725,6 +764,16 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--node", type=int, help="receiver NODE_ID (1-65535). Skips the prompt for --full / --set-id.")
     p.add_argument("--ident", help="receiver ident string (default: RX<node>). Skips the prompt for --full / --set-id.")
+    mode.add_argument(
+        "--set-rf", action="store_true",
+        help="do not flash; only store the RF channel / system ID given with --rf.",
+    )
+    p.add_argument(
+        "--rf", nargs=2, type=int, metavar=("CHANNEL", "SYSTEM_ID"),
+        help="RF channel (0-125) and system ID (0-255) to store after flashing "
+             "(or alone with --set-rf). Must match the dongle. Default: leave unchanged "
+             "(85 / 0 on a fresh receiver).",
+    )
     p.add_argument(
         "--board-version", type=int,
         help="receiver hardware board version (1-255). Skips the prompt for --full / --set-id / --set-board.",
@@ -756,6 +805,19 @@ def _format_bin_label(p: Path) -> str:
 
 def main() -> int:
     args = parse_args()
+    if args.set_rf:
+        if not args.rf:
+            raise SystemExit("[flash_receiver] --set-rf needs --rf CHANNEL SYSTEM_ID")
+        port = args.port or prompt_port()
+        set_rf_and_confirm(port, args.rf[0], args.rf[1])
+        return 0
+    rc = _main(args)
+    if rc == 0 and args.rf:
+        set_rf_and_confirm(args.port or prompt_port(), args.rf[0], args.rf[1])
+    return rc
+
+
+def _main(args: argparse.Namespace) -> int:
 
     if args.set_board:
         board_version = (
@@ -765,7 +827,7 @@ def main() -> int:
         )
         if not (1 <= board_version <= 255):
             raise SystemExit(f"[flash_receiver] board version out of range: {board_version}")
-        port = args.port or prompt_port()
+        port = args.port = args.port or prompt_port()
         set_board_version_and_confirm(port, board_version)
         return 0
 
@@ -812,7 +874,7 @@ def main() -> int:
             )
             log(f"app-only flash (preserves NVS): {_format_bin_label(app_bin)}")
 
-    port = args.port or prompt_port()
+    port = args.port = args.port or prompt_port()
     log(f"using port: {port}")
 
     if args.full:

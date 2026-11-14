@@ -43,6 +43,9 @@ Env config (all optional):
   MOCK_START             start switch engaged    (default 0 -> off)
   MOCK_MANFIRE           manual-fire engaged     (default 0 -> off)
   MOCK_DEBUG             log inbound commands     (default 0)
+  MOCK_CAPS              dongle capability bits   (default 0; 1 = acknowledge
+                         `#<seq>` commands with `K <seq> 1 0`, like dongle
+                         firmware with command acks)
 """
 
 import json
@@ -58,6 +61,7 @@ DONGLE_FW = int(os.environ.get("MOCK_DONGLE_FW", "16"))
 RF_CHANNEL = int(os.environ.get("MOCK_RF_CHANNEL", "1"))
 STATUS_INTERVAL_S = float(os.environ.get("MOCK_STATUS_INTERVAL_S", "1.0"))
 DEBUG = os.environ.get("MOCK_DEBUG", "0") not in ("0", "", "false", "False")
+CAPS = int(os.environ.get("MOCK_CAPS", "0") or 0)
 
 # The three physical switches are active-low (INPUT_PULLUP): engaged == LOW(0),
 # released == HIGH(1). See GPIOHandler in pc_daemon.py. We take human-facing
@@ -135,11 +139,16 @@ class MockBridge:
         # Otherwise it's a serial command destined for the dongle (msync,
         # sync/register, 433fire, forget, ...). A real dongle with no
         # receivers would accept it and (mostly) stay quiet, so we drop it.
+        text = line.decode('utf-8', 'replace').strip()
         if DEBUG:
-            try:
-                print(f"[mock-bridge] serial<- {line.decode('utf-8', 'replace').strip()}")
-            except Exception:
-                pass
+            print(f"[mock-bridge] serial<- {text}")
+        # A dongle with command acks answers every `#<seq> ...` line once.
+        # With no receivers, everything counts as delivered.
+        if (CAPS & 1) and text.startswith('#'):
+            seq = text[1:].split(' ', 1)[0]
+            if seq.isdigit():
+                with self._send_lock:
+                    self.conn.sendall(f"K {seq} 1 0\n".encode("utf-8"))
 
     def reader_loop(self):
         buffer = b""
@@ -184,6 +193,7 @@ class MockBridge:
                     "q": 0,
                     "qmax": 32,
                     "csim": 1000,
+                    "caps": CAPS,
                     "receivers": [],
                 })
                 time.sleep(STATUS_INTERVAL_S)

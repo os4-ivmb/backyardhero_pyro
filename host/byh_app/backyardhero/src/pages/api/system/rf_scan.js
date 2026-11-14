@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { ensureHardware } from '@/util/apiGuards';
 import { COMMAND_DIR, LAST_SCAN_FILE_PATH as LAST_SCAN_FILE } from '@/util/paths';
+import { writeCommandFile } from '@/util/commandFile';
 
 /**
  * GET  /api/system/rf_scan
@@ -59,7 +60,7 @@ export default function handler(req, res) {
         ch_end,
       };
       const filePath = path.join(COMMAND_DIR, `${Date.now()}.json`);
-      fs.writeFileSync(filePath, JSON.stringify(cmd, null, 2));
+      writeCommandFile(filePath, cmd);
       return res.status(202).json({ message: 'Scan queued.', cmd });
     } catch (error) {
       console.error('rf_scan POST failed:', error);

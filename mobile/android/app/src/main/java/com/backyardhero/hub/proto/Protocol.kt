@@ -44,8 +44,12 @@ object Cmd {
     fun showStart(ident: String, startEpochMs: Long, showId: Int, repeat: Int) =
         "showstart $ident $startEpochMs 0 $showId $repeat"
 
-    fun play(ident: String, repeat: Int = 5) = "play $ident 0 $repeat"
-    fun pause(ident: String, repeat: Int = 5) = "pause $ident 0 $repeat"
+    /**
+     * [atEpochMs] is the synchronized time the play / pause takes effect at
+     * (dongles and receivers with timed pause); 0 = on arrival.
+     */
+    fun play(ident: String, atEpochMs: Long = 0, repeat: Int = 5) = "play $ident $atEpochMs $repeat"
+    fun pause(ident: String, atEpochMs: Long = 0, repeat: Int = 5) = "pause $ident $atEpochMs $repeat"
     fun stop(ident: String, repeat: Int = 5) = "stop $ident 0 $repeat"
     fun reset(ident: String) = "reset $ident 0"
     fun rxcfg(ident: String) = "rxcfg $ident"
@@ -137,6 +141,15 @@ data class ReceiverUpdate(
     val fireDurationMs: Int?,
     /** Two uint64 masks as raw bits: cue N (1-based) is bit (N-1)%64 of mask (N-1)/64. */
     val continuity: LongArray?,
+    /**
+     * `pf`: bit 0 playing, bit 1 paused. Only sent for receivers that report
+     * it, so null means "unknown", not "idle".
+     */
+    val stateFlags: Int? = null,
+    /** `rt`: average auto-retries per delivered frame x10 (link margin). */
+    val retryAvgX10: Int? = null,
+    /** `rc`: receiver capability bits (bit 0 status flags, bit 1 timed pause). */
+    val rxCaps: Int? = null,
 )
 
 data class DongleTick(
@@ -147,6 +160,8 @@ data class DongleTick(
     val rfChannel: Int,
     val avgLatencyMs: Int,
     val receivers: List<ReceiverUpdate>,
+    /** Capability bits; bit 0 = the dongle acknowledges `#<seq>` commands. */
+    val caps: Int = 0,
 )
 
 data class GpioStatus(
@@ -178,6 +193,8 @@ sealed interface Inbound {
     data class Wifi(val cfg: WifiConfig) : Inbound
     data class Hello(val fw: Int?) : Inbound
     data class Warn(val message: String) : Inbound
+    /** `K <seq> <result> <queue>`: 1 delivered, 0 not delivered, 2 dropped, 3 rejected. */
+    data class Ack(val seq: Int, val result: Int, val queue: Int?) : Inbound
     /** Any non-JSON line (C+ acks, CV / C? errors, INFO / WARN / ERR text). */
     data class Text(val line: String) : Inbound
     data class OtherJson(val obj: JsonObject) : Inbound
@@ -188,6 +205,12 @@ object LineParser {
 
     fun parse(line: String): Inbound {
         val t = line.trim()
+        if (t.startsWith("K ")) {
+            val p = t.split(' ')
+            val seq = p.getOrNull(1)?.toIntOrNull()
+            val result = p.getOrNull(2)?.toIntOrNull()
+            if (seq != null && result != null) return Inbound.Ack(seq, result, p.getOrNull(3)?.toIntOrNull())
+        }
         if (!t.startsWith("{")) return Inbound.Text(t)
         val o = runCatching { json.parseToJsonElement(t).jsonObject }.getOrNull() ?: return Inbound.Text(t)
         if (o.str("gpio") == "gpio_status") {
@@ -223,6 +246,7 @@ object LineParser {
             rfChannel = o.int("ch") ?: 0,
             avgLatencyMs = o.int("l") ?: 0,
             receivers = rx,
+            caps = o.int("caps") ?: 0,
         )
     }
 
@@ -248,6 +272,9 @@ object LineParser {
             cuesAvailable = o.int("ca"),
             fireDurationMs = o.int("fd"),
             continuity = c,
+            stateFlags = o.int("pf"),
+            retryAvgX10 = o.int("rt"),
+            rxCaps = o.int("rc"),
         )
     }
 

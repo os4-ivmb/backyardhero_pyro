@@ -524,6 +524,14 @@ function SingleReceiver({
               Fire <span className="text-gray-200">{receiver.config_data.fire_duration_ms}ms</span>
             </span>
           )}
+          {receiver.config_data?.rf_channel != null && (
+            <span>
+              RF <span className="text-gray-200">
+                ch {receiver.config_data.rf_channel}
+                {receiver.config_data.rf_system_id ? ` / sys ${receiver.config_data.rf_system_id}` : ''}
+              </span>
+            </span>
+          )}
         </div>
       )}
 

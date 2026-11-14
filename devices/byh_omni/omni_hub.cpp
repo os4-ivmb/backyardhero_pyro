@@ -2,6 +2,8 @@
 #include "omni_pins.h"
 
 #include <WiFi.h>
+#include <esp_wifi.h>
+#include <math.h>
 #include <Preferences.h>
 #include <SHA1Builder.h>
 #include <base64.h>
@@ -41,6 +43,17 @@ namespace {
 const char* KEY_SSID = "wifi_ssid";
 const char* KEY_PASS = "wifi_pass";
 const char* KEY_RFCH = "hub_rfch";
+const char* KEY_TXP  = "wifi_txp";   // wifi_power_t (0.25 dBm units)
+
+// AP transmit power (T22). The phone or laptop is normally within a few
+// metres, and a full-power transmitter on the same board desensitises the
+// nRF24 receiver whatever the channel spacing. Default 8.5 dBm.
+#define HUB_DEFAULT_TX_POWER WIFI_POWER_8_5dBm
+const wifi_power_t TX_POWER_STEPS[] = {
+  WIFI_POWER_19_5dBm, WIFI_POWER_19dBm, WIFI_POWER_18_5dBm, WIFI_POWER_17dBm,
+  WIFI_POWER_15dBm, WIFI_POWER_13dBm, WIFI_POWER_11dBm, WIFI_POWER_8_5dBm,
+  WIFI_POWER_7dBm, WIFI_POWER_5dBm, WIFI_POWER_2dBm, WIFI_POWER_MINUS_1dBm,
+};
 const char* WS_GUID  = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 enum SlotState : uint8_t { SLOT_FREE = 0, SLOT_HTTP, SLOT_WS };
@@ -87,6 +100,26 @@ uint32_t wsSeqCounter = 0;
 // ---------------------------------------------------------------------------
 // Persisted settings
 // ---------------------------------------------------------------------------
+
+wifi_power_t nearestTxPower(float dbm) {
+  wifi_power_t best = HUB_DEFAULT_TX_POWER;
+  float bestErr = 1e9f;
+  for (wifi_power_t p : TX_POWER_STEPS) {
+    float err = fabsf((float)p / 4.0f - dbm);
+    if (err < bestErr) { bestErr = err; best = p; }
+  }
+  return best;
+}
+
+wifi_power_t storedTxPower() {
+  prefs.begin(OMNI_NVS_NAMESPACE, true);
+  int8_t raw = prefs.getChar(KEY_TXP, (int8_t)HUB_DEFAULT_TX_POWER);
+  prefs.end();
+  for (wifi_power_t p : TX_POWER_STEPS) {
+    if ((int8_t)p == raw) return p;
+  }
+  return HUB_DEFAULT_TX_POWER;
+}
 
 void defaultSsid(char* out, size_t cap) {
   uint64_t mac = ESP.getEfuseMac();
@@ -264,6 +297,7 @@ void buildInfo(JsonDocument& d) {
   d["ident"]       = hubCfg.ident;
   d["ssid"]        = activeSsid;
   d["ap_channel"]  = activeChannel;
+  d["txpower_dbm"] = (float)storedTxPower() / 4.0f;
   d["ip"]          = WiFi.softAPIP().toString();
   d["ws_path"]     = "/ws";
   d["ws_port"]     = HUB_HTTP_PORT;
@@ -422,6 +456,10 @@ void dispatchMessage(const char* data, size_t len) {
       memcpy(line, data + start, segLen);
       line[segLen] = '\0';
       if (hubCfg.onLine) hubCfg.onLine(line);
+    } else if (segLen >= sizeof(line)) {
+      // Used to be dropped silently. Tell the client (T21).
+      static const char kTooLong[] = "ERR: line too long";
+      sendLine(kTooLong, sizeof(kTooLong) - 1);
     }
     start = i + 1;
   }
@@ -580,6 +618,10 @@ bool begin(const HubConfig& cfg) {
     return false;
   }
   strlcpy(activeSsid, ssid, sizeof(activeSsid));
+  // 20 MHz only, so the AP doesn't spread toward the nRF channel, and the
+  // stored (default low) transmit power (T22).
+  esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
+  WiFi.setTxPower(storedTxPower());
 
   server.begin();
   server.setNoDelay(true);
@@ -695,6 +737,7 @@ void wifiDescribe(JsonDocument& out) {
   out["pass_set"]     = true;
   out["pass_default"] = !customPass;
   out["hub_active"]   = started;
+  out["txpower_dbm"]  = (float)storedTxPower() / 4.0f;
   if (started) {
     out["active_ssid"] = activeSsid;
     out["ap_channel"]  = activeChannel;
@@ -703,7 +746,17 @@ void wifiDescribe(JsonDocument& out) {
   out["reboot_required"] = settingsChanged;
 }
 
-bool wifiSet(const char* ssid, const char* pass, const char** err) {
+bool wifiSet(const char* ssid, const char* pass, const char** err, float txPowerDbm) {
+  if (!isnan(txPowerDbm)) {
+    if (txPowerDbm < -1.0f || txPowerDbm > 19.5f) { *err = "txpower must be -1..19.5 dBm"; return false; }
+    wifi_power_t p = nearestTxPower(txPowerDbm);
+    prefs.begin(OMNI_NVS_NAMESPACE, false);
+    bool okp = prefs.putChar(KEY_TXP, (int8_t)p) > 0;
+    prefs.end();
+    if (!okp) { *err = "nvs write failed"; return false; }
+    if (started) WiFi.setTxPower(p);   // takes effect now; no reboot needed
+    if (ssid == nullptr && pass == nullptr) return true;
+  }
   // A null field keeps the currently effective value.
   char curSsid[33];
   char curPass[64];

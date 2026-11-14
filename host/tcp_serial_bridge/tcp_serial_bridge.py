@@ -519,15 +519,63 @@ def _service_hub_reader(client, stats):
     return True
 
 
-def _hub_write_line(line):
+class _TxDropReporter:
+    """Counts outbound lines dropped because the dongle link is down and
+    tells the daemon, at most once a second (T17):
+
+        {"type": "bridge_event", "event": "tx_dropped", "count": 3,
+         "reason": "hub offline"}
+
+    Without this a stop or fire command could vanish with no operator
+    signal. `note` is called from tcp_to_serial; `flush` also runs from the
+    serial_to_tcp loop so a single drop is still reported within ~1s."""
+
+    INTERVAL_S = 1.0
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._count = 0
+        self._reason = None
+        self._last_sent = 0.0
+
+    def note(self, client, reason):
+        with self._lock:
+            self._count += 1
+            self._reason = reason
+        self.flush(client)
+
+    def flush(self, client):
+        if not client or self._count == 0:
+            return
+        now = time.monotonic()
+        with self._lock:
+            if self._count == 0 or now - self._last_sent < self.INTERVAL_S:
+                return
+            msg = {'type': 'bridge_event', 'event': 'tx_dropped',
+                   'count': self._count, 'reason': self._reason}
+            self._count = 0
+            self._last_sent = now
+        try:
+            # Leading newline: never splice onto a partial dongle line.
+            client.sendall(('\n' + json.dumps(msg) + '\n').encode('utf-8'))
+        except Exception as e:
+            print(f"tx drop report failed: {e}")
+
+
+_tx_drops = _TxDropReporter()
+
+
+def _hub_write_line(line, client=None):
     link = _current_hub()
     if link is None or not link.connected:
         print(f"tcp_to_serial: hub offline, dropping {len(line)}B")
+        _tx_drops.note(client, "hub offline")
         return
     try:
         link.send_line(line)
     except HubLinkError as e:
         print(f"tcp_to_serial: hub write failed ({e}); dropping {len(line)}B")
+        _tx_drops.note(client, "hub write failed")
         _drop_hub(link)
 
 
@@ -657,6 +705,7 @@ def serial_to_tcp(client):
     hub_stats = {'last_rx': last_rx, 'last_log': 0.0}
     try:
         while True:
+            _tx_drops.flush(client)
             if SERIAL_CONFIG.get('link') == 'wireless':
                 # Hub traffic does not use the USB port, so a dongle
                 # esptool session (`flashing`) must not park this path.
@@ -780,7 +829,7 @@ def tcp_to_serial(client):
                 # message per line. The hub splits on CR/LF, so the
                 # newline stays off the frame.
                 if SERIAL_CONFIG.get('link') == 'wireless':
-                    _hub_write_line(line)
+                    _hub_write_line(line, client)
                     continue
 
                 # While the flasher has the port, drop everything we'd
@@ -790,6 +839,7 @@ def tcp_to_serial(client):
                 # (the daemon refuses to start a dongle flash while a
                 # receiver flash is mid-flight, and vice versa).
                 if flashing:
+                    _tx_drops.note(client, "dongle is being flashed")
                     continue
 
                 # Re-attach the newline the dongle's line parser expects.
@@ -811,6 +861,7 @@ def tcp_to_serial(client):
                         # reconnect bring the link back.
                         print(f"tcp_to_serial: write error ({e}); "
                               f"dropping {len(out)}B and continuing")
+                        _tx_drops.note(client, "dongle write error")
                         with serial_lock:
                             if serial_conn:
                                 try:
@@ -824,6 +875,7 @@ def tcp_to_serial(client):
                     # Host-side OTA retry will resend whatever we lose.
                     print(f"tcp_to_serial: serial offline, "
                           f"dropping {len(out)}B")
+                    _tx_drops.note(client, "dongle offline")
 
     except Exception as e:
         print(f"Error in tcp_to_serial: {e}")

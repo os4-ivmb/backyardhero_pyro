@@ -3,6 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { ensureHardware } from '@/util/apiGuards';
 import { COMMAND_DIR } from '@/util/paths';
+import { writeCommandFile } from '@/util/commandFile';
 import { isHubHost } from '@/util/dongleLink';
 
 // W1: This route used to write req.body verbatim into /tmp/d_cmd, making
@@ -188,7 +189,10 @@ export default function handler(req, res) {
     const cmdId = isStr(body.cmd_id) ? body.cmd_id : crypto.randomUUID();
     const payload = { ...body, cmd_id: cmdId };
 
-    fs.writeFileSync(filePath, JSON.stringify(payload, null, 2));
+    // Write under a temp name and rename into place: the daemon wakes on
+    // directory changes now (T16), so it must never see a half-written
+    // file. It skips dotfiles and *.tmp; rename(2) is atomic.
+    writeCommandFile(filePath, payload);
 
     return res.status(200).json({ message: 'Commanded successfully.', cmd_id: cmdId });
   } catch (error) {

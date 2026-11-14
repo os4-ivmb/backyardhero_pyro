@@ -8,6 +8,7 @@ import { ensureHardware } from '@/util/apiGuards';
 // the staging path itself -- important on Docker Desktop / Windows where the
 // native bridge and the WSL2 container share no filesystem.
 import { COMMAND_DIR, STAGING_DIR, STATE_FILE_PATH } from '@/util/paths';
+import { writeCommandFile } from '@/util/commandFile';
 import { imageMismatchError } from '@/util/firmwareVersion';
 
 // Dongle board type from the daemon state file (heartbeat `bt`), plus
@@ -168,7 +169,7 @@ function handleStart(req, res) {
       file_names: fileNamesByOffset,
     };
     const cmdPath = path.join(COMMAND_DIR, `${Date.now()}-dongle-flash.json`);
-    fs.writeFileSync(cmdPath, JSON.stringify(cmd, null, 2));
+    writeCommandFile(cmdPath, cmd);
 
     return res.status(202).json({
       message: 'Dongle flash queued.',
@@ -191,7 +192,7 @@ function queueDaemonCmd(res, payload, label) {
     const cmdPath = path.join(
       COMMAND_DIR, `${Date.now()}-dongle-flash-${label}.json`,
     );
-    fs.writeFileSync(cmdPath, JSON.stringify(payload, null, 2));
+    writeCommandFile(cmdPath, payload);
     return res.status(202).json({ message: `Dongle ${label} queued.` });
   } catch (error) {
     console.error(`dongle_flash ${label} failed:`, error);

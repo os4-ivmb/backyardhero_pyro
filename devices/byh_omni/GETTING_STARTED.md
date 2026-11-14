@@ -80,15 +80,16 @@ The startup sequence is the same, except the third fade is **yellow** instead of
 
 **Hub dongle (hub switch closed at boot):** the omni starts a WiFi access point instead of waiting for USB, on the channel farthest from the nRF24 channel last used.
 - Default network `BYH-Hub-XXXX`, password `backyardhero` (change it!)
-- `GET http://192.17.76.1/api/info` describes the hub; a WebSocket at `ws://192.17.76.1/ws` carries the same line protocol as USB serial (one line per message). The AP is `192.17.76.1/24`; joined phones are leased from `.2` up.
+- `GET http://192.17.76.1/api/info` describes the hub; a WebSocket at `ws://192.17.76.1/ws` carries the same line protocol as USB serial. Each message holds one or more newline-separated lines: the hub batches its output for up to 20 ms (command acks, switch changes and errors go out at once), so clients must split on newlines. The AP is `192.17.76.1/24`; joined phones are leased from `.2` up.
 - **Pulsing yellow**: network up, no devices joined
 - **Flashing green**: a device has joined the WiFi but hasn't opened the WebSocket yet
 - **Solid green**: a device is connected over the WebSocket
 
-**WiFi settings commands** (over the WebSocket or USB serial; applied on the next boot):
+**WiFi settings commands** (over the WebSocket or USB serial; SSID and password apply on the next boot):
 - `wifi_get` replies with a `wifi_cfg` JSON line. The password is never returned, only `pass_set` / `pass_default`.
 - `wifi_set {"ssid":"My Hub","pass":"secret123"}` stores either or both (SSID 1-32 bytes, password 8-63 printable ASCII)
-- `wifi_reset` restores the defaults
+- `wifi_set {"txpower":8.5}` sets the AP transmit power in dBm (-1 to 19.5, rounded to the nearest step the ESP32 supports). It applies immediately and is kept across reboots. The default is a low 8.5 dBm: the phone is normally within a few metres, and a strong WiFi transmitter on the same board makes the nRF24 receiver less sensitive whatever the channel. Raise it only if the phone loses the hub at the distance you need. `wifi_cfg` and `/api/info` report it as `txpower_dbm`. The AP always runs at 20 MHz bandwidth.
+- `wifi_reset` restores the SSID and password defaults
 
 Host module wiring is configurable at the top of `byh_omni.ino`: input indexes `HOST_IN_ARM_INDEX` (0), `HOST_IN_START_INDEX` (1), `HOST_IN_MANUAL_INDEX` (2), `HOST_IN_HUB_INDEX` (3), the 433MHz output `HOST_OUT_RF433_INDEX` (0), and `HOST_STATUS_PIXEL_COUNT`.
 
