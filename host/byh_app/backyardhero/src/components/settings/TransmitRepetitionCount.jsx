@@ -1,6 +1,6 @@
+import useStateFields from "@/store/useStateFields";
 import React, { useEffect, useRef, useState } from "react";
 import axios from "axios";
-import useStateAppStore from "@/store/useStateAppStore";
 import { Slider } from "@/design";
 
 // How many times the dongle re-broadcasts each fire packet. Higher is
@@ -8,7 +8,7 @@ import { Slider } from "@/design";
 // airtime per cue. Range 1-10; daemon stores under `fire_repeat_ct`.
 
 export default function TransmitRepetitionCount() {
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.settings"]);
   const upstream = stateData?.fw_state?.settings?.fire_repeat_ct;
   const [value, setValue] = useState(typeof upstream === "number" ? upstream : 1);
   const draggingRef = useRef(false);

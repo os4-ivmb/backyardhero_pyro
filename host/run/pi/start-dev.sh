@@ -112,7 +112,26 @@ export BYH_BRIDGE_BIND
 echo "Bridge/flash-server bind address: ${BYH_BRIDGE_BIND}"
 
 echo "Starting TCP-to-serial bridge..."
-"${BRIDGE_VENV}/bin/python" "${BRIDGE_SCRIPT}" &
+run_bridge_forever() {
+  local delay=1 child= started code
+  trap 'if [ -n "${child}" ]; then kill "${child}" 2>/dev/null || true; wait "${child}" 2>/dev/null || true; fi; exit 0' TERM INT
+  while true; do
+    started=$SECONDS
+    "${BRIDGE_VENV}/bin/python" "${BRIDGE_SCRIPT}" &
+    child=$!
+    code=0
+    wait "${child}" || code=$?
+    child=
+    if (( SECONDS - started > 30 )); then delay=1; fi
+    echo "Bridge exited (code ${code}); restarting in ${delay}s"
+    sleep "${delay}" &
+    child=$!
+    wait "${child}" || true
+    child=
+    delay=$(( delay < 10 ? delay * 2 : 10 ))
+  done
+}
+run_bridge_forever &
 BRIDGE_PID=$!
 sleep 2
 if ! ps -p "${BRIDGE_PID}" >/dev/null 2>&1; then
@@ -147,4 +166,4 @@ echo "    WebSocket server      -> docker exec firework-system \\"
 echo "                                supervisorctl restart websock"
 echo "------------------------------------------------------------"
 
-wait "${BRIDGE_PID}" "${DOCKER_PID}"
+wait "${DOCKER_PID}"

@@ -1,3 +1,4 @@
+import useStateFields from "@/store/useStateFields";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   MdBatteryFull, MdBatteryAlert, MdBatteryUnknown,
@@ -7,7 +8,6 @@ import {
 import { FaCircleQuestion, FaTriangleExclamation } from "react-icons/fa6";
 
 import useAppStore from "@/store/useAppStore";
-import useStateAppStore from "@/store/useStateAppStore";
 import { Card, Button, Badge, Section, cn } from "@/design";
 import { isPollableReceiver } from "@/util/receivers";
 import { SHOW_RECEIVER_STATUS } from "@/util/showReceivers";
@@ -291,7 +291,7 @@ export default function MobileReceiverDisplay({ setCurrentTab }) {
     receivers: dbReceivers, fetchReceivers,
     retryReceiver, fetchReceiverConfig,
   } = useAppStore();
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.receivers"]);
   const verification = useShowReceiverVerification();
 
   const [receiverLabels, setReceiverLabels] = useState({});

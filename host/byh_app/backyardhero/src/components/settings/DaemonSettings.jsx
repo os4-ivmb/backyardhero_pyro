@@ -41,7 +41,8 @@ const FIELDS = [
 ];
 
 export default function DaemonSettings() {
-  const { stateData, setStateData } = useStateAppStore();
+  const stateData = useStateAppStore((s) => s.stateData);
+  const setStateData = useStateAppStore((s) => s.setStateData);
   const settings = stateData?.fw_state?.settings || {};
 
   const upstream = {

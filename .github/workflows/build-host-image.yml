@@ -41,6 +41,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check host Python
+        run: |
+          python -m pip install -r host/pythings/requirements-dev.txt pyserial websockets psutil watchfiles
+          python -m pyflakes host/pythings/pc_daemon host/pythings/websock_server host/tcp_serial_bridge
+          python -m pytest host/pythings/tests
+
       - name: Resolve + validate version
         id: meta
         run: |

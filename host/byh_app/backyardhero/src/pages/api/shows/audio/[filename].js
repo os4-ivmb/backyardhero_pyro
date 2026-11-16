@@ -31,11 +31,21 @@ export default function handler(req, res) {
   }
 
   const filePath = opened.path;
-  const stat = { size: opened.size };
+  const stat = fs.statSync(filePath);
   const contentType = contentTypeFor(filename);
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Content-Type', contentType);
   res.setHeader('Cache-Control', 'private, max-age=0, must-revalidate');
+
+  const etag = `W/"${stat.size.toString(16)}-${Math.trunc(stat.mtimeMs).toString(16)}"`;
+  res.setHeader('ETag', etag);
+  res.setHeader('Last-Modified', stat.mtime.toUTCString());
+  const noneMatch = req.headers['if-none-match'];
+  const modifiedSince = req.headers['if-modified-since'];
+  const matches = noneMatch && (noneMatch === '*' || noneMatch.split(',').some((tag) => tag.trim().replace(/^W\//, '') === etag.replace(/^W\//, '')));
+  if (matches || (!noneMatch && modifiedSince && Math.floor(stat.mtimeMs / 1000) * 1000 <= Date.parse(modifiedSince))) {
+    return res.status(304).end();
+  }
 
   if (req.method === 'HEAD') {
     res.setHeader('Content-Length', stat.size);

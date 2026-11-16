@@ -1,3 +1,4 @@
+import useStateFields from "@/store/useStateFields";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import {
@@ -8,7 +9,6 @@ import {
   MdRefresh,
   MdCloudDownload,
 } from "react-icons/md";
-import useStateAppStore from "@/store/useStateAppStore";
 import useAppStore from "@/store/useAppStore";
 import {
   Button,
@@ -83,7 +83,7 @@ function fmtElapsed(startMs, endMs) {
 //   * they're not Bilusocn 433 TX-only (no NRF radio),
 //   * they have a recent `lmt` (status from the dongle, ergo online).
 function useFlashableReceivers() {
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.device_is_armed", "fw_state.ota", "fw_state.receivers", "fw_state.settings", "fw_state.show_loaded"]);
   const { receivers: dbReceivers, fetchReceivers } = useAppStore();
   useEffect(() => {
     fetchReceivers().catch((e) => console.error("fetchReceivers failed:", e));
@@ -126,7 +126,7 @@ function hasReceiverLatest(latestFirmware) {
 // Component ----------------------------------------------------------------
 
 export default function OtaFlashPanel() {
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.device_is_armed", "fw_state.ota", "fw_state.receivers", "fw_state.settings", "fw_state.show_loaded"]);
   const { latestFirmware, fetchLatestFirmware } = useAppStore();
   const [open, setOpen] = useState(false);
   const [checking, setChecking] = useState(false);

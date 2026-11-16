@@ -1,3 +1,4 @@
+import useStateFields from "@/store/useStateFields";
 import useAppStore from "@/store/useAppStore"
 import useStateAppStore, { serverElapsedMs } from "@/store/useStateAppStore";
 import { asyncConfirm } from "@/components/common/AsyncPrompt";
@@ -219,7 +220,7 @@ function SingleReceiver({
   // to just `_clockOffsetMs` so the calc lives in a single clock domain
   // without triggering a re-render on every state tick.
   const clockOffsetMs = useStateAppStore(
-    (s) => s.stateData?._clockOffsetMs ?? 0,
+    (s) => s.clockOffsetMs,
   );
 
   const handleTargetClick = (target, item, event) => {
@@ -941,7 +942,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       fetchReceiverConfig,
       latestFirmware,
     } = useAppStore();
-    const { stateData } = useStateAppStore()
+    const stateData = useStateFields(["fw_state.receivers", "fw_state.show_loaded"])
     // Latest published firmware (all products), surfaced per-card as an
     // "update available" badge; each card picks its own product from its
     // board type. Null entries when offline / not yet fetched (no badge).
@@ -1144,7 +1145,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
     // Clock skew between this host and the daemon's broadcast timestamps.
     // Mirrors the per-card calc in SingleReceiver so "offline" here agrees
     // with the WiFi-icon tone the operator sees on each card.
-    const clockOffsetMs = stateData?._clockOffsetMs ?? 0;
+    const clockOffsetMs = useStateAppStore((s) => s.clockOffsetMs);
 
     // A receiver is "connected" if the dongle heard from it within the last
     // 10s; otherwise we treat it as dead/offline (same rule as the card).

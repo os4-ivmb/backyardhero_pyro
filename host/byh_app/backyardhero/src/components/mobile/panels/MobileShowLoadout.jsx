@@ -452,7 +452,7 @@ function PackList({ items }) {
 
 export default function MobileShowLoadout({ setCurrentTab }) {
   const { systemConfig, stagedShow, inventory } = useAppStore();
-  const { stateData } = useStateAppStore();
+  const stateData = useStateAppStore((s) => s.stateData);
   const [targetRcvMap, setTargetRcvMap] = useState({});
   const [showReceivers, setShowReceivers] = useState({});
   const [receiverLabels, setReceiverLabels] = useState({});

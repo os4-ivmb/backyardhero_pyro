@@ -34,28 +34,30 @@ RUN set -eux; \
 
 # Create necessary directories
 WORKDIR /app
-RUN mkdir -p /data /data/log /tmp/d_cmd
+RUN mkdir -p /data /data/log /tmp/d_cmd /app/byh_app && chown node:node /app/byh_app
 
 # Set up Node.js environment
-COPY byh_app/backyardhero/package*.json /app/byh_app/
+COPY --chown=node:node byh_app/backyardhero/package*.json /app/byh_app/
 WORKDIR /app/byh_app
+USER node
 RUN npm ci
 
 # Copy Next.js application files
-COPY byh_app/backyardhero /app/byh_app/
+COPY --chown=node:node byh_app/backyardhero /app/byh_app/
 
-RUN ls /app/byh_app/
 
 # Build Next.js application
-RUN npm run build
+RUN npm run build && npm prune --omit=dev
+USER root
 
 # Copy Python application files
 WORKDIR /app
-COPY pythings/ /app/pythings/
+COPY --chown=node:node pythings/ /app/pythings/
 
 RUN pip3 install --no-cache-dir --break-system-packages -r pythings/requirements.txt
 
 # Copy Supervisor configuration
+COPY healthcheck.js /app/healthcheck.js
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
@@ -67,7 +69,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 # ownership of the build output + runtime dirs baked into the image so
 # `next start` (which writes .next/cache) and the Python services can write.
 RUN mkdir -p /data /data/log /tmp/d_cmd /tmp/ota_staging \
-    && chown -R node:node /app /data /tmp/d_cmd /tmp/ota_staging
+    && chown -R node:node /data /tmp/d_cmd /tmp/ota_staging
 
 # Expose port for Next.js app
 EXPOSE 1776
@@ -83,7 +85,7 @@ ENV PORT=1776
 # need curl/wget installed. Generous start-period covers the Next build
 # server + Python services coming up.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:1776/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node /app/healthcheck.js
 
 # Entrypoint prepares dirs + rotates logs (as root) then execs supervisord,
 # which launches each program as the non-root `node` user.

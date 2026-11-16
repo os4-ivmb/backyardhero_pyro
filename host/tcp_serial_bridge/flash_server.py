@@ -110,10 +110,6 @@ if str(_DEVICES_UTILS) not in sys.path:
     sys.path.insert(0, str(_DEVICES_UTILS))
 
 from dongle_flasher import (  # noqa: E402
-    OFFSET_BOOTLOADER,
-    OFFSET_PARTITIONS,
-    OFFSET_BOOT_APP0,
-    OFFSET_APP,
     APP_ONLY_OFFSETS,
     FULL_FLASH_OFFSETS,
     ESPRESSIF_VID,

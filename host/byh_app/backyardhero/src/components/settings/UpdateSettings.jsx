@@ -1,3 +1,4 @@
+import useStateFields from "@/store/useStateFields";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import {
@@ -11,7 +12,6 @@ import {
   MdPowerSettingsNew,
   MdCloudDownload,
 } from "react-icons/md";
-import useStateAppStore from "@/store/useStateAppStore";
 import {
   Button,
   Card,
@@ -109,7 +109,7 @@ function fmtElapsed(startIso, endIso) {
 // ---------------------------------------------------------------------------
 
 export default function UpdateSettings() {
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.device_is_armed", "fw_state.show_loaded"]);
 
   const [open, setOpen] = useState(false);
   const [statusBundle, setStatusBundle] = useState({ status: { phase: "idle" } });

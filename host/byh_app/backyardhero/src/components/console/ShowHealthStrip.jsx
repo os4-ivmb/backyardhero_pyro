@@ -46,7 +46,7 @@ function Metric({ label, current, total, failing }) {
 // manual-sequence shows (they're never loaded onto receivers).
 export default function ShowHealthStrip({ connectivityOnly = false } = {}) {
   const { stagedShow, systemConfig } = useAppStore();
-  const { stateData } = useStateAppStore();
+  const stateData = useStateAppStore((s) => s.stateData);
 
   const metrics = useMemo(() => {
     if (!stagedShow || !stagedShow.items) return null;

@@ -1,8 +1,8 @@
+import useStateFields from "@/store/useStateFields";
 import React, { useEffect, useState } from "react";
 import axios from "axios";
 import { FaTriangleExclamation } from "react-icons/fa6";
 
-import useStateAppStore from "@/store/useStateAppStore";
 import { Toggle, Badge, Dot, cn } from "@/design";
 
 // ---------------------------------------------------------------------------
@@ -135,7 +135,7 @@ function OverrideRow({ def, gpio, onCommit }) {
 }
 
 export default function GpioOverridePanel() {
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.gpio"]);
   const gpio = stateData?.fw_state?.gpio || {};
 
   const commit = async (key, active, on) => {

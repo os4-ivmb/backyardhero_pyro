@@ -1,6 +1,6 @@
+import useStateFields from "@/store/useStateFields";
 import React, { useEffect, useRef, useState } from "react";
 import axios from "axios";
-import useStateAppStore from "@/store/useStateAppStore";
 import { Slider } from "@/design";
 
 // LED brightness on the box. Daemon stores it on a 0-100 scale (mapped
@@ -13,7 +13,7 @@ import { Slider } from "@/design";
 // page reload.
 
 export default function BrightnessSlider() {
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.settings"]);
   const upstream = stateData?.fw_state?.settings?.led_brightness;
   const [value, setValue] = useState(typeof upstream === "number" ? upstream : 50);
   const draggingRef = useRef(false);

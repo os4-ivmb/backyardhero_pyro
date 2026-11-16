@@ -1,3 +1,4 @@
+import useStateFields from "@/store/useStateFields";
 import { useCallback, useEffect, useRef, useState } from "react";
 import axios from "axios";
 import {
@@ -8,7 +9,6 @@ import {
   MdRestartAlt,
   MdCloudDownload,
 } from "react-icons/md";
-import useStateAppStore from "@/store/useStateAppStore";
 import useAppStore from "@/store/useAppStore";
 import { Badge, Button } from "@/design";
 import { HARDWARE } from "@/util/clientEnv";
@@ -33,7 +33,7 @@ const IDLE_POLL_MS = 15000;
 const ACTIVE_PHASES = new Set(["checking", "downloading"]);
 
 export default function VersionFooter() {
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.dongle_board_type", "fw_state.dongle_fw_version"]);
   const { latestFirmware, fetchLatestFirmware, systemConfig } = useAppStore();
 
   const [host, setHost] = useState(null); // /api/system/host_update payload

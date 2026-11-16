@@ -1,6 +1,6 @@
+import useStateFields from "@/store/useStateFields";
 import React from "react";
 import axios from "axios";
-import useStateAppStore from "@/store/useStateAppStore";
 import useAppStore from "@/store/useAppStore";
 import { Field, SegmentedControl, cn, inputClass, selectClass } from "@/design";
 import useDraft from "@/hooks/useDraft";
@@ -31,7 +31,7 @@ const LINK_OPTIONS = [
 // Receiver OTA is not available on the wireless link.
 
 export default function TxConfig() {
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.device_running", "fw_state.settings"]);
   const { systemConfig, saveSystemConfig } = useAppStore();
   const rf = stateData?.fw_state?.settings?.rf || {};
   const sys = systemConfig?.system || {};

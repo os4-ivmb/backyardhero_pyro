@@ -126,7 +126,7 @@ function StepCard({ step, variant, itemStatus, receiverLabels, fired }) {
 
 export default function ManualSequenceConsole() {
   const { stagedShow, setStagedShow, systemConfig } = useAppStore();
-  const { stateData } = useStateAppStore();
+  const stateData = useStateAppStore((s) => s.stateData);
   const { wsAlive, daemonActive, isArmed, startSwActive, isManualFire, isShowLoaded } = useAppMode();
 
   const config = useMemo(() => showConfigOf(stagedShow), [stagedShow]);

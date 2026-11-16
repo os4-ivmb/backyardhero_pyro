@@ -1,3 +1,4 @@
+import useStateFields from "@/store/useStateFields";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import {
@@ -10,7 +11,6 @@ import {
   MdRefresh,
   MdCloudDownload,
 } from "react-icons/md";
-import useStateAppStore from "@/store/useStateAppStore";
 import useAppStore from "@/store/useAppStore";
 import { Button, Card, Badge, Modal, cn } from "@/design";
 import {
@@ -87,7 +87,7 @@ function fmtElapsed(startMs, endMs) {
 // ---------------------------------------------------------------------------
 
 export default function DongleFlashPanel() {
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.device_is_armed", "fw_state.dongle_board_type", "fw_state.dongle_board_type_reported", "fw_state.dongle_fw_version", "fw_state.dongle_ota", "fw_state.ota", "fw_state.show_loaded"]);
   const { latestFirmware, fetchLatestFirmware } = useAppStore();
   const [open, setOpen] = useState(false);
   const [latestBusy, setLatestBusy] = useState(false);

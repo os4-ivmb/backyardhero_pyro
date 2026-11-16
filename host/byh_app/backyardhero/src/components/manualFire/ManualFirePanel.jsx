@@ -1,9 +1,10 @@
+import useStateFields from "@/store/useStateFields";
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { FaKey, FaTriangleExclamation } from "react-icons/fa6";
 import { MdDragIndicator } from "react-icons/md";
 
-import useStateAppStore, { serverElapsedMs } from "@/store/useStateAppStore";
+import { serverElapsedMs } from "@/store/useStateAppStore";
 import useAppStore from "@/store/useAppStore";
 import useAppMode from "@/design/useAppMode";
 import { Card, Button, Section, Badge, Dot, cn } from "@/design";
@@ -691,7 +692,7 @@ export default function ManualFirePanel() {
   // written", not "daemon accepted" — but a failed POST should still be
   // visible rather than silent, W5).
   const [fireError, setFireError] = useState(null);
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.active_protocol", "fw_state.device_is_armed", "fw_state.loaded_show_id", "fw_state.manual_fire_active", "fw_state.receivers", "fw_state.settings", "fw_state.show_loaded"]);
   const { systemConfig, stagedShow } = useAppStore();
   const { wsAlive, daemonActive } = useAppMode();
 

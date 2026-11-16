@@ -1,4 +1,5 @@
 // pages/api/shows/index.js
+import { createHash } from 'node:crypto';
 import { getRepo } from "@/data";
 import { caps } from "@/util/profile";
 
@@ -67,7 +68,16 @@ export default async function handler(req, res) {
           if (s && typeof s === 'object') delete s.authorization_code;
         }
       }
-      return res.status(200).json(shows);
+      // ShowControl.saveSyncOffset still reads runtime_payload from the listing.
+      const body = JSON.stringify(shows);
+      const etag = `"${createHash('sha256').update(body).digest('hex')}"`;
+      res.setHeader('ETag', etag);
+      res.setHeader('Cache-Control', 'private, max-age=0, must-revalidate');
+      if (req.headers['if-none-match']?.split(',').some((tag) => tag.trim().replace(/^W\//, '') === etag || tag.trim() === '*')) {
+        return res.status(304).end();
+      }
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      return res.status(200).send(body);
     } catch (error) {
       console.error(error);
       return res.status(500).json({ error: 'Failed to retrieve shows.' });
