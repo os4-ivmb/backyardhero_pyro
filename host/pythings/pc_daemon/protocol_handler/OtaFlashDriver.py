@@ -273,6 +273,15 @@ class OtaFlashDriver:
         )
         return project, version
 
+    @classmethod
+    def image_project(cls, image: bytes) -> Optional[str]:
+        """project_name from the image's app descriptor, or None if the
+        image doesn't parse (start_job reports the real error)."""
+        try:
+            return cls.parse_esp_app_desc(image)[0]
+        except ValueError:
+            return None
+
     def _receiver_reported_fw(self, ident: Optional[str]) -> Optional[int]:
         """Best-effort read of a receiver's last-reported integer FW version
         from the daemon's live telemetry. Returns None if unknown."""

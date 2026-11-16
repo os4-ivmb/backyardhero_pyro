@@ -37,6 +37,17 @@ cfg_filepath = os.path.join(_CONFIG_DIR, 'systemcfg.json')
 # system block.
 db_filepath = os.path.join(_DATA_DIR, 'backyardhero.db')
 
+# Receiver board type (Receivers.board_type / status `bt`) -> the ESP-IDF
+# project name an OTA image for that board must carry. Dedicated receivers
+# run os4_receiver; an omni runs byh_omni in every role. Mirrors
+# FIRMWARE_PRODUCTS in the web app's util/firmwareVersion.js.
+BOARD_TYPE_DEDICATED = 0
+BOARD_TYPE_OMNI = 1
+OTA_PROJECT_BY_BOARD_TYPE = {
+    BOARD_TYPE_DEDICATED: "os4_receiver",
+    BOARD_TYPE_OMNI: "byh_omni",
+}
+
 LATENCY_TO_CONSIDER_ONLINE_MS = 8000
 ASYNC_LOAD_TIMEOUT_MS = 5000
 
@@ -454,15 +465,55 @@ class BYHProtocolHandler:
         except (FileNotFoundError, IOError) as e:
             return False, f"OTA refused: could not read image: {e}"
 
+        board_type = self._receiver_board_type(ident)
+        expected_project = OTA_PROJECT_BY_BOARD_TYPE.get(board_type)
+        if expected_project is None:
+            # Unknown board type (no rxcfg yet, or an older dongle that
+            # doesn't forward it). Keep the historical os4_receiver check
+            # rather than guessing; an omni image is refused with a hint.
+            expected_project = OTA_PROJECT_BY_BOARD_TYPE[BOARD_TYPE_DEDICATED]
+            if self.ota_driver.image_project(image) == OTA_PROJECT_BY_BOARD_TYPE[BOARD_TYPE_OMNI]:
+                return False, (
+                    f"OTA refused: board type for '{ident}' is unknown, so a "
+                    f"byh_omni image can't be confirmed for it. Fetch the "
+                    f"receiver's config (rxcfg) first."
+                )
+
         ok, msg = self.ota_driver.start_job(
             ident=ident,
             image_bytes=image,
             rate=int(rate),
             file_name=os.path.basename(image_path),
+            expected_project=expected_project,
         )
         if ok:
             self.parent.mark_state_dirty()
         return ok, msg
+
+    def _receiver_board_type(self, ident):
+        """Product family of a receiver: 0 = dedicated os4_receiver, 1 = omni,
+        None = unknown. Prefers the live value from the dongle's status
+        (`bt`), then the value persisted from the last config response."""
+        status = (self.receivers.get(ident) or {}).get('status') or {}
+        bt = status.get('boardType')
+        if bt is None:
+            try:
+                conn = sqlite3.connect(db_filepath, timeout=5.0)
+                try:
+                    cur = conn.cursor()
+                    cur.execute("PRAGMA table_info(Receivers)")
+                    if any(col[1] == 'board_type' for col in cur.fetchall()):
+                        cur.execute("SELECT board_type FROM Receivers WHERE id = ?", (ident,))
+                        row = cur.fetchone()
+                        bt = row[0] if row else None
+                finally:
+                    conn.close()
+            except sqlite3.Error as e:
+                print(f"OTA: could not read board_type for {ident}: {e}")
+        try:
+            return int(bt) if bt is not None else None
+        except (TypeError, ValueError):
+            return None
 
     def abort_ota_flash(self):
         ok, msg = self.ota_driver.abort()
