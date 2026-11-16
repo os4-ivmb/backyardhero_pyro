@@ -1,8 +1,22 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+// Cloud builder account (Supabase project URL + publishable key). Both are
+// public values; they come from local.properties (byh.cloud.supabaseUrl /
+// byh.cloud.supabaseKey) or the BYH_CLOUD_SUPABASE_URL / BYH_CLOUD_SUPABASE_KEY
+// environment. Left blank, the app builds without the cloud section.
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+fun cloudSetting(prop: String, env: String): String =
+    (localProps.getProperty(prop) ?: System.getenv(env) ?: "").trim()
+        .replace("\\", "").replace("\"", "")
 
 android {
     namespace = "com.backyardhero.hub"
@@ -15,6 +29,14 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        buildConfigField(
+            "String", "CLOUD_SUPABASE_URL",
+            "\"${cloudSetting("byh.cloud.supabaseUrl", "BYH_CLOUD_SUPABASE_URL")}\"",
+        )
+        buildConfigField(
+            "String", "CLOUD_SUPABASE_KEY",
+            "\"${cloudSetting("byh.cloud.supabaseKey", "BYH_CLOUD_SUPABASE_KEY")}\"",
+        )
     }
 
     buildTypes {
@@ -33,6 +55,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

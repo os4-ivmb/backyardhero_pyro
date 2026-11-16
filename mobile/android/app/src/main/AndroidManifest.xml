@@ -16,6 +16,11 @@
         android:usesPermissionFlags="neverForLocation"
         tools:targetApi="33" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- HubLinkService keeps the hub link and sequencer running with the
+         screen off. connectedDevice is satisfied by CHANGE_WIFI_STATE above. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Optional: Wi-Fi still works on phones that can't be a USB host. -->
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
@@ -36,5 +41,9 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service
+            android:name=".HubLinkService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
     </application>
 </manifest>

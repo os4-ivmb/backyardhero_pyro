@@ -66,8 +66,14 @@ fun ShowTab(vm: AppViewModel) {
     val stepInput by vm.session.stepInput.collectAsStateWithLifecycle()
     val stepListen by vm.session.stepListen.collectAsStateWithLifecycle()
     val now by vm.now.collectAsStateWithLifecycle()
+    val cloudAccount by vm.cloud.account.collectAsStateWithLifecycle()
+    val cloudShows by vm.cloudShows.collectAsStateWithLifecycle()
+    val cloudLoading by vm.cloudLoading.collectAsStateWithLifecycle()
+    val cloudDownloading by vm.cloudDownloading.collectAsStateWithLifecycle()
+    val cloudError by vm.cloudError.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
 
+    var signingIn by remember { mutableStateOf(false) }
     var importError by remember { mutableStateOf<String?>(null) }
     var confirmStart by remember { mutableStateOf<List<String>?>(null) }
     var confirmDelete by remember { mutableStateOf<Show?>(null) }
@@ -128,20 +134,41 @@ fun ShowTab(vm: AppViewModel) {
         if (shows.isEmpty()) {
             item {
                 Text(
-                    "Import a show from Backyard Hero. On the host's show status page, use Export to app.",
+                    "Import a show from Backyard Hero. On the host's show status page, use Export to app. " +
+                        "Or download one from your cloud builder account below.",
                     color = ByhColors.TextDim, fontSize = 14.sp,
                 )
             }
         }
-        items(shows, key = { it.id }) { show ->
+        items(shows, key = { it.storeKey }) { show ->
             ShowRow(
                 show = show,
-                isActive = state.show?.id == show.id && state.phase != ShowPhase.IDLE,
+                isActive = state.show?.storeKey == show.storeKey && state.phase != ShowPhase.IDLE,
                 canLoad = !state.isLive,
                 onLoad = { vm.session.loadShow(show) },
                 onDelete = { confirmDelete = show },
             )
         }
+        cloudShowsSection(
+            configured = vm.cloud.configured,
+            account = cloudAccount,
+            cloudShows = cloudShows,
+            localShows = shows,
+            loading = cloudLoading,
+            downloading = cloudDownloading,
+            error = cloudError,
+            onSignIn = { signingIn = true },
+            onSignOut = { vm.cloudSignOut() },
+            onRefresh = { vm.refreshCloudShows() },
+            onDownload = { vm.downloadCloudShow(it) },
+        )
+    }
+
+    if (signingIn) {
+        CloudSignInDialog(
+            onDismiss = { signingIn = false },
+            signIn = { email, password -> vm.cloudSignIn(email, password) },
+        )
     }
 
     confirmStart?.let { issues ->
