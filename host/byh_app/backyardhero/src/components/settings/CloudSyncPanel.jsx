@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from "react";
 import {
   MdCheckCircle,
   MdCloudUpload,
-  MdCloudOff,
   MdLogout,
   MdWarning,
 } from "react-icons/md";
@@ -172,18 +171,6 @@ export default function CloudSyncPanel() {
         </div>
       ) : null}
 
-      {status && !status.configured ? (
-        <div className="flex items-start gap-2 px-3 py-2 bg-warn-bg/60 border border-warn/40 text-warn-fg text-sm rounded-sm">
-          <MdCloudOff className="mt-0.5 shrink-0" />
-          <span>
-            Cloud sync isn&apos;t configured on this device. Set
-            {" "}<code>CLOUD_SYNC_SUPABASE_URL</code> and{" "}
-            <code>CLOUD_SYNC_SUPABASE_ANON_KEY</code> in the environment, then
-            restart.
-          </span>
-        </div>
-      ) : null}
-
       {status?.connected ? (
         <Card padding="md" tone="inset" className="flex flex-col gap-3">
           <div className="flex items-center justify-between gap-3">
@@ -228,7 +215,7 @@ export default function CloudSyncPanel() {
             </div>
           ) : null}
         </Card>
-      ) : status?.configured ? (
+      ) : status ? (
         <Card padding="md" tone="inset">
           <form onSubmit={handleSignIn} className="flex flex-col gap-3">
             <div className="eyebrow">Sign in to your cloud account</div>

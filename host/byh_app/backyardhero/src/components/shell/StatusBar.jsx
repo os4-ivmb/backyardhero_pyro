@@ -360,8 +360,24 @@ export default function StatusBar() {
     return { total, online };
   }, [stateData, systemConfig?.receivers]);
 
+  // Small corner version label, sitting just above the status bar's top
+  // edge. Prefer the running host version (injected by the desktop
+  // supervisor at runtime); fall back to the version baked in at build time
+  // (what the cloud builder runs). Hidden when neither is known.
+  const appVersion =
+    systemConfig?.host?.app_version || process.env.NEXT_PUBLIC_BYH_APP_VERSION || null;
+
   return (
     <>
+      {appVersion ? (
+        <div
+          className="absolute bottom-full right-3 mb-1 text-2xs font-mono text-fg-muted opacity-70 pointer-events-none select-none num"
+          title={`Backyard Hero v${appVersion}`}
+        >
+          v{appVersion}
+        </div>
+      ) : null}
+
       <div className="fixed bottom-3 left-3 z-[10000] flex flex-col-reverse gap-1.5 pointer-events-none">
         {toasts.map((t) => (
           <div key={t.id} className="pointer-events-auto">

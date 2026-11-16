@@ -1,4 +1,18 @@
 /** @type {import('next').NextConfig} */
+import { readFileSync } from 'node:fs';
+
+// Build-time app version for the small corner label (StatusBar). The release
+// version lives in host/desktop/package.json; that dir isn't present in every
+// build context (e.g. the Docker image only copies byh_app), so fall back to
+// null and let the runtime host version (systemConfig.host.app_version) win.
+let buildVersion = '';
+try {
+  buildVersion = JSON.parse(
+    readFileSync(new URL('../../desktop/package.json', import.meta.url), 'utf8'),
+  ).version || '';
+} catch {
+  buildVersion = '';
+}
 
 // Cloud Builder plan §9.2: in the cloud profile the app is served under
 // cloud.backyard-hero.com/builder (same origin as the gateway, so the Supabase
@@ -26,6 +40,7 @@ const nextConfig = {
   env: {
     NEXT_PUBLIC_BASE_PATH: basePath,
     NEXT_PUBLIC_BYH_PROFILE: isCloud ? 'cloud' : 'local',
+    NEXT_PUBLIC_BYH_APP_VERSION: buildVersion,
   },
   async rewrites() {
     return [

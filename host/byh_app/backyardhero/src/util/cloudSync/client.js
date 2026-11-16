@@ -10,17 +10,28 @@
 import { createClient } from '@supabase/supabase-js';
 import { getAccount, saveAccount, clearAccount } from './state';
 
-// The device pushes to the same Supabase project the cloud editor uses. Prefer
-// dedicated CLOUD_SYNC_* env, falling back to the NEXT_PUBLIC_* names so a box
-// that already has them configured just works.
+// The device pushes to the same Supabase project the cloud editor uses.
+//
+// Production defaults are baked in so a stock desktop/Pi install can push with
+// no configuration. Both values are PUBLIC: the cloud editor already ships
+// them to every browser, and access is enforced by RLS on the signed-in
+// user's JWT. (Never put the service-role / secret key here.)
+//
+// Env still wins, so a dev box can point at a staging project: dedicated
+// CLOUD_SYNC_* first, then the NEXT_PUBLIC_* names the cloud build uses.
+const DEFAULT_CLOUD_URL = 'https://asigtwbqjpocokmdokmv.supabase.co';
+const DEFAULT_CLOUD_PUBLISHABLE_KEY = 'sb_publishable_-MTW6C-GF6Mp_vsDW15LpA_sZad7sak';
+
 export function getCloudConfig() {
   const url =
-    process.env.CLOUD_SYNC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || null;
+    process.env.CLOUD_SYNC_SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    DEFAULT_CLOUD_URL;
   const anonKey =
     process.env.CLOUD_SYNC_SUPABASE_ANON_KEY ||
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-    null;
+    DEFAULT_CLOUD_PUBLISHABLE_KEY;
   return { url, anonKey };
 }
 

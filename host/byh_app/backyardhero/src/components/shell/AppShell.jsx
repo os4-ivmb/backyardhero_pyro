@@ -32,7 +32,7 @@ export default function AppShell({ topBar, statusBar, armedRail, children }) {
         {children}
       </main>
       {statusBar ? (
-        <footer className="z-40 border-t border-border-subtle bg-surface-1/95 backdrop-blur">
+        <footer className="relative z-40 border-t border-border-subtle bg-surface-1/95 backdrop-blur">
           {statusBar}
         </footer>
       ) : null}
