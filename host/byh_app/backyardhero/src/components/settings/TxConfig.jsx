@@ -1,6 +1,6 @@
+import useStateFields from "@/store/useStateFields";
 import React from "react";
 import axios from "axios";
-import useStateAppStore from "@/store/useStateAppStore";
 import useAppStore from "@/store/useAppStore";
 import { Field, SegmentedControl, cn, inputClass, selectClass } from "@/design";
 import useDraft from "@/hooks/useDraft";
@@ -31,7 +31,7 @@ const LINK_OPTIONS = [
 // Receiver OTA is not available on the wireless link.
 
 export default function TxConfig() {
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.device_running", "fw_state.settings"]);
   const { systemConfig, saveSystemConfig } = useAppStore();
   const rf = stateData?.fw_state?.settings?.rf || {};
   const sys = systemConfig?.system || {};
@@ -95,8 +95,8 @@ export default function TxConfig() {
         htmlFor="rf-link"
         hint={
           wireless
-            ? "The laptop must be joined to the hub Wi-Fi. Base traffic goes over the hub WebSocket instead of USB. Receiver OTA is not available on this link."
-            : "Hard-wired USB serial. Choose Wireless to use an Omni base as a Wi-Fi hub."
+            ? "The laptop must be joined to the hub Wi-Fi. Dongle traffic goes over the hub WebSocket instead of USB. Receiver OTA is not available on this link."
+            : "Hard-wired USB serial. Choose Wireless to use a hub dongle on Wi-Fi."
         }
       >
         <SegmentedControl
@@ -167,7 +167,7 @@ export default function TxConfig() {
           <Field
             label="Serial device"
             htmlFor="rf-addr"
-            hint="Where the base is mounted. Look for a /dev/tty… path."
+            hint="Where the dongle is mounted. Look for a /dev/tty… path."
           >
             <input
               id="rf-addr"
@@ -182,7 +182,7 @@ export default function TxConfig() {
           <Field
             label="Baud"
             htmlFor="rf-baud"
-            hint="Match the base's firmware."
+            hint="Match the dongle's firmware."
           >
             <input
               id="rf-baud"

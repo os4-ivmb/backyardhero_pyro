@@ -36,6 +36,15 @@ export function getDb() {
     DB_PATH,
     process.env.NODE_ENV === 'production' ? {} : { verbose: console.log },
   );
+  _db.pragma('busy_timeout = 5000');
+  if (process.env.BYH_SQLITE_WAL !== '0') {
+    try {
+      _db.pragma('journal_mode = WAL');
+      _db.pragma('synchronous = NORMAL');
+    } catch (error) {
+      console.warn('WAL unavailable, staying on rollback journal:', error.message);
+    }
+  }
   initializeDatabase(_db);
   return _db;
 }

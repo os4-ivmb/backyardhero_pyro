@@ -1,3 +1,4 @@
+import useStateFields from "@/store/useStateFields";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import {
@@ -10,7 +11,6 @@ import {
   MdRefresh,
   MdCloudDownload,
 } from "react-icons/md";
-import useStateAppStore from "@/store/useStateAppStore";
 import useAppStore from "@/store/useAppStore";
 import { Button, Card, Badge, Modal, cn } from "@/design";
 import {
@@ -87,7 +87,7 @@ function fmtElapsed(startMs, endMs) {
 // ---------------------------------------------------------------------------
 
 export default function DongleFlashPanel() {
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.device_is_armed", "fw_state.dongle_board_type", "fw_state.dongle_board_type_reported", "fw_state.dongle_fw_version", "fw_state.dongle_ota", "fw_state.ota", "fw_state.show_loaded"]);
   const { latestFirmware, fetchLatestFirmware } = useAppStore();
   const [open, setOpen] = useState(false);
   const [latestBusy, setLatestBusy] = useState(false);
@@ -114,11 +114,11 @@ export default function DongleFlashPanel() {
     .includes(receiverOtaPhase);
 
   const blockedReason = isShowLoaded
-    ? "Cannot flash the base while a show is loaded."
+    ? "Cannot flash the dongle while a show is loaded."
     : isArmed
-      ? "Cannot flash the base while the system is armed."
+      ? "Cannot flash the dongle while the system is armed."
       : receiverOtaActive
-        ? "Cannot flash the base while a receiver OTA flash is in flight."
+        ? "Cannot flash the dongle while a receiver OTA flash is in flight."
         : null;
 
   const phase = dongleOta?.phase || "idle";
@@ -128,17 +128,17 @@ export default function DongleFlashPanel() {
   const summary = useMemo(() => {
     if (!dongleOta || phase === "idle") {
       if (dongleFw != null) {
-        return `Base running v${dongleFw}. No update in progress.`;
+        return `Dongle running v${dongleFw}. No update in progress.`;
       }
       return "No update in progress.";
     }
     if (phase === "done") {
-      return `Base update OK${dongleFw != null ? ` (now v${dongleFw})` : ""}.`;
+      return `Dongle update OK${dongleFw != null ? ` (now v${dongleFw})` : ""}.`;
     }
     if (phase === "needs_manual_reset") {
       return dongleOta.stuck_reason === "port_changed_unresolved"
-        ? "Base changed serial ports — pick the right one to continue."
-        : "Waiting for BOOT+RESET on the base.";
+        ? "Dongle changed serial ports — pick the right one to continue."
+        : "Waiting for BOOT+RESET on the dongle.";
     }
     if (phase === "error" || phase === "aborted") {
       const err = dongleOta.error || dongleOta.driver_error || "see logs";
@@ -178,7 +178,7 @@ export default function DongleFlashPanel() {
       });
       setLatestMsg({
         tone: "ok",
-        text: `Flashing base with ${PRODUCT_BIN_PREFIX[data.product] || "firmware"} v${data.version}…`,
+        text: `Flashing dongle with ${PRODUCT_BIN_PREFIX[data.product] || "firmware"} v${data.version}…`,
       });
     } catch (e) {
       setLatestMsg({ tone: "danger", text: e?.response?.data?.error || e.message });
@@ -191,11 +191,11 @@ export default function DongleFlashPanel() {
     <div className="flex flex-col gap-3" data-fw-version={FW_VERSION}>
       <p className="text-xs text-fg-muted leading-snug">
         Push a freshly-built <code>os4_dongle_v&lt;N&gt;.bin</code> (or
-        <code> byh_omni_v&lt;N&gt;.bin</code> for an Omni base) onto the
-        physical base plugged into this host. The bridge releases the
+        <code> byh_omni_v&lt;N&gt;.bin</code> for an omni dongle) onto the
+        physical dongle plugged into this host. The bridge releases the
         USB-CDC port for esptool, writes the new app image at
         <code> 0x10000</code>, and reattaches once the chip reboots — no
-        shell access required. The base keeps no persistent state of its
+        shell access required. The dongle keeps no persistent state of its
         own (radio channel and system ID are re-pushed by the host on every
         reconnect), so an app refresh is always safe. Bootloader and
         partition table never change between builds and aren&apos;t touched.
@@ -262,8 +262,8 @@ export default function DongleFlashPanel() {
 
       {dongleTypeInferred && latestDongleVersion != null && (
         <p className="text-xs text-warn-fg">
-          This base&apos;s firmware doesn&apos;t report its board type, so it&apos;s
-          assumed to be a legacy os4 dongle. If it&apos;s actually an Omni, don&apos;t
+          This dongle&apos;s firmware doesn&apos;t report its board type, so it&apos;s
+          assumed to be a dedicated os4 dongle. If it&apos;s actually an omni, don&apos;t
           use Flash latest — flash it once with <code>flash_omni.py</code> over USB.
         </p>
       )}
@@ -384,7 +384,7 @@ function FlashModal({
       return;
     }
     if (!file) {
-      setSubmitError("Pick a base .bin file first.");
+      setSubmitError("Pick a dongle .bin file first.");
       return;
     }
 
@@ -433,7 +433,7 @@ function FlashModal({
     <Modal
       isOpen={isOpen}
       onClose={onClose}
-      title="Update base firmware"
+      title="Update dongle firmware"
       eyebrow="Host-side flash"
       size="2xl"
       footer={
@@ -498,7 +498,7 @@ function FlashModal({
         </div>
 
         <label className="flex flex-col gap-1 text-sm">
-          <span className="eyebrow">Base firmware (.bin)</span>
+          <span className="eyebrow">Dongle firmware (.bin)</span>
           <div className="flex items-center gap-2">
             <input
               ref={fileInputRef}
@@ -531,9 +531,9 @@ function FlashModal({
             className="mt-1"
           />
           <span className="text-fg-secondary">
-            I understand the base will disconnect for ~10 seconds while
+            I understand the dongle will disconnect for ~10 seconds while
             it&apos;s flashed and rebooted. The host service stays up; the
-            daemon will reconnect to the base automatically afterward.
+            daemon will reconnect to the dongle automatically afterward.
           </span>
         </label>
 
@@ -543,15 +543,15 @@ function FlashModal({
               <MdWarning className="mt-0.5 shrink-0" />
               <div className="flex flex-col gap-2 w-full">
                 <span className="font-semibold">
-                  Base changed serial ports — no BOOT+RESET needed.
+                  Dongle changed serial ports — no BOOT+RESET needed.
                 </span>
                 <span className="text-fg-secondary">
-                  The base reset into its bootloader and re-enumerated on a
+                  The dongle reset into its bootloader and re-enumerated on a
                   different port, but I couldn&apos;t tell which one
                   automatically. Pick it below and retry.
                 </span>
                 <label className="flex flex-col gap-1">
-                  <span className="eyebrow">Base port</span>
+                  <span className="eyebrow">Dongle port</span>
                   <select
                     value={selectedPort}
                     onChange={(e) => setSelectedPort(e.target.value)}
@@ -568,7 +568,7 @@ function FlashModal({
                 </label>
                 {availablePorts.length === 0 && (
                   <span className="text-xs text-fg-muted">
-                    No serial ports detected right now — replug the base, or
+                    No serial ports detected right now — replug the dongle, or
                     BOOT+RESET it and retry.
                   </span>
                 )}
@@ -590,7 +590,7 @@ function FlashModal({
                   Auto-reset failed — manual bootloader entry needed.
                 </span>
                 <ol className="list-decimal ml-5 text-fg-secondary space-y-0.5">
-                  <li>Press and HOLD the BOOT button on the base.</li>
+                  <li>Press and HOLD the BOOT button on the dongle.</li>
                   <li>While still holding BOOT, press and release RESET.</li>
                   <li>Release BOOT.</li>
                   <li>Click the &ldquo;I&apos;ve BOOT+RESET&apos;d it&rdquo; button below.</li>
@@ -657,7 +657,7 @@ function FlashModal({
             )}
             {phase === "done" && (
               <div className="mt-3 flex items-center gap-2 text-sm text-ok-fg">
-                <MdCheckCircle /> Base rebooted; bridge has reattached.
+                <MdCheckCircle /> Dongle rebooted; bridge has reattached.
               </div>
             )}
           </Card>

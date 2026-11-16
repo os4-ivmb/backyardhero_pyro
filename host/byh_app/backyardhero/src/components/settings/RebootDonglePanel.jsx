@@ -63,7 +63,7 @@ export default function RebootDonglePanel() {
   return (
     <div className="flex flex-col gap-3">
       <p className="text-sm text-fg-muted">
-        Restart the base&apos;s ESP32-S2 over the serial link. The transmitter
+        Restart the dongle&apos;s ESP32-S2 over the serial link. The transmitter
         drops off USB and comes back automatically in a couple of seconds.
         Don&apos;t do this while a show is running.
       </p>
@@ -77,7 +77,7 @@ export default function RebootDonglePanel() {
             onClick={arm}
             disabled={busy}
           >
-            {busy ? "Rebooting…" : "Reboot base"}
+            {busy ? "Rebooting…" : "Reboot dongle"}
           </Button>
         ) : (
           <>
@@ -94,7 +94,7 @@ export default function RebootDonglePanel() {
       {error ? (
         <p className="text-sm text-danger-fg">{error}</p>
       ) : doneAt && !busy ? (
-        <p className="text-sm text-fg-muted">Reboot command sent — base should be back online.</p>
+        <p className="text-sm text-fg-muted">Reboot command sent — dongle should be back online.</p>
       ) : null}
     </div>
   );

@@ -1,6 +1,7 @@
+import useStateFields from "@/store/useStateFields";
 import React, { useEffect, useMemo, useState } from "react";
 import useAppStore from "@/store/useAppStore";
-import useStateAppStore, { serverElapsedMs } from "@/store/useStateAppStore";
+import { serverElapsedMs } from "@/store/useStateAppStore";
 import { Button, Field, inputClass } from "@/design";
 import { MdSettingsBackupRestore } from "react-icons/md";
 
@@ -50,7 +51,7 @@ const FIRE_DURATION_MAX = 5000;
 
 export default function ReceiverConfigSettings() {
   const { receivers, fetchReceivers, fetchReceiverConfig } = useAppStore();
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.receivers"]);
   const [draftFire, setDraftFire] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -130,7 +131,7 @@ export default function ReceiverConfigSettings() {
   return (
     <div className="flex flex-col gap-4">
       <div className="text-xs text-fg-muted">
-        Settings here are pushed to every connected receiver via the base's
+        Settings here are pushed to every connected receiver via the dongle's
         radio. Each receiver also persists its values across reboots, so a
         broadcast only needs to happen when you want to change something.
       </div>

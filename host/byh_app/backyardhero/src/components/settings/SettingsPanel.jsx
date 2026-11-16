@@ -54,7 +54,7 @@ import VersionFooter from "./VersionFooter";
 // byh-ap-apply systemd service that install_pi.sh sets up, so showing
 // the tab on a dev laptop or a non-Pi server would just dead-end.
 const TABS = [
-  { key: "dongle", label: "Base", icon: <MdOutlineSettingsRemote />, visible: () => true },
+  { key: "dongle", label: "Dongle", icon: <MdOutlineSettingsRemote />, visible: () => true },
   { key: "receivers", label: "Receivers", icon: <MdOutlineRouter />, visible: () => true },
   { key: "network", label: "Network", icon: <MdOutlineWifi />, visible: (host) => !!host?.is_raspberry_pi },
   { key: "data", label: "Data", icon: <MdStorage />, visible: () => true },
@@ -282,7 +282,7 @@ function DebugTab() {
       </SettingCard>
 
       <SettingCard
-        title="Base firmware update"
+        title="Dongle firmware update"
         eyebrow="Host-side flash"
         className="lg:col-span-2"
       >

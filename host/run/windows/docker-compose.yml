@@ -6,6 +6,9 @@
 
 services:
   firework-system:
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
     image: ${BYH_IMAGE:-os4ivmb/backyardhero:latest}
     container_name: firework-system
     restart: unless-stopped

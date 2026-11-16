@@ -38,7 +38,7 @@ export default function ConsolePanel() {
   const {
     stagedShow, shows, setStagedShow, setLoadedShow, inventoryById, systemConfig,
   } = useAppStore();
-  const { stateData } = useStateAppStore();
+  const stateData = useStateAppStore((s) => s.stateData);
   const { isShowLoaded } = useAppMode();
 
   const [timeCursor, setTimeCursor] = useState(0);

@@ -1,3 +1,4 @@
+import useStateFields from "@/store/useStateFields";
 import React, { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import {
@@ -7,7 +8,7 @@ import {
 import { FiUpload, FiX, FiAlertCircle, FiChevronDown } from "react-icons/fi";
 
 import useAppStore from "@/store/useAppStore";
-import useStateAppStore, { serverElapsedMs } from "@/store/useStateAppStore";
+import { serverElapsedMs } from "@/store/useStateAppStore";
 import useAppMode from "@/design/useAppMode";
 import useShowReceiverVerification from "@/util/useShowReceiverVerification";
 import { Card, Button, Badge, Section, cn } from "@/design";
@@ -155,7 +156,7 @@ function MobileShowPicker() {
 // single tap-friendly card.
 function MobileShowControl({ allReceiversOnline, hasErrors, errors, isReadyToFire, countdownSeconds }) {
   const { stagedShow, setStagedShow } = useAppStore();
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.show_running", "fw_state.waiting_for_client_start", "fw_state.dstc", "fw_state.loaded_show_id", "fw_state.proto_handler_status", "fw_state.sst", "fw_state.receivers", "fw_state.fire_check_failures", "fw_state.proto_handler_errors"]);
   const { mode, isShowLoaded, protoStatus, isArmed, startSwActive } = useAppMode();
   const showRcvVerification = useShowReceiverVerification();
 
@@ -498,7 +499,7 @@ function MobileShowDetailsCard({ errors = [], protoHandlerStatus }) {
 
 export default function MobileConsolePanel() {
   const { stagedShow, shows, setStagedShow, setLoadedShow, inventoryById, systemConfig } = useAppStore();
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.show_running", "fw_state.waiting_for_client_start", "fw_state.dstc", "fw_state.loaded_show_id", "fw_state.proto_handler_status", "fw_state.sst", "fw_state.receivers", "fw_state.fire_check_failures", "fw_state.proto_handler_errors"]);
   const { isShowLoaded } = useAppMode();
   const [countdownSeconds, setCountdownSeconds] = useState(null);
 

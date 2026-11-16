@@ -42,7 +42,7 @@ import DataSettings from "../../settings/DataSettings";
 const SECTIONS = [
   {
     key: "dongle",
-    label: "Base",
+    label: "Dongle",
     description: "Brightness, retransmit, USB or wireless hub, debug mode.",
     icon: <MdOutlineSettingsRemote />,
     visible: () => true,
@@ -71,7 +71,7 @@ const SECTIONS = [
   {
     key: "debug",
     label: "Debug",
-    description: "Spectrum scan, daemon timing, OTA / base flash.",
+    description: "Spectrum scan, daemon timing, OTA / dongle flash.",
     icon: <MdOutlineBugReport />,
     visible: () => true,
   },
@@ -153,7 +153,7 @@ function DebugSection() {
       <SettingCard title="OTA firmware flash" eyebrow="Receiver update">
         <OtaFlashPanel />
       </SettingCard>
-      <SettingCard title="Base firmware update" eyebrow="Host-side flash">
+      <SettingCard title="Dongle firmware update" eyebrow="Host-side flash">
         <DongleFlashPanel />
       </SettingCard>
     </div>

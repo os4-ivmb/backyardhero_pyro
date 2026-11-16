@@ -2,6 +2,8 @@ import asyncio
 import os
 import socket
 import errno
+import tempfile
+import traceback
 import websockets
 import json
 import time
@@ -28,6 +30,8 @@ ERR_LOG_PATH = os.path.join(_DATA_DIR, "log", "daemon.err")
 # "browser sees the new value" -- much faster than the previous
 # polling-on-a-500ms-sleep loop.
 STATE_SOCKET_PATH = os.path.join(_RUN_DIR, "byh_state.sock")
+STATE_UDP_PORT = int(os.environ.get("BYH_STATE_UDP_PORT", "8091"))
+CLIENT_COUNT = 0
 
 # Prime psutil.cpu_percent so subsequent non-blocking calls return a real
 # delta-since-last-call instead of 0.0. Without this we'd either have to
@@ -43,12 +47,17 @@ class WEB_ACT_STATE(Enum):
 
 
 def updateWebLEDState(value):
-    # Read the JSON file
+    temporary = None
     try:
-        with open(LED_FILE_PATH, 'w') as file:
-            file.write(str(value))
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+        fd, temporary = tempfile.mkstemp(prefix=".webact.", suffix=".tmp", dir=_DATA_DIR)
+        with os.fdopen(fd, "w") as stream:
+            stream.write(str(value))
+        os.replace(temporary, LED_FILE_PATH)
+    except OSError as exc:
+        print(f"Cannot update web activity: {exc}")
+    finally:
+        if temporary is not None and os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 DAEMON_INAC_SECONDS = 10
@@ -224,6 +233,12 @@ async def _bind_state_socket():
     fails we fall back to the file-watcher path (the daemon's
     update_state_file write still happens, so we never go blind).
     """
+    if not (os.name != "nt" and hasattr(socket, "AF_UNIX")):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setblocking(False)
+        sock.bind(("127.0.0.1", STATE_UDP_PORT))
+        return sock
+    os.makedirs(_RUN_DIR, exist_ok=True)
     try:
         if os.path.exists(STATE_SOCKET_PATH):
             os.unlink(STATE_SOCKET_PATH)
@@ -260,6 +275,8 @@ def _ingest_state_datagram(data):
     global LATEST_FW_STATE, LATEST_FW_STATE_TS, STATE_VERSION
     try:
         fw_state = json.loads(data.decode("utf-8"))
+        if not isinstance(fw_state, dict):
+            raise ValueError("State must be an object")
     except Exception as e:
         print(f"state datagram json error: {e}")
         return
@@ -284,7 +301,7 @@ async def state_socket_consumer():
     sock = await _bind_state_socket()
     if sock is None:
         # No socket -> rely entirely on the file watcher.
-        return
+        raise RuntimeError("State socket unavailable")
 
     loop = asyncio.get_running_loop()
 
@@ -315,6 +332,17 @@ async def state_socket_consumer():
         # so we can't `await` here. Schedule the notify_all in a task.
         asyncio.create_task(_notify())
 
+    if not (os.name != "nt" and hasattr(socket, "AF_UNIX")):
+        class StateProtocol(asyncio.DatagramProtocol):
+            def datagram_received(self, data, _addr):
+                _ingest_state_datagram(data)
+                asyncio.create_task(_notify())
+        transport, _ = await loop.create_datagram_endpoint(StateProtocol, sock=sock)
+        try:
+            await asyncio.Future()
+        finally:
+            transport.close()
+        return
     loop.add_reader(sock.fileno(), on_readable)
     try:
         # Park forever -- the add_reader callback does all the work.
@@ -322,7 +350,7 @@ async def state_socket_consumer():
         while True:
             await asyncio.sleep(3600)
     except asyncio.CancelledError:
-        pass
+        raise
     finally:
         try:
             loop.remove_reader(sock.fileno())
@@ -343,6 +371,9 @@ async def _publish_new_state(fw_state):
     """Adopt a fresh fw_state snapshot and notify all WS clients."""
     global LATEST_FW_STATE, LATEST_FW_STATE_TS, STATE_VERSION
     if not fw_state:
+        return
+    if (LATEST_FW_STATE and fw_state.get("daemon_lup", 0) <= LATEST_FW_STATE.get("daemon_lup", 0)
+            and time.time() - LATEST_FW_STATE_TS <= 3.0):
         return
     LATEST_FW_STATE = fw_state
     LATEST_FW_STATE_TS = time.time()
@@ -377,7 +408,9 @@ async def state_file_watcher():
     # doesn't make the watch go stale. debounce=10ms folds a
     # mkstemp+rename pair into one wake-up.
     state_dir = os.path.dirname(STATE_FILE_PATH) or "."
-    async for _changes in awatch(state_dir, debounce=10):
+    os.makedirs(state_dir, exist_ok=True)
+    async for _changes in awatch(state_dir, debounce=10, recursive=False,
+                                watch_filter=lambda _change, path: path == STATE_FILE_PATH):
         await _publish_new_state(_read_fw_state_from_file())
 
 
@@ -393,6 +426,7 @@ async def aux_watcher():
     except ImportError:
         return
 
+    os.makedirs(_RUN_DIR, exist_ok=True)
     aux_paths = {CURSOR_FILE_PATH, FIRING_FILE_PATH}
 
     def _aux_filter(_change, path):
@@ -406,7 +440,7 @@ async def aux_watcher():
     # watch the directory (not the files directly) so the daemon's atomic
     # write/rename survives and a not-yet-created file isn't a startup error.
     async for _changes in awatch(
-        "/tmp", debounce=10, recursive=False, watch_filter=_aux_filter
+        _RUN_DIR, debounce=10, recursive=False, watch_filter=_aux_filter
     ):
         STATE_VERSION += 1
         async with STATE_COND:
@@ -416,7 +450,7 @@ async def aux_watcher():
 # Keys that change on every daemon snapshot or every sample without the
 # operator-visible state changing. They are left out of the change signature
 # (T19) and carried by the heartbeat instead.
-_VOLATILE_FW_STATE_KEYS = ("daemon_lup", "daemon_active")
+_VOLATILE_FW_STATE_KEYS = ("daemon_lup", "daemon_active", "threads")
 
 
 def _stable_signature(fw_state_live, aux):
@@ -432,8 +466,11 @@ def _stable_signature(fw_state_live, aux):
         "fw_error": aux.get("fw_error"),
         "fw_d_error": aux.get("fw_d_error"),
     }
-    encoded = json.dumps(snapshot, sort_keys=True, default=str).encode("utf-8")
-    return hashlib.sha1(encoded).hexdigest()
+    encoded = json.dumps(snapshot, default=str).encode("utf-8")
+    return hashlib.blake2b(encoded, digest_size=16).hexdigest()
+
+
+_RECEIVER_CONFIG_CACHE = (None, None)
 
 
 def _split_receivers(fw_state):
@@ -443,6 +480,7 @@ def _split_receivers(fw_state):
     a separate `_rcfg` message; the regular payload carries only the live
     part plus `receivers_rev`, and the UI store joins them back so every
     component still reads receivers[ident].cues / .label / .status."""
+    global _RECEIVER_CONFIG_CACHE
     receivers = (fw_state or {}).get("receivers")
     if not isinstance(receivers, dict):
         return None, None, None
@@ -452,9 +490,10 @@ def _split_receivers(fw_state):
             continue
         config[ident] = {k: v for k, v in rcv.items() if k not in ("status", "drift")}
         live[ident] = {k: rcv[k] for k in ("status", "drift") if k in rcv}
-    rev = hashlib.sha1(
-        json.dumps(config, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()[:16]
+    config_json = json.dumps(config, sort_keys=True, default=str)
+    if config_json != _RECEIVER_CONFIG_CACHE[0]:
+        _RECEIVER_CONFIG_CACHE = (config_json, hashlib.sha1(config_json.encode("utf-8")).hexdigest()[:16])
+    rev = _RECEIVER_CONFIG_CACHE[1]
     return config, live, rev
 
 
@@ -477,7 +516,7 @@ async def _encoded_state():
         fw_state = dict(fw_state)
         fw_state["receivers"] = live
         fw_state["receivers_rev"] = rev
-        rcfg_bytes = json.dumps({"_rcfg": config, "rev": rev})
+        rcfg_bytes = '{"_rcfg":' + _RECEIVER_CONFIG_CACHE[0] + ',"rev":' + json.dumps(rev) + '}'
     else:
         rcfg_bytes = None
     payload = dict(aux)
@@ -491,7 +530,7 @@ async def _encoded_state():
 def _heartbeat_bytes(aux):
     """Small keep-alive. Carries the fields left out of the signature so
     the UI's daemon-liveness and system-stats indicators stay current."""
-    fw_state = LATEST_FW_STATE or {}
+    fw_state = _augment_fw_state(dict(LATEST_FW_STATE)) if LATEST_FW_STATE else {}
     return json.dumps({
         "_hb": True,
         "fw_last_update": int(time.time() * 1000),
@@ -546,6 +585,8 @@ async def file_update_server(websocket):
     rate-limits sends to MIN_SEND_INTERVAL_S so a chatty daemon can't drown
     the WS pipe. Payloads are encoded once and shared by every client.
     """
+    global CLIENT_COUNT
+    CLIENT_COUNT += 1
     updateWebLEDState(WEB_ACT_STATE.RUNNING.value)
     last_signature = None
     last_full_send_ts = 0.0
@@ -607,10 +648,23 @@ async def file_update_server(websocket):
                 await websocket.send(data)
     except websockets.exceptions.ConnectionClosed:
         print("Client disconnected")
-        updateWebLEDState(WEB_ACT_STATE.DISCONNECTED.value)
     except Exception as e:
-        updateWebLEDState(WEB_ACT_STATE.CRASHED.value)
         print(f"Error: {e}")
+    finally:
+        CLIENT_COUNT -= 1
+        updateWebLEDState(WEB_ACT_STATE.RUNNING.value if CLIENT_COUNT else WEB_ACT_STATE.DISCONNECTED.value)
+
+
+async def _supervise(name, factory):
+    while True:
+        try:
+            await factory()
+            print(f"State pump {name} returned; restarting")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            traceback.print_exc()
+        await asyncio.sleep(1)
 
 
 async def main():
@@ -622,9 +676,9 @@ async def main():
     # Spin up the state pumps before accepting clients so an
     # immediately-connected client doesn't see stale state.
     pumps = [
-        asyncio.create_task(state_socket_consumer(), name="state_socket"),
-        asyncio.create_task(state_file_watcher(),    name="state_file"),
-        asyncio.create_task(aux_watcher(),           name="aux_watch"),
+        asyncio.create_task(_supervise("state_socket", state_socket_consumer), name="state_socket"),
+        asyncio.create_task(_supervise("state_file", state_file_watcher), name="state_file"),
+        asyncio.create_task(_supervise("aux_watch", aux_watcher), name="aux_watch"),
     ]
 
     # Per-message deflate is the websockets default. On a LAN the CPU cost
@@ -632,13 +686,14 @@ async def main():
     # WS_COMPRESSION=none turns it off so the two can be compared on the Pi.
     compression = None if os.environ.get("WS_COMPRESSION", "deflate").lower() == "none" else "deflate"
     server = await websockets.serve(file_update_server, "0.0.0.0", 8090,
-                                    compression=compression)
+                                    compression=compression, ping_interval=10, ping_timeout=10)
     print("WebSocket server is running")
     try:
         await server.wait_closed()
     finally:
         for t in pumps:
             t.cancel()
+        await asyncio.gather(*pumps, return_exceptions=True)
 
 
 if __name__ == "__main__":

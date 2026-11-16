@@ -70,7 +70,7 @@ On power-up, all 3 LEDs will fade white, then display a battery level indication
 
 
 ## Dongle and Hub Modes
-With the base expansion board plugged into the output header, the omni boots as a base instead of a receiver. The module's 200kΩ resistor on the board-count sense line is what selects this; the serial log prints `Board-count ADC:` and `Role:` at boot so the threshold can be checked. A reading of 7000 or more means the base expansion board is plugged in (`DONGLE_SENSE_ADC_MIN` in `byh_omni.ino`); lower readings boot as a receiver, with the cue-board count taken from the same reading. An omni with nothing plugged into the header also boots as a dongle.
+With the dongle host module plugged into the output header, the omni boots as a dongle instead of a receiver. The module's 200kΩ resistor on the board-count sense line is what selects this; the serial log prints `Board-count ADC:` and `Role:` at boot so the threshold can be checked. A reading of 7000 or more means the host module is plugged in (`DONGLE_SENSE_ADC_MIN` in `byh_omni.ino`); lower readings boot as a receiver, with the cue-board count taken from the same reading. An omni with nothing plugged into the header also boots as a dongle.
 
 The startup sequence is the same, except the third fade is **yellow** instead of purple.
 
@@ -91,7 +91,7 @@ The startup sequence is the same, except the third fade is **yellow** instead of
 - `wifi_set {"txpower":8.5}` sets the AP transmit power in dBm (-1 to 19.5, rounded to the nearest step the ESP32 supports). It applies immediately and is kept across reboots. The default is a low 8.5 dBm: the phone is normally within a few metres, and a strong WiFi transmitter on the same board makes the nRF24 receiver less sensitive whatever the channel. Raise it only if the phone loses the hub at the distance you need. `wifi_cfg` and `/api/info` report it as `txpower_dbm`. The AP always runs at 20 MHz bandwidth.
 - `wifi_reset` restores the SSID and password defaults
 
-Base expansion board wiring is configurable at the top of `byh_omni.ino`: input indexes `HOST_IN_ARM_INDEX` (0), `HOST_IN_START_INDEX` (1), `HOST_IN_MANUAL_INDEX` (2), `HOST_IN_HUB_INDEX` (3), the 433MHz output `HOST_OUT_RF433_INDEX` (0), and `HOST_STATUS_PIXEL_COUNT`.
+Host module wiring is configurable at the top of `byh_omni.ino`: input indexes `HOST_IN_ARM_INDEX` (0), `HOST_IN_START_INDEX` (1), `HOST_IN_MANUAL_INDEX` (2), `HOST_IN_HUB_INDEX` (3), the 433MHz output `HOST_OUT_RF433_INDEX` (0), and `HOST_STATUS_PIXEL_COUNT`.
 
 
 ## Building from a Bare Board

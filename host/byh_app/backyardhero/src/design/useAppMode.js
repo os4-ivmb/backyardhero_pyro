@@ -84,6 +84,7 @@ export const APP_MODES = {
 
 export default function useAppMode() {
   const stateData = useStateAppStore((s) => s.stateData);
+  const clientRxAt = useStateAppStore((s) => s.clientRxAt);
   const fw = stateData?.fw_state || {};
 
   // 1s liveness tick. `wsAlive` (and therefore `mode`) is time-based:
@@ -105,8 +106,8 @@ export default function useAppMode() {
     // `_clientRxAt` is stamped by useStateAppStore when the WS message
     // arrives, so it's always in this browser's clock domain.
     const wsAlive =
-      stateData?._clientRxAt &&
-      Date.now() - stateData._clientRxAt < 4500;
+      clientRxAt &&
+      Date.now() - clientRxAt < 4500;
 
     const showLoaded = !!fw.show_loaded || !!fw.loaded_show_id;
     const showStaged = false; // Always derived from useAppStore at the call site.
@@ -139,7 +140,7 @@ export default function useAppMode() {
     // loaded" depends on useAppStore and is computed at the consumer site
     // when needed. The chrome-level mode here is driven only by daemon state.
   }, [
-    stateData?._clientRxAt,
+    clientRxAt,
     stateData?.fw_state,
     stateData?.fw_d_error,
     stateData?.fw_error,
@@ -179,8 +180,8 @@ export default function useAppMode() {
     deviceRunning: !!fw.device_running,           // dongle heartbeat in last 10s
     deviceIsTransmitting: !!fw.device_is_transmitting, // dongle sent traffic in last 10s
     wsAlive:
-      !!stateData?._clientRxAt &&
-      Date.now() - stateData._clientRxAt < 4500,
+      !!clientRxAt &&
+      Date.now() - clientRxAt < 4500,
     activeProtocol: fw.active_protocol || null,
     fwCursor: stateData?.fw_cursor ?? null,
   };

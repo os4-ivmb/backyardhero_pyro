@@ -1,3 +1,4 @@
+import useStateFields from "@/store/useStateFields";
 import useAppStore from "@/store/useAppStore"
 import useStateAppStore, { serverElapsedMs } from "@/store/useStateAppStore";
 import { asyncConfirm } from "@/components/common/AsyncPrompt";
@@ -219,7 +220,7 @@ function SingleReceiver({
   // to just `_clockOffsetMs` so the calc lives in a single clock domain
   // without triggering a re-render on every state tick.
   const clockOffsetMs = useStateAppStore(
-    (s) => s.stateData?._clockOffsetMs ?? 0,
+    (s) => s.clockOffsetMs,
   );
 
   const handleTargetClick = (target, item, event) => {
@@ -477,7 +478,7 @@ function SingleReceiver({
               ${retryBusy
                 ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
                 : 'bg-gray-700 hover:bg-gray-600 text-gray-200'}`}
-            title="Retry connection (re-register with base)"
+            title="Retry connection (re-register with dongle)"
           >
             <MdRefresh className={retryBusy ? 'animate-spin' : ''} />
             Retry
@@ -647,7 +648,7 @@ function SingleReceiver({
               }
               className="h-4 w-4"
             />
-            <span>Enabled (poll from base)</span>
+            <span>Enabled (poll from dongle)</span>
           </label>
           <label className="flex flex-col gap-1">
             <span className="text-xs text-gray-400">Label</span>
@@ -941,7 +942,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       fetchReceiverConfig,
       latestFirmware,
     } = useAppStore();
-    const { stateData } = useStateAppStore()
+    const stateData = useStateFields(["fw_state.receivers", "fw_state.show_loaded"])
     // Latest published firmware (all products), surfaced per-card as an
     // "update available" badge; each card picks its own product from its
     // board type. Null entries when offline / not yet fetched (no badge).
@@ -1144,7 +1145,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
     // Clock skew between this host and the daemon's broadcast timestamps.
     // Mirrors the per-card calc in SingleReceiver so "offline" here agrees
     // with the WiFi-icon tone the operator sees on each card.
-    const clockOffsetMs = stateData?._clockOffsetMs ?? 0;
+    const clockOffsetMs = useStateAppStore((s) => s.clockOffsetMs);
 
     // A receiver is "connected" if the dongle heard from it within the last
     // 10s; otherwise we treat it as dead/offline (same rule as the card).
@@ -1368,7 +1369,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
     ]);
 
     const lockTitle = unlocked
-      ? (hasPendingEdits ? 'Save changes & reload base' : 'Lock (no changes)')
+      ? (hasPendingEdits ? 'Save changes & reload dongle' : 'Lock (no changes)')
       : (isShowLoaded
         ? 'Cannot edit while a show is loaded — unload first'
         : 'Unlock to edit receivers');
@@ -1440,7 +1441,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       if (type === "BKYD_TS_24_1" && !/^RX\d+$/i.test(id)) {
         setAddError(
           'BKYD_TS_24_1 receivers must be named "RX<digits>" (e.g. RX163) — ' +
-          'the base parses the node ID out of the ident.'
+          'the dongle parses the node ID out of the ident.'
         );
         return;
       }
@@ -1882,7 +1883,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                   </div>
                 )}
                 <p className="mt-2 text-xs text-gray-500">
-                  After adding, click the lock to save and reload receivers on the base.
+                  After adding, click the lock to save and reload receivers on the dongle.
                 </p>
               </form>
             )}

@@ -36,6 +36,7 @@ play instant to launch ffplay, to hide the player's own startup latency
 import asyncio
 import json
 import os
+from contextlib import closing
 import sqlite3
 import time
 
@@ -160,7 +161,7 @@ def load_manifest(show_id):
     track to the firing clock instead of accumulating spawn/decode drift.
     """
     try:
-        with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True) as conn:
+        with closing(sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5.0)) as conn:
             row = conn.execute(
                 "SELECT audio_file FROM Show WHERE id = ?", (show_id,)
             ).fetchone()

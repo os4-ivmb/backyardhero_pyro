@@ -5,7 +5,7 @@ import { FaCheck, FaTimes } from "react-icons/fa";
 
 export default function ShowHealth() {
   const { stagedShow, systemConfig, setStagedShow } = useAppStore();
-  const { stateData } = useStateAppStore();
+  const stateData = useStateAppStore((s) => s.stateData);
 
   const healthMetrics = useMemo(() => {
     if (!stagedShow || !stagedShow.items) {

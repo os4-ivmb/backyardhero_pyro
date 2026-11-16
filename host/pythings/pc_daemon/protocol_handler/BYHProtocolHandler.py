@@ -1,14 +1,12 @@
 import os
 import tempfile
 import time
-import serial
 import sqlite3
 import threading
 from collections import deque
-from datetime import datetime
 import json
 from enum import Enum
-from led_control import *
+from led_control import ERR_STATE, RUN_STATE
 from config_loader import load_system_config
 
 from .OtaFlashDriver import OtaFlashDriver
@@ -297,7 +295,7 @@ class BYHProtocolHandler:
         poll list."""
         out = {}
         try:
-            conn = sqlite3.connect(db_filepath)
+            conn = sqlite3.connect(db_filepath, timeout=5.0)
             try:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
@@ -978,7 +976,7 @@ class BYHProtocolHandler:
         check below for any future single-zone rework).
         """
         try:
-            conn = sqlite3.connect(db_filepath)
+            conn = sqlite3.connect(db_filepath, timeout=5.0)
             try:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
@@ -1442,7 +1440,7 @@ class BYHProtocolHandler:
                         print(f"OTA: feed_event failed: {e}")
                     if msg_obj.get('phase') not in ('ack', 'nack'):
                         self.parent.mark_state_dirty()
-            except json.JSONDecodeError as e:
+            except json.JSONDecodeError:
                 print("Bad JSON status")
 
         return True
@@ -1696,8 +1694,6 @@ class BYHProtocolHandler:
     #Figure out which ones we need to preload (native) and which we fire via. daemon (433 Bilusocn).. or if we have zones+targets that we cant fire. Annotates firing array.
     def load_targets_to_devices(self, firing_array, showId):
         final_fire_array = []
-        errors = []
-
         async_device_load_dict = {}
 
         for target in firing_array:
@@ -1754,7 +1750,7 @@ class BYHProtocolHandler:
             return False
 
         print(f"Loaded firing array for Show {show_id}")
-        if self.parent.debug_mode:
+        if self.parent.debug_enabled():
             print(self.firing_array)
 
         if self._load_abort.is_set():
@@ -2365,7 +2361,8 @@ class BYHProtocolHandler:
         self.parent.led_handler.update("show_run_state", RUN_STATE.RUNNING.value)
         print("Started show!")
         self.running_show = True  # Set running state
-        print(self.firing_array)
+        if self.parent.debug_enabled():
+            print(self.firing_array)
         pause_offset = 0
         # All in-show timing is on the monotonic clock. firing_array
         # items carry RELATIVE offsets from t=0 so the wall clock

@@ -1,8 +1,8 @@
+import useStateFields from "@/store/useStateFields";
 import React, { useEffect, useState } from "react";
 import axios from "axios";
 import { FaTriangleExclamation } from "react-icons/fa6";
 
-import useStateAppStore from "@/store/useStateAppStore";
 import { Toggle, Badge, Dot, cn } from "@/design";
 
 // ---------------------------------------------------------------------------
@@ -135,7 +135,7 @@ function OverrideRow({ def, gpio, onCommit }) {
 }
 
 export default function GpioOverridePanel() {
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.gpio"]);
   const gpio = stateData?.fw_state?.gpio || {};
 
   const commit = async (key, active, on) => {
@@ -165,7 +165,7 @@ export default function GpioOverridePanel() {
       <div className="flex items-start gap-2 rounded-md border border-warn/40 bg-warn-bg/40 px-3 py-2">
         <FaTriangleExclamation className="mt-0.5 shrink-0 text-warn" />
         <p className="text-xs text-fg-secondary leading-snug">
-          Software overrides replace the base's real switch readings. Forcing{" "}
+          Software overrides replace the dongle's real switch readings. Forcing{" "}
           <span className="font-semibold text-fg-primary">Arm</span> or{" "}
           <span className="font-semibold text-fg-primary">Manual fire</span> on
           can take the system live without anyone touching the box. Use for

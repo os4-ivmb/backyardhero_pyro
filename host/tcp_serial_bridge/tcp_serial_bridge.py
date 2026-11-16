@@ -555,6 +555,7 @@ class _TxDropReporter:
                    'count': self._count, 'reason': self._reason}
             self._count = 0
             self._last_sent = now
+        print(f"tcp_to_serial: dropped {msg['count']} lines ({msg['reason']})")
         try:
             # Leading newline: never splice onto a partial dongle line.
             client.sendall(('\n' + json.dumps(msg) + '\n').encode('utf-8'))
@@ -568,20 +569,17 @@ _tx_drops = _TxDropReporter()
 def _hub_write_line(line, client=None):
     link = _current_hub()
     if link is None or not link.connected:
-        print(f"tcp_to_serial: hub offline, dropping {len(line)}B")
         _tx_drops.note(client, "hub offline")
         return
     try:
         link.send_line(line)
-    except HubLinkError as e:
-        print(f"tcp_to_serial: hub write failed ({e}); dropping {len(line)}B")
+    except HubLinkError:
         _tx_drops.note(client, "hub write failed")
         _drop_hub(link)
 
 
 def process_command(command_data, client_socket):
     """Process configuration commands from the client"""
-    global SERIAL_CONFIG
     
     try:
         # Parse the command
@@ -676,7 +674,7 @@ def _notify_serial_reopened(client):
         print(f"_notify_serial_reopened: could not notify client: {e}")
 
 
-def serial_to_tcp(client):
+def serial_to_tcp(client, stop):
     """Forward data from serial to TCP client.
 
     NOTE: We deliberately read only what's already in pyserial's input buffer
@@ -696,6 +694,7 @@ def serial_to_tcp(client):
     """
     global serial_conn
     POLL_INTERVAL_S = 0.001   # 1ms idle poll -- plenty fast for full-speed USB CDC
+    empty_polls = 0
     last_disconnect_log = 0.0
     # Monotonic timestamp of the last byte we actually read from serial.
     # Drives the stale-handle watchdog (see SERIAL_SILENCE_TIMEOUT_S). Reset
@@ -704,7 +703,7 @@ def serial_to_tcp(client):
     last_rx = time.monotonic()
     hub_stats = {'last_rx': last_rx, 'last_log': 0.0}
     try:
-        while True:
+        while not stop.is_set():
             _tx_drops.flush(client)
             if SERIAL_CONFIG.get('link') == 'wireless':
                 # Hub traffic does not use the USB port, so a dongle
@@ -762,6 +761,7 @@ def serial_to_tcp(client):
                     continue
 
             if data:
+                empty_polls = 0
                 last_rx = time.monotonic()
                 try:
                     client.sendall(data)
@@ -790,17 +790,18 @@ def serial_to_tcp(client):
                         _notify_serial_reopened(client)
                     last_rx = time.monotonic()
                     continue
-                time.sleep(POLL_INTERVAL_S)
+                empty_polls += 1
+                stop.wait(0.005 if empty_polls >= 50 else POLL_INTERVAL_S)
     except Exception as e:
         print(f"Error in serial_to_tcp: {e}")
 
-def tcp_to_serial(client):
+def tcp_to_serial(client, stop):
     """Forward data from TCP client to serial, process commands"""
     global serial_conn
     
     try:
         buffer = b''
-        while True:
+        while not stop.is_set():
             data = client.recv(2048)
             if not data:
                 break  # Client disconnected
@@ -854,13 +855,11 @@ def tcp_to_serial(client):
                                 # Race: closed by serial_to_tcp between
                                 # the outer check and lock acquisition.
                                 raise serial.SerialException("closed mid-write")
-                    except (OSError, serial.SerialException) as e:
+                    except (OSError, serial.SerialException):
                         # Dongle disappeared between checks. Drop this
                         # outbound line (host will retry the OTA chunk
                         # via timeout) and let serial_to_tcp's auto-
                         # reconnect bring the link back.
-                        print(f"tcp_to_serial: write error ({e}); "
-                              f"dropping {len(out)}B and continuing")
                         _tx_drops.note(client, "dongle write error")
                         with serial_lock:
                             if serial_conn:
@@ -873,21 +872,22 @@ def tcp_to_serial(client):
                     # Can't send now -- drop the line rather than letting
                     # the buffer grow unbounded while the dongle is offline.
                     # Host-side OTA retry will resend whatever we lose.
-                    print(f"tcp_to_serial: serial offline, "
-                          f"dropping {len(out)}B")
                     _tx_drops.note(client, "dongle offline")
 
     except Exception as e:
         print(f"Error in tcp_to_serial: {e}")
+    finally:
+        stop.set()
 
 def handle_client(client_socket):
     """Handle a client connection"""
     client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     print("Client connected")
     
+    stop = threading.Event()
     # Create threads for bidirectional communication
-    thread_serial_to_tcp = threading.Thread(target=serial_to_tcp, args=(client_socket,))
-    thread_tcp_to_serial = threading.Thread(target=tcp_to_serial, args=(client_socket,))
+    thread_serial_to_tcp = threading.Thread(target=serial_to_tcp, args=(client_socket, stop,))
+    thread_tcp_to_serial = threading.Thread(target=tcp_to_serial, args=(client_socket, stop,))
     
     thread_serial_to_tcp.daemon = True
     thread_tcp_to_serial.daemon = True
@@ -897,6 +897,12 @@ def handle_client(client_socket):
     
     # Wait for client thread to finish
     thread_tcp_to_serial.join()
+    stop.set()
+    try:
+        client_socket.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    thread_serial_to_tcp.join(timeout=2.0)
     client_socket.close()
     print("Client disconnected")
 
@@ -982,7 +988,6 @@ def flash_set_port(port: str) -> None:
     only update the config; the forwarder threads' _try_auto_reopen loop
     picks it up on its next iteration.
     """
-    global SERIAL_CONFIG
     if port and port != SERIAL_CONFIG.get('port'):
         print(f"[bridge] flasher set serial port to {port}")
         SERIAL_CONFIG['port'] = port

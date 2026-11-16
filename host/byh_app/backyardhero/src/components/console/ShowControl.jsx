@@ -489,7 +489,7 @@ export default function ShowControl({
   onAudioInactive,
 }) {
   const { stagedShow, setStagedShow, updateShow, systemConfig } = useAppStore();
-  const { stateData } = useStateAppStore();
+  const stateData = useStateAppStore((s) => s.stateData);
   const { mode, isShowLoaded, protoStatus, isArmed, startSwActive } = useAppMode();
   // Receiver verification for the staged show. Drives the Load Show
   // disabled/blocked state below: if the show references a missing /

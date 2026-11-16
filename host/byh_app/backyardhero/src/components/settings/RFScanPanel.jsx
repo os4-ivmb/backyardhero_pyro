@@ -1,7 +1,7 @@
+import useStateFields from "@/store/useStateFields";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { MdClose, MdRadar, MdWarning } from "react-icons/md";
-import useStateAppStore from "@/store/useStateAppStore";
 import { Button, Card, IconButton, Badge, inputClass, cn } from "@/design";
 
 // Wi-Fi 2.4 GHz channel centers in MHz (US chs 1-11, EU adds 12-13).
@@ -34,7 +34,7 @@ const wifiBandColor = (band) => {
 };
 
 export default function RFScanPanel() {
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.device_is_armed", "fw_state.settings", "fw_state.show_loaded"]);
 
   const [open, setOpen] = useState(false);
   const [scan, setScan] = useState(null);     // last fetched scan payload
@@ -130,7 +130,7 @@ export default function RFScanPanel() {
   return (
     <div className="flex flex-col gap-3">
       <p className="text-xs text-fg-muted leading-snug">
-        Sample every nRF24 channel using the base's RPD register to find
+        Sample every nRF24 channel using the dongle's RPD register to find
         the least congested band. Picks up Wi-Fi, BLE, microwaves — anything
         radiating &gt; -64 dBm during the sweep.
       </p>

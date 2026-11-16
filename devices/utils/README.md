@@ -28,7 +28,7 @@ artifacts, and stores `NODE_ID`, ident, and board version in the
 mirrors `flash_receiver.py`: routine updates preserve that partition,
 `--full` and `--set-id` provision it with `SETID` (ident defaults to
 `RX<node_id>`), and `--set-board` sets the board version. With the
-base expansion board plugged in the omni boots as a base instead, which
+dongle host module plugged in the omni boots as a dongle instead, which
 ignores its node ID.
 
 ### One-time setup (host)

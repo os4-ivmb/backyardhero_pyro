@@ -156,6 +156,14 @@ async function handleImport(req, res) {
     stagedPath = null;
     swapCompleted = true;
 
+    // Backup retention is best effort: cleanup failure must not roll back a valid import.
+    try {
+      const dir = path.dirname(DB_PATH);
+      const prefix = `${path.basename(DB_PATH)}.backup-`;
+      const backups = (await fs.promises.readdir(dir)).filter((name) => name.startsWith(prefix)).sort().reverse();
+      for (const name of backups.slice(5)) await fs.promises.unlink(path.join(dir, name));
+    } catch (error) { console.warn('Could not prune database backups:', error.message); }
+
     // Only schedule the restart AFTER a verified, completed swap.
     res.once('finish', () => {
       setTimeout(() => process.exit(0), 500);

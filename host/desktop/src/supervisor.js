@@ -65,7 +65,30 @@ class Supervisor extends EventEmitter {
     } catch {
       /* best effort */
     }
-    s.logStream = fs.createWriteStream(file, { flags: 'a' });
+    let fd = fs.openSync(file, 'a');
+    let bytes = fs.fstatSync(fd).size;
+    let closed = false;
+    s.logStream = {
+      write(data) {
+        if (closed) return;
+        const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+        let offset = 0;
+        while (offset < buffer.length) {
+          if (bytes >= 10 * 1024 * 1024) {
+            fs.closeSync(fd);
+            try { fs.unlinkSync(`${file}.1`); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+            fs.renameSync(file, `${file}.1`);
+            fd = fs.openSync(file, 'a');
+            bytes = 0;
+          }
+          const length = Math.min(buffer.length - offset, 10 * 1024 * 1024 - bytes);
+          const written = fs.writeSync(fd, buffer, offset, length);
+          bytes += written;
+          offset += written;
+        }
+      },
+      end() { if (!closed) { closed = true; fs.closeSync(fd); } },
+    };
     return s.logStream;
   }
 
@@ -80,7 +103,7 @@ class Supervisor extends EventEmitter {
 
     const child = spawn(def.command, def.args || [], {
       cwd: def.cwd,
-      env: def.env,
+      env: { ...def.env, PYTHONUNBUFFERED: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });

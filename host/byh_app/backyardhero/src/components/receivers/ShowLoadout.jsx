@@ -1,5 +1,5 @@
+import useStateFields from "@/store/useStateFields";
 import useAppStore from "@/store/useAppStore"
-import useStateAppStore from "@/store/useStateAppStore";
 import {
   buildShellUsageCountsFromRackCellAssignments,
   buildShellUsageCountsFromShowItems,
@@ -45,7 +45,7 @@ const CAKE_AND_FOUNTAIN_PACK_TYPES = new Set([
 
 function ShowLoadout({ setCurrentTab }) {
   const { systemConfig, stagedShow, updateShow, inventory } = useAppStore();
-  const { stateData } = useStateAppStore();
+  const stateData = useStateFields(["fw_state.receivers", "fw_state.active_protocol"]);
   const [targetRcvMap, setTargetRcvMap] = useState({});
   const [receivers, setReceivers] = useState([]);
   const [receiverLocations, setReceiverLocations] = useState({});

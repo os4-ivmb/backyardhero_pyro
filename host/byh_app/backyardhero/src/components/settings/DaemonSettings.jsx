@@ -34,14 +34,15 @@ const FIELDS = [
     cmd: "set_clock_sync_interval",
     payloadKey: "interval_ms",
     label: "Clock sync interval",
-    hint: "How often the base re-syncs the network clock.",
+    hint: "How often the dongle re-syncs the network clock.",
     suffix: "ms",
     min: 100,
   },
 ];
 
 export default function DaemonSettings() {
-  const { stateData, setStateData } = useStateAppStore();
+  const stateData = useStateAppStore((s) => s.stateData);
+  const setStateData = useStateAppStore((s) => s.setStateData);
   const settings = stateData?.fw_state?.settings || {};
 
   const upstream = {

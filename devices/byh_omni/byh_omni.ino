@@ -18,7 +18,7 @@
 //     output header. The module ties BOARD_CT to ground through 200k, which
 //     puts the board-count ADC at or above DONGLE_SENSE_ADC_MIN.
 //     Behaves like os4_dongle.ino over USB serial; see omni_dongle.cpp.
-//   * Hub dongle: dongle mode with the base expansion board's hub switch closed at
+//   * Hub dongle: dongle mode with the host module's hub switch closed at
 //     boot. Starts a WiFi AP and serves the dongle protocol over a
 //     WebSocket instead of waiting for USB serial; see omni_hub.cpp.
 //
@@ -131,12 +131,12 @@
 uint8_t boardVersion = DEFAULT_BOARD_VERSION;
 
 // Board-count ADC (13-bit raw) at or above this boots the dongle role: the
-// base expansion board's 200k to ground reads above every cue-board count (1-8 boards
+// host module's 200k to ground reads above every cue-board count (1-8 boards
 // read below 5000). An empty header also reads high and boots as a dongle,
 // which is intended. setup() prints the raw reading for calibration.
 #define DONGLE_SENSE_ADC_MIN 7000
 
-// Base expansion board wiring. Inputs are bit indexes on the module's 74HC165
+// Dongle host module wiring. Inputs are bit indexes on the module's 74HC165
 // (index 0 = input A). They have pulldowns, so a closed switch reads high.
 #define HOST_IN_ARM_INDEX    0
 #define HOST_IN_START_INDEX  1

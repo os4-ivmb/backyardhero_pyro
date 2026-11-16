@@ -1,21 +1,13 @@
 // stores/useAppStore.js
 import { create } from 'zustand';
-import axios from 'axios';
 
-// We stamp every inbound WS message with `_clientRxAt = Date.now()` and
-// derive `_clockOffsetMs = clientNow - fw_last_update`. The Pi has no
-// RTC, so on an offline boot (no NTP reachable) its wall clock can be
-// hours behind the browser's. Comparing client-clock to server-clock
-// timestamps (e.g. Date.now() - fw_last_update < 4500 for the "Link"
-// indicator) is then permanently false even though the WS is happily
-// delivering messages. `_clientRxAt` lets liveness checks stay in a
-// single clock domain; `_clockOffsetMs` lets server-stamped fields
-// (receiver `lmt`, etc.) be normalised to the client clock without
-// every call site having to know.
+// Receive timing is separate from operator state. A Pi can boot without
+// NTP, so liveness uses client time and receiver timestamps use clockOffsetMs.
 const computeClockOffset = (payload, fallback) => {
   const serverNow = payload?.fw_last_update;
   if (typeof serverNow !== 'number') return fallback ?? 0;
-  return Date.now() - serverNow;
+  const offset = Date.now() - serverNow;
+  return fallback !== undefined && Math.abs(offset - fallback) < 250 ? fallback : offset;
 };
 
 // "How long ago, in the browser's frame, was this server-stamped time?"
@@ -25,19 +17,14 @@ const computeClockOffset = (payload, fallback) => {
 // known yet (first message hasn't arrived) -- that just degrades to the
 // old behaviour, which is what callers would have done anyway.
 //
-// Pass `stateData` (from useStateAppStore) so call sites can read it
-// straight out of the same state subscription they already have:
-//
-//   const stateData = useStateAppStore(s => s.stateData);
-//   const online = serverElapsedMs(receiver.status.lmt, stateData) < 10_000;
-//
-// Returns Infinity when serverTs is missing/non-numeric so a `< N` check
-// is unambiguously false (treat unknown as "definitely not recent").
-export const serverElapsedMs = (serverTs, stateData) => {
+// The optional state argument is retained for existing callers; the offset
+// comes from the store so heartbeat timing never changes operator state.
+// Missing timestamps are treated as offline.
+export const serverElapsedMs = (serverTs, _stateData) => {
   if (typeof serverTs !== 'number' || !Number.isFinite(serverTs)) {
     return Infinity;
   }
-  const offset = stateData?._clockOffsetMs ?? 0;
+  const offset = useStateAppStore.getState().clockOffsetMs;
   return Date.now() - offset - serverTs;
 };
 
@@ -69,73 +56,64 @@ const joinReceivers = (stateData, receiverConfig) => {
   return { ...stateData, fw_state: { ...fwState, receivers: joined } };
 };
 
+// Retain equal subtrees so JSON snapshots preserve narrow subscriptions.
+const shareUnchanged = (previous, next) => {
+  if (Object.is(previous, next)) return previous;
+  if (!previous || !next || typeof previous !== 'object' || typeof next !== 'object' || Array.isArray(previous) !== Array.isArray(next)) return next;
+  const keys = Object.keys(next);
+  let unchanged = keys.length === Object.keys(previous).length;
+  const result = Array.isArray(next) ? [] : {};
+  for (const key of keys) {
+    result[key] = shareUnchanged(previous[key], next[key]);
+    if (!Object.is(result[key], previous[key])) unchanged = false;
+  }
+  return unchanged ? previous : result;
+};
+
 const useStateAppStore = create((set, get) => ({
   stateData: {},
-  // Latest `_rcfg` from the WS server and its revision.
+  clientRxAt: 0,
+  clockOffsetMs: 0,
   receiverConfig: null,
   receiverConfigRev: null,
   setStateData: (stateData) => {
-    const now = Date.now();
-    const joined = joinReceivers(stateData, get().receiverConfig);
-    set(() => ({
-      stateData: {
-        ...joined,
-        _clientRxAt: now,
-        _clockOffsetMs: computeClockOffset(stateData, 0),
-      },
-    }));
+    const current = get();
+    const joined = joinReceivers(stateData, current.receiverConfig);
+    set({
+      stateData: shareUnchanged(current.stateData, joined),
+      clientRxAt: Date.now(),
+      clockOffsetMs: computeClockOffset(stateData, current.clockOffsetMs),
+    });
   },
-  // One entry point for every WS frame: receiver config, heartbeat, or a
-  // full payload.
   handleSocketMessage: (payload) => {
     if (!payload || typeof payload !== 'object') return;
     if (payload._rcfg) {
-      set(() => ({ receiverConfig: payload._rcfg, receiverConfigRev: payload.rev ?? null }));
-      // Re-join the cached state so an edited receiver shows up before
-      // the next full payload.
+      set({ receiverConfig: payload._rcfg, receiverConfigRev: payload.rev ?? null });
       const current = get().stateData;
       if (current?.fw_state?.receivers_rev) {
-        const joined = joinReceivers(current, payload._rcfg);
-        set(() => ({ stateData: { ...current, fw_state: joined.fw_state } }));
+        set({ stateData: shareUnchanged(current, joinReceivers(current, payload._rcfg)) });
       }
       return;
     }
     if (payload._hb) {
-      // Heartbeats carry the fields the server leaves out of its change
-      // detection: daemon liveness and system stats.
       const current = get().stateData;
-      const partial = { fw_last_update: payload.fw_last_update };
+      const partial = {};
       if (payload.fw_system !== undefined) partial.fw_system = payload.fw_system;
-      if (payload.daemon_active !== undefined && current?.fw_state) {
-        partial.fw_state = {
-          ...current.fw_state,
-          daemon_active: payload.daemon_active,
-          ...(payload.daemon_lup !== undefined ? { daemon_lup: payload.daemon_lup } : {}),
-        };
+      if (payload.daemon_active !== undefined && current?.fw_state && payload.daemon_active !== current.fw_state.daemon_active) {
+        partial.fw_state = { ...current.fw_state, daemon_active: payload.daemon_active };
       }
-      get().patchStateData(partial);
+      get().patchStateData(partial, payload);
       return;
     }
     get().setStateData(payload);
   },
-  // Shallow-merge into stateData. Used for WebSocket heartbeat frames
-  // (which only carry `fw_last_update`) so we don't wipe the rest of
-  // the cached daemon state.
-  patchStateData: (partial) => {
-    const now = Date.now();
+  patchStateData: (partial, timing = partial) => {
     set((state) => ({
-      stateData: {
-        ...state.stateData,
-        ...partial,
-        _clientRxAt: now,
-        _clockOffsetMs: computeClockOffset(
-          partial,
-          state.stateData?._clockOffsetMs ?? 0,
-        ),
-      },
+      clientRxAt: Date.now(),
+      clockOffsetMs: computeClockOffset(timing, state.clockOffsetMs),
+      stateData: shareUnchanged(state.stateData, { ...state.stateData, ...partial }),
     }));
-  }
-
+  },
 }));
 
 export default useStateAppStore;

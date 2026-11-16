@@ -9,7 +9,8 @@ import { Toggle } from "@/design";
 // store so the toggle is responsive even before the WS pushes the echo.
 
 export default function DebugModeToggle() {
-  const { stateData, setStateData } = useStateAppStore();
+  const stateData = useStateAppStore((s) => s.stateData);
+  const setStateData = useStateAppStore((s) => s.setStateData);
   const upstream = !!stateData?.fw_state?.settings?.debug_mode;
   const [busy, setBusy] = useState(false);
 
@@ -57,7 +58,7 @@ export default function DebugModeToggle() {
       onChange={onChange}
       disabled={busy}
       label="Debug mode"
-      description="Verbose logging on the daemon and base. Leave off for shows."
+      description="Verbose logging on the daemon and dongle. Leave off for shows."
     />
   );
 }
