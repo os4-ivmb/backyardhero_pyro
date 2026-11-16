@@ -121,7 +121,7 @@ export default function SupportTicketModal({ isOpen, onClose }) {
       ) : (
         <form id="support-ticket-form" onSubmit={submit} className="space-y-4">
           <p className="rounded-sm border border-border bg-surface-inset px-3 py-2 text-xs text-fg-secondary">
-            Submitting attaches a diagnostics snapshot — app + dongle versions,
+            Submitting attaches a diagnostics snapshot — app + base versions,
             receiver states, daemon/state files, your staged show, and recent log
             lines — so we can debug without a back-and-forth.
           </p>

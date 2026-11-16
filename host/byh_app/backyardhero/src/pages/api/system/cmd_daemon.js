@@ -42,6 +42,9 @@ const VALIDATORS = {
     return null;
   },
 
+  // Manual-sequence console heartbeat: drives the dongle's run LED.
+  sequence_run: (b) => (isBool(b.active) ? null : 'sequence_run requires boolean "active"'),
+
   delegate_launch: (b) => (isBool(b.do_it) ? null : 'delegate_launch requires boolean "do_it"'),
 
   start_show: ok,

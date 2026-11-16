@@ -131,7 +131,7 @@ export default function ReceiverConfigSettings() {
   return (
     <div className="flex flex-col gap-4">
       <div className="text-xs text-fg-muted">
-        Settings here are pushed to every connected receiver via the dongle's
+        Settings here are pushed to every connected receiver via the base's
         radio. Each receiver also persists its values across reboots, so a
         broadcast only needs to happen when you want to change something.
       </div>

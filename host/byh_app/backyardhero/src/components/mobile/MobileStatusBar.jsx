@@ -11,6 +11,7 @@ import useAppMode from "@/design/useAppMode";
 import { cn, Stat, Dot, Badge } from "@/design";
 import Toast from "../common/Toast";
 import GpioOverrideBar from "../shell/GpioOverrideBar";
+import DongleLinkIcon from "../common/DongleLinkIcon";
 import { isPollableReceiver } from "@/util/receivers";
 import { HARDWARE } from "@/util/clientEnv";
 import { fwOutOfDate, latestForBoard } from "@/util/firmwareVersion";
@@ -210,9 +211,9 @@ export default function MobileStatusBar() {
         headers: { "Content-Type": "application/json" },
       });
     } catch (err) {
-      const msg = err?.response?.data?.error || err?.message || "Failed to restart dongle";
+      const msg = err?.response?.data?.error || err?.message || "Failed to restart base";
       setToasts((prev) => {
-        const next = [...prev, { id: Date.now() + Math.random(), message: `Dongle restart failed: ${msg}` }];
+        const next = [...prev, { id: Date.now() + Math.random(), message: `Base restart failed: ${msg}` }];
         return next.length > MAX_TOASTS ? next.slice(next.length - MAX_TOASTS) : next;
       });
     } finally {
@@ -314,7 +315,7 @@ export default function MobileStatusBar() {
           <span className="h-5 w-px bg-border-subtle shrink-0" aria-hidden />
 
           <span className="inline-flex items-center gap-1.5 min-w-0">
-            <Dot tone={dongleTone} pulse={dongleTone === "live"} />
+            <DongleLinkIcon link={rfSettings.link} tone={dongleTone} pulse={dongleTone === "live"} />
             <span
               className={cn(
                 "truncate font-mono text-xs",
@@ -324,18 +325,15 @@ export default function MobileStatusBar() {
                 dongleTone === "neutral" && "text-fg-muted"
               )}
               title={wirelessLink
-                ? `Dongle: ${dongleLabel} · hub ${rfSettings.hub_host || DONGLE_DEFAULTS.hubHost}`
-                : `Dongle: ${dongleLabel}`}
+                ? `Base: ${dongleLabel} · hub ${rfSettings.hub_host || DONGLE_DEFAULTS.hubHost}`
+                : `Base: ${dongleLabel}`}
             >
               {dongleLabel}
             </span>
-            {wirelessLink ? (
-              <Badge tone="neutral" size="xs">Hub</Badge>
-            ) : null}
             {dongleTone === "ok" && deviceIsTransmitting ? (
               <span
                 className="inline-flex items-center gap-0.5 text-2xs text-live font-semibold"
-                title="Dongle is actively transmitting"
+                title="Base is actively transmitting"
               >
                 <span className="w-1.5 h-1.5 rounded-full bg-live animate-livePulse" />
                 TX
@@ -345,7 +343,7 @@ export default function MobileStatusBar() {
               <Badge
                 tone="warn"
                 size="xs"
-                title={`Dongle firmware v${latestDongleVersion} available (running v${dongleFwVersion}).`}
+                title={`Base firmware v${latestDongleVersion} available (running v${dongleFwVersion}).`}
               >
                 Update v{latestDongleVersion}
               </Badge>
@@ -410,7 +408,7 @@ export default function MobileStatusBar() {
                 )}
               >
                 <MdRestartAlt className={cn(restartingDongle && "animate-spin")} />
-                {restartingDongle ? "Restarting…" : "Restart dongle"}
+                {restartingDongle ? "Restarting…" : "Restart base"}
               </button>
             ) : null}
             {mode.id === "manual_fire" ? (

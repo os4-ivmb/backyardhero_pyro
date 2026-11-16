@@ -172,7 +172,7 @@ function handleStart(req, res) {
     writeCommandFile(cmdPath, cmd);
 
     return res.status(202).json({
-      message: 'Dongle flash queued.',
+      message: 'Base flash queued.',
       mode: 'app',
       files: {
         [APP_OFFSET]: { name: safeName, bytes: image.length },
@@ -180,7 +180,7 @@ function handleStart(req, res) {
     });
   } catch (error) {
     console.error('dongle_flash POST failed:', error);
-    return res.status(500).json({ error: 'Failed to queue dongle flash.' });
+    return res.status(500).json({ error: 'Failed to queue base flash.' });
   }
 }
 
@@ -193,9 +193,9 @@ function queueDaemonCmd(res, payload, label) {
       COMMAND_DIR, `${Date.now()}-dongle-flash-${label}.json`,
     );
     writeCommandFile(cmdPath, payload);
-    return res.status(202).json({ message: `Dongle ${label} queued.` });
+    return res.status(202).json({ message: `Base ${label} queued.` });
   } catch (error) {
     console.error(`dongle_flash ${label} failed:`, error);
-    return res.status(500).json({ error: `Failed to queue dongle ${label}.` });
+    return res.status(500).json({ error: `Failed to queue base ${label}.` });
   }
 }

@@ -4,7 +4,6 @@ import axios from "axios";
 import {
   MdRefresh,
   MdCheckCircle,
-  MdMemory,
   MdComputer,
   MdRestartAlt,
   MdCloudDownload,
@@ -13,6 +12,12 @@ import useAppStore from "@/store/useAppStore";
 import { Badge, Button } from "@/design";
 import { HARDWARE } from "@/util/clientEnv";
 import { fwOutOfDate, latestForBoard } from "@/util/firmwareVersion";
+import {
+  DONGLE_KIND_LABEL,
+  DONGLE_LINK_WIRELESS,
+  dongleKind,
+} from "@/util/dongleLink";
+import DongleLinkIcon from "../common/DongleLinkIcon";
 
 // Settings footer: shows the running Host (desktop app) + Dongle firmware
 // versions and whether newer ones are available. Host updates are driven by
@@ -133,6 +138,8 @@ export default function VersionFooter() {
   );
   const latestDongleVersion = latestDongle?.version ?? null;
   const dongleOutOfDate = fwOutOfDate(dongleFw, latestDongleVersion);
+  const dongleLink = stateData?.fw_state?.settings?.rf?.link ?? null;
+  const dongleType = dongleKind(stateData?.fw_state?.dongle_board_type, dongleLink);
 
   return (
     <div className="mt-8 pt-4 border-t border-border-subtle">
@@ -165,6 +172,8 @@ export default function VersionFooter() {
           latestVersion={latestDongleVersion}
           outOfDate={dongleOutOfDate}
           stale={!!latestDongle?.stale}
+          kind={dongleType}
+          link={dongleLink}
         />
       </div>
     </div>
@@ -263,14 +272,14 @@ function HostRow({
   );
 }
 
-function DongleRow({ running, latestVersion, outOfDate, stale }) {
+function DongleRow({ running, latestVersion, outOfDate, stale, kind, link }) {
   let badge = null;
   if (outOfDate && latestVersion) {
     badge = (
       <Badge
         tone="warn"
         size="xs"
-        title="Flash in Settings → Debug → Dongle firmware update"
+        title="Flash in Settings → Debug → Base firmware update"
       >
         Update v{latestVersion} available
       </Badge>
@@ -287,8 +296,27 @@ function DongleRow({ running, latestVersion, outOfDate, stale }) {
 
   const value = running != null ? `v${running}` : "unknown";
 
+  const wireless = link === DONGLE_LINK_WIRELESS;
+  const linkLabel = wireless ? "Wireless" : "USB";
+
   return (
-    <VersionLine icon={<MdMemory />} label="Dongle" value={value}>
+    <VersionLine
+      icon={<DongleLinkIcon link={link} className="text-base" />}
+      label="Base"
+      value={value}
+    >
+      {kind ? (
+        <span
+          className="text-xs text-fg-secondary"
+          title={kind === "omni"
+            ? "Omni board with a base expansion board (byh_omni firmware)"
+            : "Legacy dongle board (os4_dongle firmware)"}
+        >
+          {DONGLE_KIND_LABEL[kind]} · {linkLabel}
+        </span>
+      ) : (
+        <span className="text-xs text-fg-secondary">{linkLabel}</span>
+      )}
       {badge}
       {stale && (
         <span className="text-2xs text-fg-muted">(cached — couldn&apos;t reach server)</span>

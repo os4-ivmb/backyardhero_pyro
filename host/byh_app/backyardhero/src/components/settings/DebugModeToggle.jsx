@@ -58,7 +58,7 @@ export default function DebugModeToggle() {
       onChange={onChange}
       disabled={busy}
       label="Debug mode"
-      description="Verbose logging on the daemon and dongle. Leave off for shows."
+      description="Verbose logging on the daemon and base. Leave off for shows."
     />
   );
 }

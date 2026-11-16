@@ -130,7 +130,7 @@ export default function RFScanPanel() {
   return (
     <div className="flex flex-col gap-3">
       <p className="text-xs text-fg-muted leading-snug">
-        Sample every nRF24 channel using the dongle's RPD register to find
+        Sample every nRF24 channel using the base's RPD register to find
         the least congested band. Picks up Wi-Fi, BLE, microwaves — anything
         radiating &gt; -64 dBm during the sweep.
       </p>

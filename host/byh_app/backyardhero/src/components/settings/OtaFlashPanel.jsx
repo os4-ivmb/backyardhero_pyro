@@ -152,7 +152,7 @@ export default function OtaFlashPanel() {
   const isArmed = !!stateData?.fw_state?.device_is_armed;
   const wirelessLink = stateData?.fw_state?.settings?.rf?.link === "wireless";
   const blockedReason = wirelessLink
-    ? "Receiver OTA is not supported over a wireless hub connection. Switch Settings → Dongle → Connection to USB."
+    ? "Receiver OTA is not supported over a wireless hub connection. Switch Settings → Base → Connection to USB."
     : isShowLoaded
       ? "Cannot OTA flash while a show is loaded."
       : isArmed
@@ -182,13 +182,13 @@ export default function OtaFlashPanel() {
       <p className="text-xs text-fg-muted leading-snug">
         Push a freshly-built receiver firmware image (the <code>.bin</code> from
         <code> build_receiver.sh</code>) over the air to one online receiver.
-        The dongle drops back to single-target mode and bumps to 2 Mbps for
+        The base drops back to single-target mode and bumps to 2 Mbps for
         the duration; the receiver re-flashes itself and reboots.
       </p>
 
       {wirelessLink ? (
         <p className="text-xs text-warn-fg leading-snug">
-          Receiver OTA needs the USB dongle connection. It is not available while Connection type is Wireless.
+          Receiver OTA needs the USB base connection. It is not available while Connection type is Wireless.
         </p>
       ) : null}
 

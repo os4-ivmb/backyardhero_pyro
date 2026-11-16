@@ -1,15 +1,15 @@
 // Dongle role for the BYH Omni: a port of os4_dongle.ino (FW v30) running on
-// receiver hardware with the dongle host module plugged into the output
+// receiver hardware with the base expansion board plugged into the output
 // header. Protocol, queueing, polling, and OTA relay are unchanged from the
 // dongle; see that file's FW_VERSION history for the vNN / H# tags below.
 //
 // Hardware differences from the stand-alone dongle:
-//   * Arm / start / manual switches are read from the host module's 74HC165
+//   * Arm / start / manual switches are read from the base expansion board's 74HC165
 //     on the continuity shift-in chain (active high, pulldowns). They are
 //     reported to the host inverted, matching the dongle's active-low pins.
-//   * The 433MHz transmitter is keyed by one output of the host module's
+//   * The 433MHz transmitter is keyed by one output of the base expansion board's
 //     74HC595 on the cue shift-out chain, clocked at full speed per edge.
-//   * The host module's status pixels hang off the cue LED data pin.
+//   * The base expansion board's status pixels hang off the cue LED data pin.
 //   * The omni's three on-board status LEDs show the host link: pulsing blue
 //     while waiting, solid green once a host is connected.
 //   * In hub mode the host link is a WebSocket served over a WiFi AP
@@ -27,9 +27,9 @@
 #include <esp_timer.h>
 #include <soc/gpio_reg.h>
 
-// Max pixels on the host module; the configured count is clamped to this.
+// Max pixels on the base expansion board; the configured count is clamped to this.
 #define MAX_HOST_PIXELS 16
-// How often the host module's input register is sampled.
+// How often the base expansion board's input register is sampled.
 #define HOST_INPUT_POLL_MS 10
 // Disable interrupts for each 433MHz bit (~1.5ms) so WiFi / USB interrupts
 // can't stretch the pulse widths the receivers decode.
@@ -164,7 +164,7 @@ class HostLink : public Print {
 HostLink Host;
 
 // ---------------------------------------------------------------------------
-// Host module I/O
+// Base expansion board I/O
 // ---------------------------------------------------------------------------
 
 uint8_t hostOutShadow = 0;
@@ -180,7 +180,7 @@ static inline void fastPinWrite(uint8_t pin, bool high) {
 // the level shifter.
 #define HOST_SR_SETTLE() __asm__ __volatile__("nop; nop; nop; nop; nop; nop; nop; nop; nop; nop; nop; nop; nop; nop; nop; nop")
 
-// Shift one byte into the host module's 74HC595 (bit 0 lands on QA) and
+// Shift one byte into the base expansion board's 74HC595 (bit 0 lands on QA) and
 // latch it. Every call takes the same time, so edge-to-edge spacing of the
 // latched output matches the caller's timing exactly.
 void shiftHostOutput(uint8_t value) {
@@ -755,7 +755,7 @@ uint8_t lastArmingState = HIGH;
 uint8_t lastManFireState = HIGH;
 unsigned long lastGpioCheckTime = 0;
 
-// Host module status pixels share the cue LED data pin. Sized for the max;
+// Base expansion board status pixels share the cue LED data pin. Sized for the max;
 // setupLEDs() trims to the configured count.
 uint8_t numPixels = 7;
 Adafruit_NeoPixel pixels(MAX_HOST_PIXELS, LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -1196,7 +1196,7 @@ void noteHubNrfChannel() {
 // after it has held still this long, so contact bounce is one edge.
 #define AUX_DEBOUNCE_MS 50
 
-// Switch states come from the host module's input register (closed = 1).
+// Switch states come from the base expansion board's input register (closed = 1).
 // They're reported inverted so the host sees the same active-low levels as
 // the stand-alone dongle's INPUT_PULLUP switches. `inputs` is all 8 lines,
 // active-low (0 = closed). Indexes 4–7 are the debounced momentary buttons.
@@ -3093,7 +3093,7 @@ void reportWifiConfig(bool ok, const char* err) {
   Host.write('\n');
 }
 
-// Diagnostic: one fresh read of the host module's input register.
+// Diagnostic: one fresh read of the base expansion board's input register.
 // bits[i] is input index i (1 = high / switch closed).
 void reportHostInputs() {
   uint8_t raw = readHostInputs();

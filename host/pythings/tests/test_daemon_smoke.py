@@ -14,10 +14,23 @@ def test_command_binding_and_snapshot(daemon, modules):
     assert daemon.led_brightness == 40
     daemon.handle_command({'type': 'load_show', 'id': 1})
     assert list(daemon._slow_queue) == [{'type': 'load_show', 'id': 1}]
-    # This checkout has no _update_sequence_run_led; protect the actual binding.
     assert module.FireworkDaemon._is_slow_command({'type': 'load_show'})
+    daemon._update_sequence_run_led(1, 1, 1)
     daemon.update_state_file(force_file=True)
     assert isinstance(json.loads(Path(module.STATE_FILE_PATH).read_text())['daemon_lup'], int)
+
+
+def test_sequence_run_led(daemon, modules, monkeypatch):
+    module, _ = modules
+    updates = []
+    monkeypatch.setattr(daemon.led_handler, 'update', lambda key, value: updates.append((key, value)))
+    low = module.LOW
+    daemon.handle_command({'type': 'sequence_run', 'active': True})
+    daemon._update_sequence_run_led(low, low, low)
+    assert updates[-1] == ('show_run_state', module.RUN_STATE.RUNNING.value)
+    daemon.handle_command({'type': 'sequence_run', 'active': False})
+    daemon._update_sequence_run_led(low, low, low)
+    assert updates[-1] == ('show_run_state', module.RUN_STATE.MANUAL_FIRE.value)
 
 
 @pytest.mark.parametrize('bad', ['{', '[]', '{"type":"manual_fire"}'])
