@@ -34,12 +34,12 @@ export default async function handler(req, res) {
     // valid duration of zero seconds), so check explicitly for a finite
     // non-negative number rather than truthiness.
     const durationNum = Number(duration);
-    if (
-      !name || !version || !runtime_version ||
-      !display_payload || !authorization_code || !protocol ||
-      !Number.isFinite(durationNum) || durationNum < 0
-    ) {
-      return res.status(400).json({ error: 'All fields are required.' });
+    const missing = Object.entries({
+      name, version, runtime_version, display_payload, authorization_code, protocol,
+    }).filter(([, value]) => !value).map(([field]) => field);
+    if (!Number.isFinite(durationNum) || durationNum < 0) missing.push('duration');
+    if (missing.length > 0) {
+      return res.status(400).json({ error: `Missing or invalid: ${missing.join(', ')}.`, missing });
     }
 
     try {

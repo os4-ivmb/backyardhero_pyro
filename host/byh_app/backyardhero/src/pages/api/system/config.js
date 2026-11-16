@@ -2,6 +2,7 @@ import { getRepo } from '@/data';
 import { getHostInfo } from '@/util/host';
 import { caps } from '@/util/profile';
 import { readMergedSystemConfig, writeUserOverrides } from '@/util/systemcfg';
+import { DONGLE_DEFAULTS } from '@/util/dongleLink';
 
 /**
  * GET  /api/system/config
@@ -60,16 +61,32 @@ export default async function handler(req, res) {
  * back to a minimal default. The authoring UI only dereferences `receivers`
  * (overlaid below), `protocols`, and `default_location`, all of which are
  * optional / empty-safe, plus `caps`/`host` added by the handler.
+ *
+ * `protocols` must not be empty, though: the Editor defaults a new show's
+ * protocol to the first key here, and the show save routes reject a show with
+ * no protocol (400). Cloud shows are pushed down to
+ * devices, whose daemon refuses a show whose protocol doesn't match its own,
+ * so the default is the one protocol the hardware speaks.
  */
+const CLOUD_SYSTEM_CONFIG = Object.freeze({
+  protocols: { [DONGLE_DEFAULTS.protocol]: { label: 'Backyard Hero v0.1' } },
+  types: {},
+  system: {},
+});
+
+function cloudSystemConfig() {
+  return JSON.parse(JSON.stringify(CLOUD_SYSTEM_CONFIG));
+}
+
 async function readSystemConfig() {
   try {
     const merged = await readMergedSystemConfig();
     if (merged && Object.keys(merged).length > 0) return merged;
-    if (caps.profile === 'cloud') return { protocols: {}, types: {}, system: {} };
+    if (caps.profile === 'cloud') return cloudSystemConfig();
     return merged;
   } catch (err) {
     if (caps.profile === 'cloud') {
-      return { protocols: {}, types: {}, system: {} };
+      return cloudSystemConfig();
     }
     throw err;
   }

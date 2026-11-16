@@ -18,6 +18,8 @@ import {
   FiTrash2,
   FiLink2,
   FiUpload,
+  FiPlus,
+  FiX,
 } from "react-icons/fi";
 import Timeline from "../common/Timeline";
 import useAppStore from '@/store/useAppStore';
@@ -68,6 +70,7 @@ import {
   selectClass,
   Card,
   Badge,
+  IconButton,
   cn,
 } from "@/design";
 import {
@@ -171,6 +174,10 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
   const [fireMultiple, setFireMultiple] = useState(false);
   const [multipleCount, setMultipleCount] = useState(2);
   const [error, setError] = useState(null);
+  // Additional receiver/cue slots (add flow only). Each gets its own copy of
+  // the cue at the same time / in the same step. `key` is a stable React key.
+  const [extraRoutings, setExtraRoutings] = useState([]);
+  const extraKeyRef = useRef(0);
 
   const supportsMultiple = MULTIPLE_FIRE_TYPES.has(selectedType) && !!selectedItem;
 
@@ -206,6 +213,86 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
     setError(null);
   }, [isOpen, editItem, inventory]);
 
+  // Snapshot of the last cue added through this modal (add flow only). Used to
+  // pre-fill the next add so repetitive cue entry is quick. The component
+  // stays mounted while closed, so a ref survives between opens.
+  const lastAddRef = useRef(null);
+
+  // Pick a free target in `zoneName`, preferring the first one after `after`
+  // (wrapping). Returns undefined when the zone has no free target.
+  const nextFreeTarget = (zoneName, after = null) => {
+    const list = availableDevices?.[zoneName] || [];
+    const free = (t) =>
+      !items.some((it) => it.id !== editItem?.id && it.zone === zoneName && it.target === t);
+    const start = after == null ? 0 : list.indexOf(after) + 1;
+    for (let i = 0; i < list.length; i++) {
+      const t = list[(start + i) % list.length];
+      if (free(t)) return t;
+    }
+    return undefined;
+  };
+
+  // First zone (preferring `preferred`) that still has a free target.
+  const pickRouting = (preferredZone = null, afterTarget = null) => {
+    const zones = Object.keys(availableDevices || {});
+    if (preferredZone && zones.includes(preferredZone)) {
+      const t = nextFreeTarget(preferredZone, afterTarget);
+      if (t !== undefined) return { zone: preferredZone, target: t };
+    }
+    for (const z of zones) {
+      const t = nextFreeTarget(z);
+      if (t !== undefined) return { zone: z, target: t };
+    }
+    // Everything is full: fall back to the first slot so the controls still
+    // reflect real state (submit will report the conflict).
+    const z = zones[0] ?? null;
+    return { zone: z, target: z ? availableDevices[z]?.[0] ?? null : null };
+  };
+
+  // Default routing for a new cue: first free receiver/cue. Runs on open (and
+  // when devices load) rather than while closed -- the close-reset below
+  // nulls `zone` in the same commit as a closed-state default, which left the
+  // state null while the <select> *displayed* its first option. Declared
+  // before the seeding effects so last-add / presets override it.
+  useEffect(() => {
+    if (!isOpen || isEdit) return;
+    if (availableDevices && !zone) {
+      const routing = pickRouting();
+      if (routing.zone) {
+        setZone(routing.zone);
+        setTarget(routing.target);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, availableDevices, zone, isEdit]);
+
+  // Seed a fresh add from the last added cue. Declared before the preset
+  // effects below so a dragged item / Target-Grid "+" still wins.
+  useEffect(() => {
+    if (!isOpen || isEdit) return;
+    const last = lastAddRef.current;
+    if (!last) return;
+    setSelectedType(last.type);
+    if (last.type === "GENERIC") {
+      setSelectedItem(null);
+      setMetaDuration(last.metaDuration);
+      setMetaLabel(last.label || "");
+    } else {
+      const item = inventory.find((i) => i.id === last.itemId && i.type === last.type) || null;
+      setSelectedItem(item);
+      setMetaLabel(item?.name ?? "");
+    }
+    setMetaDelaySec(last.metaDelaySec);
+    setFireMultiple(last.fireMultiple);
+    setMultipleCount(last.multipleCount);
+    const routing = pickRouting(last.zone, last.target);
+    setZone(routing.zone);
+    setTarget(routing.target);
+    setError(null);
+    // Only re-seed on open; later inventory/item changes must not clobber edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, isEdit]);
+
   // Seed the form from an inventory item dragged onto the timeline. Only for
   // the add flow (never when editing), and only for directly-placeable types
   // (the drag palette already filters to those). Zone/target still default
@@ -220,20 +307,6 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
     setError(null);
   }, [isOpen, presetItem, isEdit]);
 
-  useEffect(() => {
-    // Don't auto-pick a default zone/target while editing -- the cue already
-    // has its routing, and the edit prefill sets it explicitly.
-    if (isEdit) return;
-    if (availableDevices) {
-      if (!zone) {
-        const zones = Object.keys(availableDevices);
-        setZone(zones[0]);
-        if (zones[0]) {
-          setTarget(availableDevices[zones[0]][0]);
-        }
-      }
-    }
-  }, [availableDevices, zone, isEdit]);
 
   // Force the routing to the receiver:cue picked from the Target Grid "+".
   // Runs after the default-zone effect above so it wins on first open.
@@ -262,6 +335,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
     setMetaDuration(5);
     setFireMultiple(false);
     setMultipleCount(2);
+    setExtraRoutings([]);
     setError(null);
   }, [isOpen]);
 
@@ -313,6 +387,25 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
     return targets.every(target => isOccupied(zoneName, target));
   };
 
+  // Keep zone/target state pointing at a real option. A <select> whose value
+  // isn't among its options *displays* the first option while state holds
+  // something else, so the submitted routing would silently differ from what
+  // the operator sees. Normalize state to a valid slot instead.
+  useEffect(() => {
+    if (!isOpen || !zone || !availableDevices) return;
+    if (!availableDevices[zone]) {
+      const routing = pickRouting();
+      setZone(routing.zone);
+      setTarget(routing.target);
+      return;
+    }
+    if (!availableDevices[zone].includes(target)) {
+      const t = nextFreeTarget(zone);
+      setTarget(t !== undefined ? t : availableDevices[zone][0] ?? null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, zone, target, availableDevices]);
+
   // Update target if current selection becomes occupied
   useEffect(() => {
     if (zone && target !== null && availableDevices[zone]) {
@@ -329,6 +422,55 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
     }
   }, [items, zone, target, availableDevices, editItem]);
 
+  // A slot is unavailable to a routing row if a placed cue uses it, or another
+  // row in this form (primary = -1, extras = their index) has already picked it.
+  const pickedInForm = (zoneName, targetValue, rowIdx) =>
+    (rowIdx !== -1 && zone === zoneName && target === targetValue) ||
+    extraRoutings.some(
+      (r, i) => i !== rowIdx && r.zone === zoneName && r.target === targetValue
+    );
+  const slotTaken = (zoneName, targetValue, rowIdx) =>
+    isOccupied(zoneName, targetValue) || pickedInForm(zoneName, targetValue, rowIdx);
+
+  // Append a routing row pre-filled with the next free slot after the last
+  // row (same receiver first, then the others).
+  const addExtraRouting = () => {
+    const last = extraRoutings.length
+      ? extraRoutings[extraRoutings.length - 1]
+      : { zone, target };
+    const zones = Object.keys(availableDevices || {});
+    const order = zones.includes(last.zone)
+      ? [last.zone, ...zones.filter((z) => z !== last.zone)]
+      : zones;
+    const rowIdx = extraRoutings.length;
+    let pick = null;
+    for (const z of order) {
+      const list = availableDevices[z] || [];
+      const start = z === last.zone ? list.indexOf(last.target) + 1 : 0;
+      for (let i = 0; i < list.length; i++) {
+        const t = list[(start + i) % list.length];
+        if (!slotTaken(z, t, rowIdx)) {
+          pick = { zone: z, target: t };
+          break;
+        }
+      }
+      if (pick) break;
+    }
+    if (!pick) {
+      setError("No free receiver/cue slots left to add.");
+      return;
+    }
+    setError(null);
+    extraKeyRef.current += 1;
+    setExtraRoutings((prev) => [...prev, { key: extraKeyRef.current, ...pick }]);
+  };
+
+  const updateExtraRouting = (idx, patch) =>
+    setExtraRoutings((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
+
+  const removeExtraRouting = (idx) =>
+    setExtraRoutings((prev) => prev.filter((_, i) => i !== idx));
+
   const filteredInventory = inventory.filter((item) => item.type === selectedType).sort((a, b) => a.name.localeCompare(b.name));
 
   const handleItemSelected = (item) => {
@@ -344,13 +486,32 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
   }
 
   const handleAdd = () => {
-    const occupied = items.find(
-      (item) => item.id !== editItem?.id && item.zone === zone && item.target === target
-    );
-
-    if (occupied) {
-      setError(`Zone ${zone} Target ${target} is currently used by ${occupied.name}`);
-      return;
+    // Every slot this cue will be placed on: the primary zone/target plus any
+    // extra rows (add flow only), in the order the operator entered them.
+    const routings = [
+      { zone, target },
+      ...(isEdit ? [] : extraRoutings.map((r) => ({ zone: r.zone, target: r.target }))),
+    ];
+    const seen = new Set();
+    for (const r of routings) {
+      const label = receiverLabels?.[r.zone] ? `${receiverLabels[r.zone]} (${r.zone})` : r.zone;
+      if (!r.zone || !availableDevices?.[r.zone]?.includes(r.target)) {
+        setError("Pick a zone and target for every row before adding.");
+        return;
+      }
+      const occupied = items.find(
+        (item) => item.id !== editItem?.id && item.zone === r.zone && item.target === r.target
+      );
+      if (occupied) {
+        setError(`Zone ${label} Target ${r.target} is currently used by ${occupied.name}`);
+        return;
+      }
+      const k = `${r.zone}:${r.target}`;
+      if (seen.has(k)) {
+        setError(`Zone ${label} Target ${r.target} is listed more than once`);
+        return;
+      }
+      seen.add(k);
     }
     setError('');
 
@@ -361,7 +522,39 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
 
     // In edit mode, re-stamp the original id so the parent replaces the cue in
     // place instead of appending a new one.
-    const emit = (obj) => onAdd(isEdit ? { ...obj, id: editItem.id } : obj);
+    // For a new cue, emit one copy per routing (deep-cloned past the first so
+    // composite structures aren't shared between cues).
+    const emit = (obj) => {
+      if (isEdit) {
+        onAdd({ ...obj, id: editItem.id });
+        return;
+      }
+      onAdd(
+        routings.map((r, i) => ({
+          ...(i === 0 ? obj : JSON.parse(JSON.stringify(obj))),
+          zone: r.zone,
+          target: r.target,
+        }))
+      );
+    };
+
+    // Remember this add so the next one opens pre-filled. Composite types
+    // (fused lines, rack shells) need their builder each time, so only
+    // inventory items and generic cues are remembered.
+    if (!isEdit && (selectedItem || selectedType === "GENERIC")) {
+      lastAddRef.current = {
+        type: selectedType,
+        itemId: selectedItem?.id ?? null,
+        label: selectedType === "GENERIC" ? metaLabel : "",
+        metaDelaySec: Number(metaDelaySec) || 0,
+        metaDuration: Number(metaDuration) || 0,
+        fireMultiple: supportsMultiple && fireMultiple,
+        multipleCount,
+        // Continue the next add after the last slot used by this one.
+        zone: routings[routings.length - 1].zone,
+        target: routings[routings.length - 1].target,
+      };
+    }
 
 
     if (selectedItem) {
@@ -380,9 +573,11 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
         ...selectedItem, 
         startTime, 
         zone, 
-        target, 
-        name: metaLabel, 
-        metaDelaySec, 
+        target,
+        // The label field shows "Auto-fills from item name"; honour that on
+        // save even if the operator never touched it.
+        name: metaLabel || selectedItem.name,
+        metaDelaySec,
         delay: (metaDelaySec || 0) + itemDelay,
         itemId: selectedItem.id,
         ...(multiple > 1 ? { multiple } : {}),
@@ -410,7 +605,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
         startTime, 
         zone, 
         target, 
-        name: metaLabel,  
+        name: metaLabel || fusedLine.name,
         metaDelaySec,
         delay,
       });
@@ -427,7 +622,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
         startTime,
         zone,
         target,
-        name: metaLabel,
+        name: metaLabel || fusedItemLine.name || "Fused Line",
         metaDelaySec,
         delay,
       });
@@ -627,7 +822,9 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
               onClick={handleAdd}
               disabled={!canAdd}
             >
-              {isEdit ? "Save changes" : stepLabel ? `Add to ${stepLabel}` : "Add to timeline"}
+              {isEdit
+                ? "Save changes"
+                : `Add${extraRoutings.length ? ` ${extraRoutings.length + 1} cues` : ""} ${stepLabel ? `to ${stepLabel}` : "to timeline"}`}
             </Button>
           </>
         }
@@ -921,55 +1118,138 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
             />
           </Field>
 
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Zone">
-              <select
-                value={zone || ""}
-                onChange={(e) => {
-                  const newZone = e.target.value;
-                  setZone(newZone);
-                  if (newZone && availableDevices[newZone]) {
-                    const firstAvailableTarget =
-                      availableDevices[newZone].find(
-                        (t) => !isOccupied(newZone, t)
-                      ) || availableDevices[newZone][0];
-                    setTarget(firstAvailableTarget);
-                  }
-                }}
-                className={selectClass}
-              >
-                {Object.keys(availableDevices).map((k, i) => {
-                  const label = receiverLabels?.[k];
-                  const displayText = label ? `${label} (${k})` : k;
-                  const fullyOccupied = isZoneFullyOccupied(k);
-                  return (
-                    <option key={i} value={k} disabled={fullyOccupied}>
-                      {displayText}
-                      {fullyOccupied ? " · full" : ""}
-                    </option>
-                  );
-                })}
-              </select>
-            </Field>
-            <Field label="Target">
-              <select
-                value={target ?? ""}
-                onChange={(e) => setTarget(parseInt(e.target.value))}
-                className={selectClass}
-              >
-                {zone &&
-                  availableDevices[zone]?.map((k, i) => {
-                    const occupied = isOccupied(zone, k);
+          {(() => {
+            const hasExtras = !isEdit && extraRoutings.length > 0;
+            const rowGrid = hasExtras
+              ? "grid grid-cols-[1fr_1fr_2.25rem] gap-3 items-end"
+              : "grid grid-cols-2 gap-3";
+            // One receiver/cue pair. rowIdx -1 is the primary routing; extras
+            // are 0..n. Options taken by placed cues or other rows are disabled.
+            const renderRouting = (rowIdx, rowZone, rowTarget, onZone, onTarget) => {
+              const zoneSelect = (
+                <select
+                  value={rowZone || ""}
+                  onChange={(e) => onZone(e.target.value)}
+                  className={selectClass}
+                  aria-label={rowIdx === -1 ? undefined : `Zone ${rowIdx + 2}`}
+                >
+                  {/* Never let the select *display* an option the state doesn't hold. */}
+                  {!rowZone ? <option value="" disabled>Select…</option> : null}
+                  {Object.keys(availableDevices).map((k, i) => {
+                    const label = receiverLabels?.[k];
+                    const displayText = label ? `${label} (${k})` : k;
+                    const fullyOccupied = (availableDevices[k] || []).every((t) =>
+                      slotTaken(k, t, rowIdx)
+                    );
                     return (
-                      <option key={i} value={k} disabled={occupied}>
-                        {k}
-                        {occupied ? " · used" : ""}
+                      <option
+                        key={i}
+                        value={k}
+                        disabled={fullyOccupied && k !== rowZone}
+                      >
+                        {displayText}
+                        {fullyOccupied ? " · full" : ""}
                       </option>
                     );
                   })}
-              </select>
-            </Field>
-          </div>
+                </select>
+              );
+              const targetSelect = (
+                <select
+                  value={rowTarget ?? ""}
+                  onChange={(e) => onTarget(parseInt(e.target.value, 10))}
+                  className={selectClass}
+                  aria-label={rowIdx === -1 ? undefined : `Target ${rowIdx + 2}`}
+                >
+                  {rowTarget == null ? <option value="" disabled>Select…</option> : null}
+                  {rowZone &&
+                    availableDevices[rowZone]?.map((k, i) => {
+                      const used = isOccupied(rowZone, k);
+                      const picked = !used && pickedInForm(rowZone, k, rowIdx);
+                      return (
+                        <option key={i} value={k} disabled={used || picked}>
+                          {k}
+                          {used ? " · used" : picked ? " · picked" : ""}
+                        </option>
+                      );
+                    })}
+                </select>
+              );
+              return { zoneSelect, targetSelect };
+            };
+            const firstFree = (z, rowIdx) =>
+              availableDevices[z]?.find((t) => !slotTaken(z, t, rowIdx)) ??
+              availableDevices[z]?.[0] ??
+              null;
+
+            const primary = renderRouting(
+              -1,
+              zone,
+              target,
+              (newZone) => {
+                setZone(newZone);
+                if (newZone && availableDevices[newZone]) {
+                  setTarget(firstFree(newZone, -1));
+                }
+              },
+              (t) => setTarget(t)
+            );
+
+            return (
+              <div className="flex flex-col gap-2">
+                <div className={rowGrid}>
+                  <Field label="Zone">{primary.zoneSelect}</Field>
+                  <Field label="Target">{primary.targetSelect}</Field>
+                  {hasExtras ? <span /> : null}
+                </div>
+                {hasExtras &&
+                  extraRoutings.map((r, idx) => {
+                    const row = renderRouting(
+                      idx,
+                      r.zone,
+                      r.target,
+                      (newZone) =>
+                        updateExtraRouting(idx, {
+                          zone: newZone,
+                          target: firstFree(newZone, idx),
+                        }),
+                      (t) => updateExtraRouting(idx, { target: t })
+                    );
+                    return (
+                      <div key={r.key} className={rowGrid}>
+                        {row.zoneSelect}
+                        {row.targetSelect}
+                        <IconButton
+                          variant="danger"
+                          label="Remove this receiver/cue"
+                          onClick={() => removeExtraRouting(idx)}
+                        >
+                          <FiX />
+                        </IconButton>
+                      </div>
+                    );
+                  })}
+                {!isEdit && (
+                  <div>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      leading={<FiPlus />}
+                      onClick={addExtraRouting}
+                    >
+                      Add receiver / cue
+                    </Button>
+                    {hasExtras && (
+                      <p className="mt-1 text-2xs text-fg-muted">
+                        The same item is placed on each receiver/cue
+                        {stepLabel ? `, in this order, in ${stepLabel}.` : " at the same time."}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {error ? (
             <div className="rounded-sm border border-danger/40 bg-danger-bg/60 px-3 py-2 text-xs text-danger-fg">
@@ -3943,9 +4223,17 @@ const ShowBuilder = (props) => {
     setIsAddModalOpen(true);
   };
 
-  const addItemToTimeline = (item) => {
-    item.id = currentIndex;
-    setCurrentIndex((currentIndex) => currentIndex + 1);
+  // Accepts a single cue or an array of cues. An array comes from the add
+  // modal when the operator routes the same item to several receiver/cue
+  // slots: they share one start time (or one step), get consecutive ids, and
+  // are appended in the order given.
+  const addItemToTimeline = (itemOrItems) => {
+    const newItems = Array.isArray(itemOrItems) ? itemOrItems : [itemOrItems];
+    if (newItems.length === 0) return;
+    newItems.forEach((it, i) => {
+      it.id = currentIndex + i;
+    });
+    setCurrentIndex((currentIndex) => currentIndex + newItems.length);
 
     if (isSequence) {
       let stepId = addStepTarget;
@@ -3953,8 +4241,10 @@ const ShowBuilder = (props) => {
         stepId = newStepId();
         updateShowConfig((cfg) => ({ ...cfg, steps: [...cfg.steps, { id: stepId }] }));
       }
-      item.stepId = stepId;
-      setItems((prevItems) => [...prevItems, item]);
+      newItems.forEach((it) => {
+        it.stepId = stepId;
+      });
+      setItems((prevItems) => [...prevItems, ...newItems]);
       setAddItemInsertMode(false);
       return;
     }
@@ -3964,17 +4254,19 @@ const ShowBuilder = (props) => {
     // new item's duration. A non-positive duration needs no room, so we just
     // append. `addItemInsertMode` only applies to the add-modal path; the
     // copy/place path calls this directly with it false.
+    // A multi-routed add fires simultaneously, so it makes room once (by the
+    // longest duration), not once per copy.
     const insert = addItemInsertMode;
-    const insertPoint = Number(item.startTime) || 0;
-    const shiftBy = Number(item.duration) || 0;
+    const insertPoint = Math.min(...newItems.map((it) => Number(it.startTime) || 0));
+    const shiftBy = Math.max(...newItems.map((it) => Number(it.duration) || 0));
     setItems((prevItems) => {
-      if (!insert || shiftBy <= 0) return [...prevItems, item];
+      if (!insert || shiftBy <= 0) return [...prevItems, ...newItems];
       const shifted = prevItems.map((it) =>
         (Number(it.startTime) || 0) >= insertPoint
           ? { ...it, startTime: (Number(it.startTime) || 0) + shiftBy }
           : it
       );
-      return [...shifted, item];
+      return [...shifted, ...newItems];
     });
     setAddItemInsertMode(false);
   };

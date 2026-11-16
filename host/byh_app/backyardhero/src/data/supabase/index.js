@@ -29,6 +29,19 @@ const INVENTORY_JSON = ['metadata'];
 const PROFILE_JSON = ['shot_timestamps'];
 const RACK_JSON = ['cells', 'fuses'];
 
+// Numeric inventory columns. The builder forms send blank fields as "" —
+// SQLite stores that happily in a REAL column, but Postgres rejects it
+// ("invalid input syntax for type real"), so blanks become NULL here.
+const INVENTORY_NUMERIC = ['duration', 'fuse_delay', 'lift_delay', 'burn_rate', 'available_ct', 'youtube_link_start_sec', 'unit_cost'];
+
+function blankNumericToNull(row, numericCols) {
+  const out = { ...row };
+  for (const col of numericCols) {
+    if (typeof out[col] === 'string' && out[col].trim() === '') out[col] = null;
+  }
+  return out;
+}
+
 function parseJson(v) {
   if (v === null || v === undefined) return null;
   if (typeof v === 'string') {
@@ -179,7 +192,7 @@ export function createSupabaseRepo(ctx, req, res) {
       async create(row) {
         const { data, error } = await sb
           .from(T_INVENTORY)
-          .insert(rowToJsonb(row, INVENTORY_JSON))
+          .insert(blankNumericToNull(rowToJsonb(row, INVENTORY_JSON), INVENTORY_NUMERIC))
           .select('id')
           .single();
         if (error) raise(error, 'Failed to create inventory item.');
@@ -188,7 +201,7 @@ export function createSupabaseRepo(ctx, req, res) {
       async update(id, row) {
         const { data, error } = await sb
           .from(T_INVENTORY)
-          .update(rowToJsonb(row, INVENTORY_JSON))
+          .update(blankNumericToNull(rowToJsonb(row, INVENTORY_JSON), INVENTORY_NUMERIC))
           .eq('id', id)
           .eq('user_id', uid)
           .select('id');

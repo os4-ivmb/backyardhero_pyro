@@ -9,10 +9,12 @@ import useAppMode from "@/design/useAppMode";
 import useIsMobile from "@/design/useIsMobile";
 import { Button } from "@/design";
 import useShowReceiverVerification from "@/util/useShowReceiverVerification";
+import useCloudSession, { SIGN_IN_URL } from "@/util/useCloudSession";
 import { HARDWARE } from "@/util/clientEnv";
 import AppShell from "./shell/AppShell";
 import TopBar from "./shell/TopBar";
 import StatusBar from "./shell/StatusBar";
+import CloudAccountButton from "./shell/CloudAccountButton";
 
 // Firing-path panels stay statically imported so the Console / Manual tabs
 // are instantly interactive on first load.
@@ -78,6 +80,8 @@ function DesktopMainNav() {
   // the cloud build corrects this within the first config fetch.
   const caps = systemConfig?.caps || { hardware: true };
   const hardware = caps.hardware !== false;
+  const cloudSession = useCloudSession(caps.multiUser === true);
+  const signedOut = cloudSession.status === "signed_out";
   // Watch for receiver verification failures on the staged show. The
   // result drives a red X badge on the Receivers menu item and is also
   // consumed downstream by the Load Show gate in ShowControl.
@@ -143,15 +147,18 @@ function DesktopMainNav() {
           onTabChange={setCurrTab}
           mode={mode}
           rightSlot={
-            <Button
-              variant="ghost"
-              size="sm"
-              leading={<MdOutlineBugReport />}
-              onClick={() => setSupportOpen(true)}
-              title="Report a problem"
-            >
-              <span className="hidden lg:inline">Report a problem</span>
-            </Button>
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                leading={<MdOutlineBugReport />}
+                onClick={() => setSupportOpen(true)}
+                title="Report a problem"
+              >
+                <span className="hidden lg:inline">Report a problem</span>
+              </Button>
+              <CloudAccountButton session={cloudSession} />
+            </>
           }
         />
       }
@@ -164,7 +171,17 @@ function DesktopMainNav() {
           title="Your shows"
           description="Pick a show to open it in the Editor."
           stageLabel="Open"
-          emptyHint="No shows here yet. Build one in the Editor, or push shows up from a device via Settings → Cloud."
+          emptyHint={
+            signedOut ? (
+              <>
+                You're not signed in, so there are no shows to list.{" "}
+                <a href={SIGN_IN_URL} className="underline font-medium">Sign in</a>{" "}
+                to see your shows.
+              </>
+            ) : (
+              "No shows here yet. Build one in the Editor, or push shows up from a device via Settings → Cloud."
+            )
+          }
         />
       )}
       {currTab === "inventory" && <InventoryManager />}
