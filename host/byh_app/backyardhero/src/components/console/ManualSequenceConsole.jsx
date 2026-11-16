@@ -45,6 +45,17 @@ import { setStepPressHandler, useStepButtonBound } from "@/util/stepHardwareButt
 // clicker can't skip a step.
 const FIRE_LOCKOUT_MS = 250;
 
+// While the fire key is live, tell the daemon so the dongle's run LED shows
+// RUNNING. Repeated well inside the daemon's SEQUENCE_RUN_TTL_S (5s) so the
+// LED drops back by itself if this page goes away.
+const SEQUENCE_RUN_HEARTBEAT_MS = 2000;
+
+function postSequenceRun(active) {
+  return axios
+    .post("/api/system/cmd_daemon", { type: "sequence_run", active }, { headers: { "Content-Type": "application/json" } })
+    .catch(() => {});
+}
+
 function isEditableTarget(el) {
   const tag = el?.tagName;
   return !!el?.isContentEditable || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
@@ -225,6 +236,18 @@ export default function ManualSequenceConsole() {
   useEffect(() => {
     if (!ready) cancelPendingFires();
   }, [ready, cancelPendingFires]);
+
+  // Dongle run LED: RUNNING while the fire key is live (Stop, a lost
+  // precondition, sequence complete or leaving the console clears it).
+  useEffect(() => {
+    if (!started) return undefined;
+    postSequenceRun(true);
+    const t = setInterval(() => postSequenceRun(true), SEQUENCE_RUN_HEARTBEAT_MS);
+    return () => {
+      clearInterval(t);
+      postSequenceRun(false);
+    };
+  }, [started]);
 
   const fireLockRef = useRef(0);
   const fireCurrent = useCallback(async () => {

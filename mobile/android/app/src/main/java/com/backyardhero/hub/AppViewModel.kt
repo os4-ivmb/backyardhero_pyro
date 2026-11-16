@@ -6,6 +6,9 @@ import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import android.content.Context
+import com.backyardhero.hub.cloud.CloudClient
+import com.backyardhero.hub.cloud.CloudException
+import com.backyardhero.hub.cloud.CloudShowInfo
 import com.backyardhero.hub.net.ActiveLink
 import com.backyardhero.hub.net.HubClient
 import com.backyardhero.hub.net.HubWifi
@@ -13,6 +16,8 @@ import com.backyardhero.hub.net.LinkMode
 import com.backyardhero.hub.net.LinkState
 import com.backyardhero.hub.net.UsbLink
 import com.backyardhero.hub.session.HubSession
+import com.backyardhero.hub.session.ShowPhase
+import com.backyardhero.hub.session.ShowState
 import com.backyardhero.hub.show.Show
 import com.backyardhero.hub.show.ShowParseException
 import com.backyardhero.hub.show.ShowParser
@@ -23,6 +28,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -37,6 +43,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _shows = MutableStateFlow<List<Show>>(emptyList())
     val shows: StateFlow<List<Show>> = _shows.asStateFlow()
+
+    /** The cloud builder account. Shows are downloaded from it into [shows]. */
+    val cloud = CloudClient(app)
+
+    /** The account's show list; null until it has been fetched. */
+    private val _cloudShows = MutableStateFlow<List<CloudShowInfo>?>(null)
+    val cloudShows: StateFlow<List<CloudShowInfo>?> = _cloudShows.asStateFlow()
+    private val _cloudLoading = MutableStateFlow(false)
+    val cloudLoading: StateFlow<Boolean> = _cloudLoading.asStateFlow()
+    private val _cloudError = MutableStateFlow<String?>(null)
+    val cloudError: StateFlow<String?> = _cloudError.asStateFlow()
+    /** Cloud id of the show being downloaded. */
+    private val _cloudDownloading = MutableStateFlow<String?>(null)
+    val cloudDownloading: StateFlow<String?> = _cloudDownloading.asStateFlow()
 
     /** Ticks twice a second so freshness / countdowns redraw. */
     private val _now = MutableStateFlow(System.currentTimeMillis())
@@ -58,6 +78,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             client.state.collect { if (it is LinkState.Connected) _hasConnected.value = true }
         }
+        // Keep the session running with the screen off (see HubLinkService):
+        // while a hub is linked, or a show is loaded and the link may come back.
+        viewModelScope.launch {
+            combine(client.state, session.show, session.stepInput) { link, show, stepInput ->
+                keepAliveText(link, show, stepInput)
+            }.distinctUntilChanged().collect { HubLinkService.sync(app, it) }
+        }
         viewModelScope.launch {
             while (true) {
                 _now.value = System.currentTimeMillis()
@@ -66,6 +93,68 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             _shows.value = withContext(Dispatchers.IO) { showStore.list() }
+        }
+        if (cloud.account.value != null) refreshCloudShows()
+    }
+
+    /** Returns an error message, or null on success. */
+    suspend fun cloudSignIn(email: String, password: String): String? = try {
+        cloud.signIn(email.trim(), password)
+        refreshCloudShows()
+        null
+    } catch (e: CloudException) {
+        e.message
+    }
+
+    fun cloudSignOut() {
+        _cloudShows.value = null
+        _cloudError.value = null
+        viewModelScope.launch { cloud.signOut() }
+    }
+
+    fun refreshCloudShows() {
+        if (_cloudLoading.value) return
+        _cloudLoading.value = true
+        viewModelScope.launch {
+            try {
+                _cloudShows.value = cloud.listShows()
+                _cloudError.value = null
+            } catch (e: CloudException) {
+                _cloudError.value = e.message
+                if (cloud.account.value == null) _cloudShows.value = null
+            } finally {
+                _cloudLoading.value = false
+            }
+        }
+    }
+
+    /** Download a cloud show onto this phone, replacing an earlier download of it. */
+    fun downloadCloudShow(info: CloudShowInfo) {
+        if (_cloudDownloading.value != null) return
+        val current = session.show.value
+        if (current.show?.cloudId == info.id && current.phase != ShowPhase.IDLE) {
+            _cloudError.value = "Unload ${info.name} before updating it"
+            return
+        }
+        _cloudDownloading.value = info.id
+        viewModelScope.launch {
+            try {
+                val row = cloud.fetchShow(info.id)
+                withContext(Dispatchers.IO) {
+                    val parsed = ShowParser.parse(row.json, row.info.name)
+                    showStore.saveCloud(parsed, row.info.id, row.info.updatedAt)
+                    _shows.value = showStore.list()
+                }
+                // The row may be newer than the list it was picked from.
+                _cloudShows.value = _cloudShows.value?.map { if (it.id == row.info.id) row.info else it }
+                _cloudError.value = null
+            } catch (e: CloudException) {
+                _cloudError.value = e.message
+            } catch (e: ShowParseException) {
+                _cloudError.value = "${info.name}: ${e.message}"
+            } finally {
+                _cloudDownloading.value = null
+            }
         }
     }
 
@@ -124,7 +213,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Notification line for [HubLinkService], or null when nothing needs keeping alive. */
+    private fun keepAliveText(link: LinkState, show: ShowState, stepInput: Int): String? {
+        val linked = link is LinkState.Connected || link is LinkState.Reconnecting
+        if (!linked && !show.hasShowLoaded) return null
+        val loaded = show.show?.takeIf { show.hasShowLoaded }
+        return when {
+            link !is LinkState.Connected -> "Reconnecting to the hub"
+            loaded?.isSequence == true && stepInput in 5..8 ->
+                "Input $stepInput fires steps with the screen off"
+            loaded?.isSequence == true -> "Sequence loaded"
+            loaded != null -> "Show loaded"
+            else -> "Linked to ${link.label}"
+        }
+    }
+
     override fun onCleared() {
+        HubLinkService.sync(getApplication(), null)
         client.close()
         wifi.stop()
         super.onCleared()

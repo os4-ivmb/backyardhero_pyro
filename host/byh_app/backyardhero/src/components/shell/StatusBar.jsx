@@ -7,6 +7,7 @@ import { cn, Stat, Dot, IconButton, Badge } from "@/design";
 import { MdRefresh, MdCloseFullscreen, MdOpenInFull, MdSignalWifi4Bar, MdSignalWifiOff, MdRestartAlt } from "react-icons/md";
 import Toast from "../common/Toast";
 import GpioOverrideBar from "./GpioOverrideBar";
+import DongleLinkIcon from "../common/DongleLinkIcon";
 import { isPollableReceiver } from "@/util/receivers";
 import { HARDWARE } from "@/util/clientEnv";
 import { fwOutOfDate, latestForBoard } from "@/util/firmwareVersion";
@@ -62,7 +63,7 @@ function QueueBar({ depth, capacity, className }) {
   // Always show at least one lit segment so a "0/128" reading is
   // visually distinct from "no telemetry available".
   const litCount = Math.max(1, Math.ceil(fraction * QUEUE_SEGMENT_COUNT));
-  const tooltip = `Dongle command queue: ${depth}/${capacity}`;
+  const tooltip = `Base command queue: ${depth}/${capacity}`;
   return (
     <div
       className={cn("flex items-center gap-[2px]", className)}
@@ -302,9 +303,9 @@ export default function StatusBar() {
         headers: { "Content-Type": "application/json" },
       });
     } catch (err) {
-      const msg = err?.response?.data?.error || err?.message || "Failed to restart dongle";
+      const msg = err?.response?.data?.error || err?.message || "Failed to restart base";
       setToasts((prev) => {
-        const next = [...prev, { id: Date.now() + Math.random(), message: `Dongle restart failed: ${msg}` }];
+        const next = [...prev, { id: Date.now() + Math.random(), message: `Base restart failed: ${msg}` }];
         return next.length > MAX_TOASTS ? next.slice(next.length - MAX_TOASTS) : next;
       });
     } finally {
@@ -413,18 +414,19 @@ export default function StatusBar() {
         <div className="flex items-center gap-3 min-w-0">
           <div className="flex flex-col min-w-0">
             <div className="flex items-center gap-1.5">
-              <Dot
+              <DongleLinkIcon
+                link={rfSettings.link}
                 tone={dongleTone}
                 pulse={dongleTone === "armed" || dongleTone === "live"}
               />
-              <span className="eyebrow">Dongle</span>
+              <span className="eyebrow">Base</span>
               {/* Distinct TX pulse — only visible while the daemon reports
                   the device transmitting. Lives next to the dongle stat
                   because that's the signal it qualifies. */}
               {dongleTone === "ok" && deviceIsTransmitting ? (
                 <span
                   className="inline-flex items-center gap-1 ml-1 text-2xs text-live font-semibold"
-                  title="Dongle is actively transmitting"
+                  title="Base is actively transmitting"
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-live animate-livePulse" />
                   TX
@@ -440,15 +442,10 @@ export default function StatusBar() {
                   dongleTone === "ok" && "text-fg-primary",
                   dongleTone === "neutral" && "text-fg-muted"
                 )}
-                title={wirelessLink ? `${dongleLabel} · ${linkTarget}` : dongleLabel}
+                title={`${dongleLabel} · ${wirelessLink ? "wireless" : "USB"} (${linkTarget})`}
               >
                 {dongleLabel}
               </span>
-              {wirelessLink ? (
-                <Badge tone="neutral" size="xs" title={`Wireless hub at ${rfSettings.hub_host || DONGLE_DEFAULTS.hubHost}`}>
-                  Hub
-                </Badge>
-              ) : null}
               {dongleTone === "danger" && dongleLabel === "Silent" ? (
                 <button
                   type="button"
@@ -459,7 +456,7 @@ export default function StatusBar() {
                     "border-danger/50 text-danger-fg bg-danger-bg hover:bg-danger/20",
                     "disabled:opacity-60 disabled:cursor-not-allowed"
                   )}
-                  title={`Re-open the dongle link (${linkTarget})`}
+                  title={`Re-open the base link (${linkTarget})`}
                 >
                   <MdRestartAlt
                     className={cn("text-sm", restartingDongle && "animate-spin")}
@@ -472,7 +469,7 @@ export default function StatusBar() {
                 <Badge
                   tone="warn"
                   size="xs"
-                  title={`Dongle firmware v${latestDongleVersion} available (running v${dongleFwVersion}). Update in Settings → Debug → Dongle firmware update.`}
+                  title={`Base firmware v${latestDongleVersion} available (running v${dongleFwVersion}). Update in Settings → Debug → Base firmware update.`}
                 >
                   Update v{latestDongleVersion}
                 </Badge>

@@ -66,7 +66,7 @@ export default function HardwareStepButton() {
         <span className="text-xs text-fg-muted">Turn the arm switch off to bind a button</span>
       ) : null}
       {hw.listening && !inputsKnown ? (
-        <span className="text-xs text-fg-muted">Waiting for the dongle to report those inputs</span>
+        <span className="text-xs text-fg-muted">Waiting for the base to report those inputs</span>
       ) : null}
       {hw.listenError ? (
         <span className="text-xs text-warn-fg">{hw.listenError}</span>

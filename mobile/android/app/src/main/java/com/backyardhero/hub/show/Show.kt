@@ -54,7 +54,13 @@ data class Show(
     val importedAt: Long,
     val type: ShowType = ShowType.TIMELINE,
     val steps: List<ShowStep> = emptyList(),
+    /** builder_shows.id when the show came from the cloud builder account. */
+    val cloudId: String? = null,
+    /** The cloud copy's updated_at at download time. */
+    val cloudUpdatedAt: String? = null,
 ) {
+    /** Unique among stored shows: file imports are keyed by [id], cloud shows by [cloudId]. */
+    val storeKey: String get() = cloudId?.let { "cloud-$it" } ?: id.toString()
     val isSequence: Boolean get() = type == ShowType.MANUAL_SEQUENCE
     val nativeCues: List<ShowCue> get() = cues.filter { it.native }
     /** 433 MHz cues. Fired live by the phone; they are not loaded into a receiver. */
@@ -274,11 +280,29 @@ class ShowStore(context: Context) {
         ?: emptyList()
 
     fun save(show: Show) {
-        File(dir, "${show.id}.json").writeText(encode(show))
+        File(dir, "${show.storeKey}.json").writeText(encode(show))
     }
 
     fun delete(show: Show) {
-        File(dir, "${show.id}.json").delete()
+        File(dir, "${show.storeKey}.json").delete()
+    }
+
+    /**
+     * Store a show downloaded from the cloud account, replacing an earlier
+     * download of the same cloud show. Cloud ids are UUIDs, so the 16-bit id
+     * the receivers get is derived here. It is new for every cloud revision:
+     * a receiver that reports the id of a show counts as loaded, so reusing
+     * the id after an edit would leave the old cues in place.
+     */
+    fun saveCloud(parsed: Show, cloudId: String, updatedAt: String): Show {
+        val taken = list().map { it.id }.toSet()
+        val show = parsed.copy(
+            id = cloudShowId(cloudId, updatedAt, taken),
+            cloudId = cloudId,
+            cloudUpdatedAt = updatedAt,
+        )
+        save(show)
+        return show
     }
 
     private fun encode(s: Show): String = buildJsonObject {
@@ -288,6 +312,8 @@ class ShowStore(context: Context) {
         put("name", s.name)
         put("durationSec", s.durationSec)
         put("importedAt", s.importedAt)
+        if (s.cloudId != null) put("cloudId", s.cloudId)
+        if (s.cloudUpdatedAt != null) put("cloudUpdatedAt", s.cloudUpdatedAt)
         put("type", if (s.isSequence) "manual_sequence" else "timeline")
         put("cues", buildJsonArray {
             for (c in s.cues) add(buildJsonObject {
@@ -314,6 +340,29 @@ class ShowStore(context: Context) {
         // parse() stamps importedAt as "now". Keep the stored time.
         val o = json.parseToJsonElement(text).jsonObject
         val at = (o["importedAt"] as? JsonPrimitive)?.content?.toLongOrNull() ?: parsed.importedAt
-        parsed.copy(importedAt = at)
+        parsed.copy(
+            importedAt = at,
+            cloudId = (o["cloudId"] as? JsonPrimitive)?.content,
+            cloudUpdatedAt = (o["cloudUpdatedAt"] as? JsonPrimitive)?.content,
+        )
     }
 }
+
+/**
+ * A receiver show id for one revision of a cloud show: stable for the same
+ * (cloud id, updated_at), above the small ids host exports use, and not one
+ * of [taken].
+ */
+internal fun cloudShowId(cloudId: String, updatedAt: String, taken: Set<Int>): Int {
+    val span = CLOUD_ID_MAX - CLOUD_ID_MIN + 1
+    val h = "$cloudId@$updatedAt".hashCode()
+    var id = CLOUD_ID_MIN + ((h xor (h ushr 16)) and 0x7FFFFFFF) % span
+    repeat(span) {
+        if (id !in taken) return id
+        id = if (id >= CLOUD_ID_MAX) CLOUD_ID_MIN else id + 1
+    }
+    return id
+}
+
+private const val CLOUD_ID_MIN = 1024
+private const val CLOUD_ID_MAX = 65535

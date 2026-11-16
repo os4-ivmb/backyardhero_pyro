@@ -14,6 +14,26 @@ export const DONGLE_DEFAULTS = {
   hubHost: DEFAULT_HUB_HOST,
 };
 
+/**
+ * Which hardware the dongle is: "omni" (byh_omni running as dongle),
+ * "legacy" (the dedicated os4_dongle module), or null when not known yet.
+ * Board type comes from the dongle heartbeat `bt` (fw_state.dongle_board_type:
+ * 0 dedicated, 1 omni). A wireless link is only possible through an Omni
+ * hub, so it settles the question before the first heartbeat arrives.
+ */
+export function dongleKind(boardType, link) {
+  const n = boardType == null ? null : parseInt(String(boardType), 10);
+  if (n === 1) return "omni";
+  if (link === DONGLE_LINK_WIRELESS) return "omni";
+  if (n === 0) return "legacy";
+  return null;
+}
+
+export const DONGLE_KIND_LABEL = {
+  omni: "Omni",
+  legacy: "Legacy dongle",
+};
+
 function isIpv4(text) {
   const parts = text.split(".");
   if (parts.length !== 4) return false;

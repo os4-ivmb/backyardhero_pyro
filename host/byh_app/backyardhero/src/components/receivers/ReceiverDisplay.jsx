@@ -477,7 +477,7 @@ function SingleReceiver({
               ${retryBusy
                 ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
                 : 'bg-gray-700 hover:bg-gray-600 text-gray-200'}`}
-            title="Retry connection (re-register with dongle)"
+            title="Retry connection (re-register with base)"
           >
             <MdRefresh className={retryBusy ? 'animate-spin' : ''} />
             Retry
@@ -647,7 +647,7 @@ function SingleReceiver({
               }
               className="h-4 w-4"
             />
-            <span>Enabled (poll from dongle)</span>
+            <span>Enabled (poll from base)</span>
           </label>
           <label className="flex flex-col gap-1">
             <span className="text-xs text-gray-400">Label</span>
@@ -1368,7 +1368,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
     ]);
 
     const lockTitle = unlocked
-      ? (hasPendingEdits ? 'Save changes & reload dongle' : 'Lock (no changes)')
+      ? (hasPendingEdits ? 'Save changes & reload base' : 'Lock (no changes)')
       : (isShowLoaded
         ? 'Cannot edit while a show is loaded — unload first'
         : 'Unlock to edit receivers');
@@ -1440,7 +1440,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
       if (type === "BKYD_TS_24_1" && !/^RX\d+$/i.test(id)) {
         setAddError(
           'BKYD_TS_24_1 receivers must be named "RX<digits>" (e.g. RX163) — ' +
-          'the dongle parses the node ID out of the ident.'
+          'the base parses the node ID out of the ident.'
         );
         return;
       }
@@ -1882,7 +1882,7 @@ export default function ReceiverDisplay({ setCurrentTab }) {
                   </div>
                 )}
                 <p className="mt-2 text-xs text-gray-500">
-                  After adding, click the lock to save and reload receivers on the dongle.
+                  After adding, click the lock to save and reload receivers on the base.
                 </p>
               </form>
             )}

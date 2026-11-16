@@ -12,9 +12,9 @@ struct OmniDongleConfig {
   // The omni's on-board status LEDs (connection indicator in dongle roles).
   Adafruit_NeoPixel* statusStrip;
   uint8_t  statusLedCount;
-  // Status pixels on the host module, driven from LED_PIN.
+  // Status pixels on the base expansion board, driven from LED_PIN.
   uint8_t  hostPixelCount;
-  // Bit indexes on the host module's input (74HC165) / output (74HC595)
+  // Bit indexes on the base expansion board's input (74HC165) / output (74HC595)
   // shift registers.
   uint8_t  armInputIndex;
   uint8_t  startInputIndex;
@@ -28,7 +28,7 @@ struct OmniDongleConfig {
 
 namespace omni_dongle {
 
-// Snapshot of the host module's input shift register. Bit N = input N,
+// Snapshot of the base expansion board's input shift register. Bit N = input N,
 // 1 = switch closed. Requires the SHIFT_IN pins to be configured.
 uint8_t readHostInputs();
 

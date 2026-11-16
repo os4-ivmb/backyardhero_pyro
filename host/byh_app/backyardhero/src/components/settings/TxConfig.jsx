@@ -95,8 +95,8 @@ export default function TxConfig() {
         htmlFor="rf-link"
         hint={
           wireless
-            ? "The laptop must be joined to the hub Wi-Fi. Dongle traffic goes over the hub WebSocket instead of USB. Receiver OTA is not available on this link."
-            : "Hard-wired USB serial. Choose Wireless to use a hub dongle on Wi-Fi."
+            ? "The laptop must be joined to the hub Wi-Fi. Base traffic goes over the hub WebSocket instead of USB. Receiver OTA is not available on this link."
+            : "Hard-wired USB serial. Choose Wireless to use an Omni base as a Wi-Fi hub."
         }
       >
         <SegmentedControl
@@ -167,7 +167,7 @@ export default function TxConfig() {
           <Field
             label="Serial device"
             htmlFor="rf-addr"
-            hint="Where the dongle is mounted. Look for a /dev/tty… path."
+            hint="Where the base is mounted. Look for a /dev/tty… path."
           >
             <input
               id="rf-addr"
@@ -182,7 +182,7 @@ export default function TxConfig() {
           <Field
             label="Baud"
             htmlFor="rf-baud"
-            hint="Match the dongle's firmware."
+            hint="Match the base's firmware."
           >
             <input
               id="rf-baud"

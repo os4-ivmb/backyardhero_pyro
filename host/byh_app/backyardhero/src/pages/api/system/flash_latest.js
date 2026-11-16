@@ -47,7 +47,7 @@ async function resolveTarget(req, device, ident) {
     const state = readDaemonState();
     const boardType = normalizeBoardType(state?.dongle_board_type);
     if (boardType == null) {
-      return { status: 409, error: 'Dongle board type not reported yet (is the dongle connected?).' };
+      return { status: 409, error: 'Base board type not reported yet (is the base connected?).' };
     }
     return {
       boardType,
@@ -195,7 +195,7 @@ export default async function handler(req, res) {
         JSON.stringify(cmd, null, 2),
       );
       return res.status(202).json({
-        message: 'Dongle flash (latest) queued.',
+        message: 'Base flash (latest) queued.',
         device,
         product,
         version: latest.version,

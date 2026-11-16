@@ -96,7 +96,11 @@ MAN_FIRE_GPIO_KEY = 'manfire'
 # After an accepted press on inputs 5–8, ignore another press on that
 # input until this elapses. Firmware already requires the level to hold
 # for 50ms; this stops a chatter or a double-tap from firing two steps.
-STEP_INPUT_LOCKOUT_S = 0.4 
+STEP_INPUT_LOCKOUT_S = 0.4
+# The web sequence console sends `sequence_run` while its fire key is live
+# and repeats it every couple of seconds. If the repeats stop (tab closed,
+# phone asleep), the run LED drops back to manual fire after this long.
+SEQUENCE_RUN_TTL_S = 5.0
 
 BAD_TX_THRESHOLD = 10 #its broken then
 
@@ -452,6 +456,12 @@ class FireworkDaemon:
         # monitor_switch only marks state dirty when one of the values it
         # derives changes (T18); the flusher's 1s timeout is the heartbeat.
         self._last_switch_snapshot = None
+        # Manual-sequence run LED. `_sequence_run_until` is the monotonic
+        # deadline of the last `sequence_run` heartbeat (0 = not running);
+        # `_sequence_led_on` says the run LED is currently showing RUNNING
+        # because of it, so monitor_switch knows to put it back.
+        self._sequence_run_until = 0.0
+        self._sequence_led_on = False
         # mtime of the webact file at the last read (skip unchanged reads).
         self._webact_mtime = None
         # Last value we stamped into /data/byh_show_state. Cached so
@@ -1104,6 +1114,8 @@ class FireworkDaemon:
                 # was allowed. Derive it from the live reading instead.
                 self.start_sw_active = (switch_state == LOW)
 
+                self._update_sequence_run_led(arming_state, switch_state, man_fire_state)
+
                 self.last_switch_state = switch_state
                 self.last_arming_state = arming_state
                 self.last_man_fire_state = man_fire_state
@@ -1192,6 +1204,23 @@ class FireworkDaemon:
     # Slow lane (T16)
     # ------------------------------------------------------------------
     @staticmethod
+    def _update_sequence_run_led(self, arming_state, switch_state, man_fire_state):
+        """Show RUNNING on the run LED while the web sequence console has
+        its fire key live and every manual-fire gate is on. Runs after the
+        switch-edge logic above, so an edge's own LED update lands first."""
+        gates = arming_state == LOW and switch_state == LOW and man_fire_state == LOW
+        want = gates and time.monotonic() < self._sequence_run_until
+        if want and not self._sequence_led_on:
+            self._sequence_led_on = True
+            self.led_handler.update("show_run_state", RUN_STATE.RUNNING.value)
+        elif not want and self._sequence_led_on:
+            self._sequence_led_on = False
+            # Start switch off: its edge already set the LED. Manual fire off:
+            # same. Otherwise (stopped, expired, arm off) go back to the
+            # manual-fire indication the sequence started from.
+            if switch_state == LOW and man_fire_state == LOW:
+                self.led_handler.update("show_run_state", RUN_STATE.MANUAL_FIRE.value)
+
     def _is_slow_command(command):
         ctype = command.get('type')
         if ctype in SLOW_LANE_COMMANDS:
@@ -1307,6 +1336,13 @@ class FireworkDaemon:
                     cmddata['target'],
                     kind=cmddata.get('kind'),
                 )
+            elif command['type'] == 'sequence_run':
+                # Heartbeat from the web sequence console; monitor_switch
+                # turns it into the run LED within 100ms.
+                if command.get('active'):
+                    self._sequence_run_until = time.monotonic() + SEQUENCE_RUN_TTL_S
+                else:
+                    self._sequence_run_until = 0.0
             elif command['type'] == 'delegate_launch':
                 self.delegate_start_to_client = command.get('do_it', False)
             elif command['type'] == 'start_show':

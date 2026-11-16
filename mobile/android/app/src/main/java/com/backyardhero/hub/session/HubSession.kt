@@ -674,6 +674,7 @@ class HubSession(
         val (step, cues) = groups.getOrNull(index) ?: return
         lastStepFireMs = now
         _show.update { it.copy(sequenceIndex = index + 1, sequenceFiring = cues.isNotEmpty(), message = null) }
+        pushLedState(force = false)
         if (cues.isEmpty()) return
         showJob?.cancel()
         showJob = scope.launch {
@@ -690,6 +691,7 @@ class HubSession(
                 }
             } finally {
                 _show.update { it.copy(sequenceFiring = false) }
+                pushLedState(force = false)
             }
         }
     }
@@ -1189,6 +1191,18 @@ class HubSession(
         pushLedState(force = false)
     }
 
+    /**
+     * A manual sequence counts as running from the first step fired until
+     * the last one has finished sending, while every manual-fire gate is on.
+     * Before the first step, and once it's complete, the LED shows manual fire.
+     */
+    private fun sequenceRunning(st: ShowState, sw: Switches): Boolean {
+        val show = st.show ?: return false
+        if (!show.isSequence || st.phase != ShowPhase.LOADED) return false
+        if (!sw.armed || !sw.startEngaged || !sw.manualEngaged) return false
+        return st.sequenceFiring || st.sequenceIndex in 1 until show.groupedSteps().size
+    }
+
     private fun pushLedState(force: Boolean) {
         if (client.state.value !is LinkState.Connected) return
         val st = _show.value
@@ -1205,6 +1219,7 @@ class HubSession(
                 st.phase == ShowPhase.COUNTDOWN -> RunLed.COUNTDOWN
                 st.phase == ShowPhase.STARTING -> RunLed.PRECHECK
                 st.phase == ShowPhase.PAUSED -> RunLed.PAUSED
+                sequenceRunning(st, sw) -> RunLed.RUNNING
                 sw.manualEngaged -> RunLed.MANUAL_FIRE
                 sw.armed && st.phase == ShowPhase.LOADED -> RunLed.ARMED
                 else -> RunLed.OFF
