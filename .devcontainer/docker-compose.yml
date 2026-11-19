@@ -17,6 +17,9 @@ services:
     build:
       context: ../host
       dockerfile: Dockerfile
+      args:
+        # Keep devDependencies (tailwindcss/postcss/...) -- `next dev` needs them.
+        PRUNE_DEV_DEPS: "false"
     # NOTE: intentionally NO `container_name`. A fixed name is GLOBAL, so the
     # VS Code Dev Containers project and a manual `docker compose up` would
     # collide ("name already in use"). Letting Compose derive the name per

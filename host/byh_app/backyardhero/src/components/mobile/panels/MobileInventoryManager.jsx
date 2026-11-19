@@ -14,6 +14,9 @@ import {
   ShellFields,
   FuseFields,
 } from "@/components/inventory/InventoryManager";
+import SegmentsEditor from "@/components/inventory/SegmentsEditor";
+import { SegmentsBadge } from "@/components/inventory/InventoryList";
+import { isSegmentableType } from "@/util/segments";
 
 // Card-based inventory listing for mobile. The desktop version uses a
 // dense table that doesn't fit a phone width (8 columns, sortable
@@ -213,6 +216,17 @@ function MobileInventoryEditor({
             />
           </div>
 
+          {isSegmentableType(formObject.type) && (
+            <div className="border-t border-border-subtle pt-4">
+              <SegmentsEditor
+                key={formObject.id || "new"}
+                touch
+                metadata={formObject.metadata}
+                onChange={(metadata) => setFormObject((prev) => ({ ...prev, metadata }))}
+              />
+            </div>
+          )}
+
           <div className="flex flex-col gap-2 pt-2">
             <Button
               variant="primary"
@@ -270,6 +284,7 @@ function ItemCard({ item, onTap }) {
             <FaTriangleExclamation className="text-warn mt-0.5 shrink-0" title={reason} aria-label={reason} />
           ) : null}
           <div className="font-medium text-fg-primary truncate">{item.name}</div>
+          <SegmentsBadge item={item} className="mt-1" />
         </div>
         <div className="mt-0.5 text-xs text-fg-muted truncate">
           {getTypeLabel(item.type)}

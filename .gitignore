@@ -19,6 +19,9 @@ host/data/leddata
 host/data/webactstate
 host/data/byh_show_state
 host/data/update-backups/
+host/data/*.db-shm
+host/data/*.db-wal
+host/data/*copy.db
 *.state.*
 
 **/.DS_Store

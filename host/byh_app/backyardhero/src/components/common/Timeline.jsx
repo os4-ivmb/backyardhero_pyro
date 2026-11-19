@@ -70,8 +70,10 @@ const cakeTypesWithFiringProfiles = (type) =>
 // timeline re-render (scroll, playhead, another cue's drag). Returns times in
 // the same [start_ms, end_ms(, color)] format the renderer expects.
 function computeShots(item, firingProfiles, inventory) {
+  // A cue firing one section of a segmented piece has no shot profile of its
+  // own -- the item's profile covers the whole piece, so don't overlay it.
   const firingProfile =
-    cakeTypesWithFiringProfiles(item.type) && item.itemId
+    cakeTypesWithFiringProfiles(item.type) && item.itemId && item.segmentId == null
       ? firingProfiles[item.itemId]
       : null;
   let shots = firingProfile?.shot_timestamps || [];

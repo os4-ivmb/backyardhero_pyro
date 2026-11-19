@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { FiEye, FiEyeOff, FiEdit2, FiCheck } from "react-icons/fi";
+import { FiEye, FiEyeOff, FiEdit2, FiCheck, FiAlertTriangle } from "react-icons/fi";
+import { LuBlocks } from "react-icons/lu";
 import useAppStore from '@/store/useAppStore';
 import { Button, IconButton, Card, CardHeader, Stat, cn, inputClass, selectClass, fieldLabelClass } from "@/design";
 import {
@@ -214,10 +215,12 @@ const computeItemCost = (item, inventoryById) => {
   // Default: a single inventory-backed item (cake, aerial shell, etc).
   // `multiple` lets one cue fire several physical units; the cost scales 1:1.
   const qty = Number.isFinite(item.multiple) && item.multiple >= 1 ? item.multiple : 1;
+  // A single section of a segmented piece costs its share of the piece.
+  const share = item.segmentId != null && item.segmentCount > 0 ? 1 / item.segmentCount : 1;
   if (item.unit_cost != null && item.unit_cost !== "") {
-    return toCost(item.unit_cost) * qty;
+    return toCost(item.unit_cost) * qty * share;
   }
-  return lookupCost(item.itemId) * qty;
+  return lookupCost(item.itemId) * qty * share;
 };
 
 // Compact "Saved · 3s ago" / "Saving..." / "Unsaved changes" pill that
@@ -284,6 +287,9 @@ const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
 export default function ShowStateHeader({
   items,
+  // Precomputed by ShowBuilder (util/showWarnings) so the tab badge and this
+  // list share one source.
+  warnings = [],
   showMetadata,
   setShowMetadata,
   refreshInventoryFnc,
@@ -488,6 +494,35 @@ export default function ShowStateHeader({
           <Stat label="Total cost" value={formatMoney(stats.totalCost)} numeric />
           <Stat label="Cost / min" value={formatMoney(stats.costPerMin)} numeric />
         </div>
+      </Card>
+
+      {/* Authoring warnings */}
+      <Card tone="raised" padding="md">
+        <CardHeader
+          eyebrow="Checks"
+          title={warnings.length ? `Warnings (${warnings.length})` : "Warnings"}
+        />
+        {warnings.length === 0 ? (
+          <p className="text-sm text-fg-muted">No warnings.</p>
+        ) : (
+          <ul className="space-y-2">
+            {warnings.map((w) => (
+              <li
+                key={w.id}
+                className="flex items-start gap-3 rounded-sm border border-warn/40 bg-warn/10 px-3 py-2"
+              >
+                <FiAlertTriangle className="text-warn mt-0.5 shrink-0" aria-hidden />
+                <div className="min-w-0 text-sm">
+                  <div className="font-medium text-fg-primary flex items-center gap-1.5">
+                    {w.kind === "segments" ? <LuBlocks className="text-fg-muted" aria-hidden /> : null}
+                    {w.title}
+                  </div>
+                  <div className="text-fg-secondary">{w.detail}</div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
       </Card>
     </div>
   );

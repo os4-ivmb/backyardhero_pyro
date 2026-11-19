@@ -4,6 +4,8 @@ import { MdEdit, MdMoreVert } from "react-icons/md";
 import { FaImage, FaVideo, FaChartLine, FaTriangleExclamation } from "react-icons/fa6";
 import { FaCheckCircle, FaUpload } from "react-icons/fa";
 import { FiPackage } from "react-icons/fi";
+import { LuBlocks } from "react-icons/lu";
+import { getSegments } from "@/util/segments";
 
 import { INV_TYPES, getTypeLabel } from "@/constants";
 import {
@@ -255,6 +257,7 @@ export default function InventoryList({ inventory, setActiveItem, refreshInvento
                 </span>
               )}
               <span className="truncate font-medium text-fg-primary">{it.name}</span>
+              <SegmentsBadge item={it} />
             </div>
           </TD>
         );
@@ -600,5 +603,20 @@ export default function InventoryList({ inventory, setActiveItem, refreshInvento
         onImportComplete={() => refreshInventory && refreshInventory()}
       />
     </div>
+  );
+}
+
+// Blocks icon next to a piece that has been broken down into sections.
+export function SegmentsBadge({ item, className = "" }) {
+  const n = getSegments(item).length;
+  if (!n) return null;
+  return (
+    <span
+      className={cn("text-fg-muted shrink-0 inline-flex", className)}
+      title={`Broken down into ${n} section${n === 1 ? "" : "s"} — sections can be placed on the timeline individually`}
+      aria-label={`${n} sections`}
+    >
+      <LuBlocks aria-hidden />
+    </span>
   );
 }

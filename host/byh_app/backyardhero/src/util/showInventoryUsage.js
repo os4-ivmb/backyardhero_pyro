@@ -36,6 +36,10 @@ function parsePayload(displayPayload) {
  */
 export function computeInventoryUsage(displayPayload, inventoryById = {}) {
   const usage = new Map();
+  // Section cues of segmented pieces: itemId -> Map(segmentId -> count). One
+  // physical piece covers one use of every section, so a piece's unit count
+  // is the max across its sections (see util/segments).
+  const sectionUsage = new Map();
 
   const add = (entry) => {
     if (!entry || entry.itemId == null) return;
@@ -43,6 +47,12 @@ export function computeInventoryUsage(displayPayload, inventoryById = {}) {
     const inv = inventoryById[entry.itemId];
     if (!inv || inv.type === "AERIAL_SHELL") return;
     const key = String(entry.itemId);
+    if (entry.segmentId != null) {
+      if (!sectionUsage.has(key)) sectionUsage.set(key, new Map());
+      const m = sectionUsage.get(key);
+      m.set(entry.segmentId, (m.get(entry.segmentId) || 0) + qtyOf(entry));
+      return;
+    }
     usage.set(key, (usage.get(key) || 0) + qtyOf(entry));
   };
 
@@ -53,6 +63,11 @@ export function computeInventoryUsage(displayPayload, inventoryById = {}) {
       continue;
     }
     add(cue);
+  }
+
+  for (const [key, m] of sectionUsage) {
+    const pieces = Math.max(0, ...m.values());
+    usage.set(key, (usage.get(key) || 0) + pieces);
   }
 
   return usage;

@@ -21,6 +21,7 @@ import { asyncPrompt, asyncAlert } from "@/components/common/AsyncPrompt";
 import ShowHealthStrip from "../../console/ShowHealthStrip";
 import ManualSequenceConsole from "../../console/ManualSequenceConsole";
 import { isManualSequenceShow } from "@/util/showConfig";
+import { applySegmentToCue } from "@/util/segments";
 
 // ---------------------------------------------------------------------------
 // MobileConsolePanel -- mobile-tuned console.
@@ -64,10 +65,7 @@ function MobileShowPicker() {
   }, [shows, filter]);
 
   const handleStage = (show) => {
-    const items = JSON.parse(show.display_payload || "[]").map((pi) => ({
-      ...inventoryById[pi.itemId],
-      ...pi,
-    }));
+    const items = JSON.parse(show.display_payload || "[]").map((pi) => applySegmentToCue({ ...inventoryById[pi.itemId], ...pi }, inventoryById[pi.itemId]));
     let audioTracks = [];
     let audioFile = null;
     let audioOffsetMs = 0;
@@ -512,9 +510,7 @@ export default function MobileConsolePanel() {
     if (!found) return;
     let parsedItems = [];
     try {
-      parsedItems = JSON.parse(found.display_payload).map((pi) => ({
-        ...inventoryById[pi.itemId], ...pi,
-      }));
+      parsedItems = JSON.parse(found.display_payload).map((pi) => applySegmentToCue({ ...inventoryById[pi.itemId], ...pi }, inventoryById[pi.itemId]));
     } catch { /* tolerate */ }
     let audioTracks = [];
     let audioFile = null;

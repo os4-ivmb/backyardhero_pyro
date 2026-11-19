@@ -5,6 +5,7 @@ import { FiTarget, FiEdit, FiRadio, FiFilm } from "react-icons/fi";
 import { MdAssignment, MdHome, MdOutlineBugReport } from "react-icons/md";
 
 import useAppStore from "@/store/useAppStore";
+import useStateAppStore from "@/store/useStateAppStore";
 import useAppMode from "@/design/useAppMode";
 import useIsMobile from "@/design/useIsMobile";
 import { Button } from "@/design";
@@ -87,6 +88,16 @@ function DesktopMainNav() {
   // consumed downstream by the Load Show gate in ShowControl.
   const verification = useShowReceiverVerification();
 
+  // While a show is live (countdown or running), the Console panel owns the
+  // pyromusical playback (MiniWave / wavesurfer). Unmounting it on a tab
+  // switch would kill the music and restart the song from 0 on return, so we
+  // keep it mounted -- just hidden -- until the show finishes.
+  const liveStatus = useStateAppStore((s) => {
+    const fw = s.stateData?.fw_state;
+    return !!fw?.show_running || (fw?.proto_handler_status || "").startsWith("START");
+  });
+  const keepConsoleMounted = hardware && liveStatus;
+
   // Loadout tab only makes sense when there's something staged. If the
   // user is on it and the staged show goes away, fall back to console.
   useEffect(() => {
@@ -164,7 +175,11 @@ function DesktopMainNav() {
       }
       statusBar={<StatusBar />}
     >
-      {currTab === "main"      && <ConsolePanel setCurrentTab={setCurrTab} />}
+      {(currTab === "main" || keepConsoleMounted) && (
+        <div style={{ display: currTab === "main" ? "contents" : "none" }}>
+          <ConsolePanel setCurrentTab={setCurrTab} />
+        </div>
+      )}
       {currTab === "shows"     && (
         <ShowPicker
           onStaged={() => setCurrTab("editor")}

@@ -11,6 +11,7 @@ import { asyncAlert, asyncConfirm } from "@/components/common/AsyncPrompt";
 import { isImportedShow } from "@/util/showImport/isImportedShow";
 import { isManualSequenceShow } from "@/util/showConfig";
 import ImportShowModal from "@/components/console/import/ImportShowModal";
+import { applySegmentToCue } from "@/util/segments";
 
 // Empty-state surface for the console: a clean picker for staging shows.
 // Replaces:
@@ -47,10 +48,7 @@ export default function ShowPicker({
   const archivedShows = useMemo(() => filtered.filter((s) => s.archived_at), [filtered]);
 
   const handleStage = (show) => {
-    const items = JSON.parse(show.display_payload || "[]").map((pi) => ({
-      ...inventoryById[pi.itemId],
-      ...pi,
-    }));
+    const items = JSON.parse(show.display_payload || "[]").map((pi) => applySegmentToCue({ ...inventoryById[pi.itemId], ...pi }, inventoryById[pi.itemId]));
     let audioTracks = [];
     let audioFile = null;
     let audioOffsetMs = 0;

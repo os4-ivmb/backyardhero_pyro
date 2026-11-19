@@ -15,6 +15,7 @@ import { Card } from "@/design";
 import { isPollableReceiver } from "@/util/receivers";
 import { parseAudioField } from "@/utils/audioTracks";
 import { isManualSequenceShow } from "@/util/showConfig";
+import { applySegmentToCue } from "@/util/segments";
 
 // ---------------------------------------------------------------------------
 // ConsolePanel — the operational console (replaces homepanel/StatusPanel.jsx).
@@ -122,9 +123,7 @@ export default function ConsolePanel() {
     if (!found) return;
     let parsedItems = [];
     try {
-      parsedItems = JSON.parse(found.display_payload).map((pi) => ({
-        ...inventoryById[pi.itemId], ...pi,
-      }));
+      parsedItems = JSON.parse(found.display_payload).map((pi) => applySegmentToCue({ ...inventoryById[pi.itemId], ...pi }, inventoryById[pi.itemId]));
     } catch { /* tolerate */ }
     let audioTracks = [];
     let audioFile = null;

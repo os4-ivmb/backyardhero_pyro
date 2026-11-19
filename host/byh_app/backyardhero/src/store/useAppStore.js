@@ -4,6 +4,7 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import axios from 'axios';
 import { parseAudioField } from '@/utils/audioTracks';
 import { parseShowConfig } from '@/util/showConfig';
+import { applySegmentToCue } from "@/util/segments";
 
 const receiverRowToStoreEntry = (row) => ({
   label: row.label,
@@ -281,10 +282,7 @@ const useAppStore = create(persist((set, get) => ({
     }
     let items = [];
     try {
-      items = JSON.parse(found.display_payload || '[]').map((pi) => ({
-        ...inventoryById[pi.itemId],
-        ...pi,
-      }));
+      items = JSON.parse(found.display_payload || '[]').map((pi) => applySegmentToCue({ ...inventoryById[pi.itemId], ...pi }, inventoryById[pi.itemId]));
     } catch (e) {
       console.error('Failed to parse display_payload for staged show:', e);
     }

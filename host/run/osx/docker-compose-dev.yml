@@ -14,6 +14,9 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
+      args:
+        # Keep devDependencies (tailwindcss/postcss/...) -- `next dev` needs them.
+        PRUNE_DEV_DEPS: "false"
     container_name: firework-system
     restart: unless-stopped
     volumes:

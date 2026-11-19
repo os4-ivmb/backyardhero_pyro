@@ -6,6 +6,8 @@ import useAppStore from "@/store/useAppStore";
 import { Section, Button, IconButton, Card, cn } from "@/design";
 
 import InventoryList from "./InventoryList";
+import SegmentsEditor from "./SegmentsEditor";
+import { isSegmentableType } from "@/util/segments";
 import { INV_TYPES, INV_COLOR_CODE, DEFAULT_ITEM_COLOR } from "@/constants";
 
 // Quick-pick swatches for the inventory timeline-colour field.
@@ -311,7 +313,7 @@ export const AddInventoryForm = (props) => {
       />
       <div
         id="editForm"
-        className="relative z-[101] w-full max-w-md max-h-[min(90dvh,720px)] overflow-y-auto overscroll-contain rounded-md border border-border bg-surface-1 shadow-e3"
+        className="relative z-[101] w-full max-w-lg max-h-[min(90dvh,720px)] overflow-y-auto overscroll-contain rounded-md border border-border bg-surface-1 shadow-e3"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between gap-2 px-5 h-12 border-b border-border-subtle">
@@ -409,6 +411,16 @@ export const AddInventoryForm = (props) => {
               handleYouTubeLinkBlur={handleYouTubeLinkBlur}
             />
           </div>
+
+          {isSegmentableType(formObject.type) && (
+            <div className="border-t border-border-subtle pt-4">
+              <SegmentsEditor
+                key={formObject.id || "new"}
+                metadata={formObject.metadata}
+                onChange={(metadata) => setFormObject((prev) => ({ ...prev, metadata }))}
+              />
+            </div>
+          )}
 
           <div className="flex items-center justify-between pt-2 border-t border-border-subtle">
             <Button variant="primary" onClick={commitObject}>

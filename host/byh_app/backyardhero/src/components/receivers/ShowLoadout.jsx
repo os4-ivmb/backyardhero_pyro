@@ -6,6 +6,7 @@ import {
   parseShellPackShellKey,
 } from "@/utils/shellUsageCounts";
 import { getTypeLabel } from "@/constants";
+import { isSectionCue, addSlicedPiecesToPack, sliceNote, cueSegmentNotation, toInventoryById } from "@/util/segments";
 import { buildShowReceiverCueMap } from "@/util/showReceivers";
 import { audioFieldFromShow } from "@/utils/audioTracks";
 import { asyncAlert } from "@/components/common/AsyncPrompt";
@@ -45,6 +46,7 @@ const CAKE_AND_FOUNTAIN_PACK_TYPES = new Set([
 
 function ShowLoadout({ setCurrentTab }) {
   const { systemConfig, stagedShow, updateShow, inventory } = useAppStore();
+  const inventoryMap = useMemo(() => toInventoryById(inventory), [inventory]);
   const stateData = useStateFields(["fw_state.receivers", "fw_state.active_protocol"]);
   const [targetRcvMap, setTargetRcvMap] = useState({});
   const [receivers, setReceivers] = useState([]);
@@ -283,6 +285,8 @@ function ShowLoadout({ setCurrentTab }) {
 
     const addToPack = (entry, qty) => {
       if (!entry || !CAKE_AND_FOUNTAIN_PACK_TYPES.has(entry.type)) return;
+      // Sections of a sliced piece are folded in per base piece below.
+      if (entry.segmentId != null && isSectionCue(entry, inventoryMap[entry.itemId])) return;
       const key = `${entry.name}-${entry.type}`;
       if (!itemCounts[key]) {
         // Steps inside a FUSED_LINE only carry references; pull image/etc
@@ -317,6 +321,7 @@ function ShowLoadout({ setCurrentTab }) {
       addToPack(item, qty);
     });
 
+    addSlicedPiecesToPack(itemCounts, stagedShow.items, inventory);
     return Object.values(itemCounts).sort((a, b) => a.name.localeCompare(b.name));
   };
 
@@ -915,6 +920,22 @@ function ShowLoadout({ setCurrentTab }) {
                                 )}
                               </h3>
 
+                              {/* Section of a sliced piece: receiver:cue -> piece:section */}
+                              {(() => {
+                                const seg = cueSegmentNotation(item, inventoryMap[item.itemId]);
+                                if (!seg) return null;
+                                return (
+                                  <p className="mb-2 text-sm">
+                                    <span className="font-mono font-semibold text-amber-300 bg-gray-900 border border-amber-500/40 rounded px-2 py-0.5">
+                                      {seg.text}
+                                    </span>
+                                    <span className="block text-gray-400 text-xs mt-1">
+                                      Section {seg.index} of {seg.count}{seg.label ? ` · ${seg.label}` : ""}
+                                    </span>
+                                  </p>
+                                );
+                              })()}
+
                               {/* Item Type */}
                               <p className="text-gray-400 text-sm mb-2">
                                 Type: {getTypeLabel(item.type)}
@@ -1317,6 +1338,11 @@ function ShowLoadout({ setCurrentTab }) {
                     <div className="bg-blue-600 text-white px-3 py-1 rounded-full text-sm font-bold">
                       Count: {item.count}
                     </div>
+                    {item.slicePieces ? (
+                      <p className="mt-2 text-amber-300 text-xs font-semibold text-center">
+                        ✂ {sliceNote(item)}
+                      </p>
+                    ) : null}
                   </div>
                 ))}
               </div>

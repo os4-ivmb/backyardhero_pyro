@@ -7,6 +7,7 @@ import useAppStore from "@/store/useAppStore";
 import useStateAppStore from "@/store/useStateAppStore";
 import { Card, Section, Button, Badge, cn } from "@/design";
 import { getTypeLabel } from "@/constants";
+import { isSectionCue, addSlicedPiecesToPack, sliceNote, cueSegmentNotation, toInventoryById } from "@/util/segments";
 import { buildShowReceiverCueMap } from "@/util/showReceivers";
 import {
   buildShellUsageCountsFromRackCellAssignments,
@@ -62,6 +63,8 @@ function getShellDescriptionFromMetadata(shellData, shellNumber) {
 
 function ReceiverLoadoutCard({ rcvKey, label, zone, cues, mapping }) {
   const [open, setOpen] = useState(true);
+  const inventory = useAppStore((s) => s.inventory);
+  const inventoryMap = useMemo(() => toInventoryById(inventory), [inventory]);
   const assignedCount = cues.filter((t) => mapping?.[zone]?.[t]).length;
   return (
     <Card padding="none" tone="raised" className="overflow-hidden">
@@ -111,6 +114,14 @@ function ReceiverLoadoutCard({ rcvKey, label, zone, cues, mapping }) {
                         {item.type ? getTypeLabel(item.type) : "—"}
                         {item.multiple > 1 ? ` · ×${item.multiple}` : ""}
                       </div>
+                      {(() => {
+                        const seg = cueSegmentNotation(item, inventoryMap?.[item.itemId]);
+                        return seg ? (
+                          <div className="text-2xs font-mono text-warn truncate">
+                            {seg.text} · section {seg.index}/{seg.count}{seg.label ? ` · ${seg.label}` : ""}
+                          </div>
+                        ) : null;
+                      })()}
                     </>
                   ) : (
                     <span className="text-fg-muted text-sm italic">Empty</span>
@@ -442,6 +453,9 @@ function PackList({ items }) {
             <div className="text-2xs text-fg-muted truncate">
               {getTypeLabel(it.type)}
             </div>
+            {it.slicePieces ? (
+              <div className="text-2xs text-warn truncate">✂ {sliceNote(it)}</div>
+            ) : null}
           </div>
           <Badge tone="neutral">×{it.count}</Badge>
         </li>
@@ -452,6 +466,7 @@ function PackList({ items }) {
 
 export default function MobileShowLoadout({ setCurrentTab }) {
   const { systemConfig, stagedShow, inventory } = useAppStore();
+  const inventoryMap = useMemo(() => toInventoryById(inventory), [inventory]);
   const stateData = useStateAppStore((s) => s.stateData);
   const [targetRcvMap, setTargetRcvMap] = useState({});
   const [showReceivers, setShowReceivers] = useState({});
@@ -608,6 +623,8 @@ export default function MobileShowLoadout({ setCurrentTab }) {
     const itemCounts = {};
     const addToPack = (entry, qty) => {
       if (!entry || !CAKE_AND_FOUNTAIN_PACK_TYPES.has(entry.type)) return;
+      // Sections of a sliced piece are folded in per base piece below.
+      if (entry.segmentId != null && isSectionCue(entry, inventoryMap[entry.itemId])) return;
       const key = `${entry.name}-${entry.type}`;
       if (!itemCounts[key]) {
         const inv = entry.itemId != null
@@ -636,6 +653,7 @@ export default function MobileShowLoadout({ setCurrentTab }) {
         ? item.multiple : 1;
       addToPack(item, qty);
     });
+    addSlicedPiecesToPack(itemCounts, stagedShow.items, inventory);
     return Object.values(itemCounts).sort((a, b) => a.name.localeCompare(b.name));
   }, [stagedShow?.items, inventory]);
 

@@ -46,8 +46,11 @@ RUN npm ci
 COPY --chown=node:node byh_app/backyardhero /app/byh_app/
 
 
-# Build Next.js application
-RUN npm run build && npm prune --omit=dev
+# Build Next.js application. Dev builds (docker-compose-dev.yml) set
+# PRUNE_DEV_DEPS=false: `next dev` needs the devDependencies (tailwindcss,
+# postcss, autoprefixer, sass) that the prune would strip.
+ARG PRUNE_DEV_DEPS=true
+RUN npm run build && if [ "$PRUNE_DEV_DEPS" = "true" ]; then npm prune --omit=dev; fi
 USER root
 
 # Copy Python application files

@@ -20,6 +20,7 @@ import {
   FiUpload,
   FiPlus,
   FiX,
+  FiAlertTriangle,
 } from "react-icons/fi";
 import Timeline from "../common/Timeline";
 import useAppStore from '@/store/useAppStore';
@@ -37,6 +38,11 @@ import ControlsTab from "./ControlsTab";
 import HistoryPanel from "./HistoryPanel";
 import SequenceEditor from "./SequenceEditor";
 import { AddInventoryForm } from "../inventory/InventoryManager";
+import { SegmentsBadge } from "../inventory/InventoryList";
+import { computeShowWarnings } from "@/util/showWarnings";
+import {
+  getSegments, segmentLabel, segmentCueName, applySegmentToCue,
+} from "@/util/segments";
 import {
   SHOW_TYPE_MANUAL_SEQUENCE,
   SHOW_TYPE_TIMELINE,
@@ -142,6 +148,12 @@ const MULTIPLE_FIRE_TYPES = new Set([
   "AERIAL_SHELL",
 ]);
 
+// Tooltip for the Add/Edit cue "Section" select (segmented pieces).
+const SECTION_SELECT_TOOLTIP =
+  "Pick a single section when you're poking (separately fusing/igniting) individual sections of this cake, " +
+  "so each section fires on its own cue. Pick \"Entire Piece\" when you light the cake as one item from a single cue. " +
+  "Each section uses its own duration and colour, and Show Details warns about any leftover sections.";
+
 // `stepLabel` (e.g. "step 3") switches the copy to manual-sequence wording and
 // hides the timeline-only start time.
 const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, items, inventory, availableDevices, receiverLabels, showMetadata, editItem, presetItem, presetTarget, stepLabel = null }) => {
@@ -173,6 +185,8 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
   const [startAtText, setStartAtText] = useState("00:00.00");
   const [fireMultiple, setFireMultiple] = useState(false);
   const [multipleCount, setMultipleCount] = useState(2);
+  // Section of a segmented piece to place ("" = the entire piece).
+  const [segmentId, setSegmentId] = useState("");
   const [error, setError] = useState(null);
   // Additional receiver/cue slots (add flow only). Each gets its own copy of
   // the cue at the same time / in the same step. `key` is a stable React key.
@@ -206,6 +220,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
     setTarget(editItem.target ?? null);
     setMetaLabel(editItem.name ?? "");
     setMetaDelaySec(Number(editItem.metaDelaySec) || 0);
+    setSegmentId(editItem.segmentId ?? "");
     setMetaDuration(type === "GENERIC" ? Number(editItem.duration) || 5 : 5);
     const m = Number(editItem.multiple) || 1;
     setFireMultiple(m > 1);
@@ -281,6 +296,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
       const item = inventory.find((i) => i.id === last.itemId && i.type === last.type) || null;
       setSelectedItem(item);
       setMetaLabel(item?.name ?? "");
+      setSegmentId("");
     }
     setMetaDelaySec(last.metaDelaySec);
     setFireMultiple(last.fireMultiple);
@@ -302,6 +318,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
     setSelectedType(presetItem.type || "CAKE_FOUNTAIN");
     setSelectedItem(presetItem);
     setMetaLabel(presetItem.name ?? "");
+    setSegmentId("");
     setFireMultiple(false);
     setMultipleCount(2);
     setError(null);
@@ -335,6 +352,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
     setMetaDuration(5);
     setFireMultiple(false);
     setMultipleCount(2);
+    setSegmentId("");
     setExtraRoutings([]);
     setError(null);
   }, [isOpen]);
@@ -473,17 +491,36 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
 
   const filteredInventory = inventory.filter((item) => item.type === selectedType).sort((a, b) => a.name.localeCompare(b.name));
 
+  // Sections defined on the selected piece (empty when not broken down).
+  const itemSegments = getSegments(selectedItem);
+  const selectedSegmentIdx = segmentId ? itemSegments.findIndex((sg) => sg.id === segmentId) : -1;
+  const selectedSegment = selectedSegmentIdx >= 0 ? itemSegments[selectedSegmentIdx] : null;
+  const autoSegmentLabel = selectedSegment && selectedItem
+    ? segmentCueName(selectedItem.name, selectedSegmentIdx)
+    : null;
+
   const handleItemSelected = (item) => {
     // Keep the label in sync with the chosen item as the user changes their
     // pick. We only auto-update when the label is empty or still equals the
     // previously selected item's name (i.e. it was auto-filled). If the user
     // typed a custom label, we leave it alone.
     setMetaLabel((prev) =>
-      !prev || prev === selectedItem?.name ? item.name : prev
+      !prev || prev === selectedItem?.name || prev === autoSegmentLabel ? item.name : prev
     );
+    if (item?.id !== selectedItem?.id) setSegmentId("");
 
     setSelectedItem(item)
   }
+
+  // Pick a section of the selected piece; keep an auto-filled label in sync.
+  const handleSegmentSelected = (nextId) => {
+    const idx = itemSegments.findIndex((sg) => sg.id === nextId);
+    const nextAuto = idx >= 0 ? segmentCueName(selectedItem.name, idx) : selectedItem.name;
+    setMetaLabel((prev) =>
+      !prev || prev === selectedItem?.name || prev === autoSegmentLabel ? nextAuto : prev
+    );
+    setSegmentId(nextId);
+  };
 
   const handleAdd = () => {
     // Every slot this cue will be placed on: the primary zone/target plus any
@@ -569,6 +606,12 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
         ? Math.max(2, Math.floor(multipleCount) || 2)
         : 1;
 
+      // A single section of a segmented piece: the section owns the cue's
+      // duration/colour and its default label is "<piece>[<index>]".
+      const segFields = selectedSegment
+        ? applySegmentToCue({ segmentId: selectedSegment.id }, selectedItem)
+        : {};
+
       emit({ 
         ...selectedItem, 
         startTime, 
@@ -576,11 +619,12 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
         target,
         // The label field shows "Auto-fills from item name"; honour that on
         // save even if the operator never touched it.
-        name: metaLabel || selectedItem.name,
+        name: metaLabel || autoSegmentLabel || selectedItem.name,
         metaDelaySec,
         delay: (metaDelaySec || 0) + itemDelay,
         itemId: selectedItem.id,
         ...(multiple > 1 ? { multiple } : {}),
+        ...segFields,
       });
       onClose();
     } else if (fusedLine) {
@@ -732,6 +776,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
     setMetaDuration(5);
     setFireMultiple(false);
     setMultipleCount(2);
+    setSegmentId("");
   };
 
   const handleFusedLineAdd = (fusedLine) => {
@@ -1005,7 +1050,10 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
                         )}
                         onClick={() => handleItemSelected(item)}
                       >
-                        <span className="truncate">{item.name}</span>
+                        <span className="flex items-center gap-1.5 min-w-0">
+                          <span className="truncate">{item.name}</span>
+                          <SegmentsBadge item={item} />
+                        </span>
                         <span className="num text-2xs text-fg-muted shrink-0">
                           {Number(item.duration || 0).toFixed(1)}s
                         </span>
@@ -1014,6 +1062,36 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
                   })}
                 </ul>
               </Card>
+            </Field>
+          )}
+
+          {showsInventoryList && itemSegments.length > 0 && (
+            <Field
+              label={
+                <span className="inline-flex items-center gap-1">
+                  Section
+                  <FiHelpCircle
+                    className="text-fg-muted normal-case cursor-help"
+                    title={SECTION_SELECT_TOOLTIP}
+                    aria-label={SECTION_SELECT_TOOLTIP}
+                  />
+                </span>
+              }
+              hint="This piece is broken down into sections. Place the whole piece or a single section."
+            >
+              <select
+                title={SECTION_SELECT_TOOLTIP}
+                className={inputClass}
+                value={selectedSegment ? segmentId : ""}
+                onChange={(e) => handleSegmentSelected(e.target.value)}
+              >
+                <option value="">Entire Piece</option>
+                {itemSegments.map((sg, i) => (
+                  <option key={sg.id} value={sg.id}>
+                    {`${i + 1}. ${segmentLabel(sg, i)} — ${Number(sg.duration || 0).toFixed(1)}s`}
+                  </option>
+                ))}
+              </select>
             </Field>
           )}
 
@@ -3181,6 +3259,9 @@ const SAVEABLE_ITEM_ATTRIBUTES = [
   "locked",
   // Manual-sequence step the cue fires in (see util/showConfig).
   "stepId",
+  // Section of a segmented inventory piece this cue fires (util/segments).
+  // Duration/colour are re-derived from the live segment on hydrate.
+  "segmentId",
 ];
 // Item fields that MUST persist as real numbers. A few authoring paths
 // (and older imported payloads) can leave these as strings, which then
@@ -3197,7 +3278,7 @@ const coerceNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 const cueName = (it) => (it && it.name ? `“${it.name}”` : "cue");
 // Tracked fields whose change counts as an "edit" (beyond move/lock, handled
 // separately). Kept in sync with the History panel's diff view.
-const DIFF_FIELD_KEYS = ["duration", "zone", "target", "delay", "name", "type", "metaDelaySec", "stepId"];
+const DIFF_FIELD_KEYS = ["duration", "zone", "target", "delay", "name", "type", "metaDelaySec", "stepId", "segmentId"];
 const itemFieldsDiffer = (p, n) =>
   DIFF_FIELD_KEYS.some((k) => String(p[k] ?? "") !== String(n[k] ?? ""));
 // Firing order within manual-sequence steps (items-array order of cues that
@@ -3354,6 +3435,19 @@ const computeSaveFingerprint = ({
   }
 };
 
+// Small warning-count chip on the Show Details tab: bordered, light amber
+// wash, caution icon + count.
+const WarningCountBadge = ({ count }) => (
+  <span
+    className="ml-1.5 inline-flex items-center gap-1 h-5 px-1.5 rounded-sm border border-warn/50 bg-warn/15 text-warn text-2xs font-semibold leading-none num"
+    title={`${count} warning${count === 1 ? "" : "s"} — see Show Details`}
+    aria-label={`${count} warnings`}
+  >
+    <FiAlertTriangle className="shrink-0" style={{ width: 11, height: 11 }} aria-hidden />
+    {count > 99 ? "99+" : count}
+  </span>
+);
+
 const ShowBuilder = (props) => {
   const {
     systemConfig,
@@ -3468,6 +3562,11 @@ const ShowBuilder = (props) => {
   const [showReceivers, setShowReceivers] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(50);
   const [itemsFixed, setItemsFixed] = useState(false);
+  // Non-blocking authoring warnings (Show Details tab + its header badge).
+  const showWarnings = useMemo(
+    () => computeShowWarnings(items, inventoryById),
+    [items, inventoryById]
+  );
   const [activeTab, setActiveTab] = usePersistentState("byh.editor.activeTab", "target"); // "showdetails", "target", "racks", "inventory", "test", "layout"
   // Collapse the whole bottom tab panel (nav stays; content hides) so the
   // timeline can take the full height when the operator doesn't need the tabs.
@@ -3547,7 +3646,7 @@ const ShowBuilder = (props) => {
             const extraDelay = Number.isFinite(Number(it.metaDelaySec))
               ? Number(it.metaDelaySec)
               : Math.max(0, (Number(it.delay) || 0) - preEditDelay);
-            return {
+            return applySegmentToCue({
               ...it,
               color: inv.color ?? it.color,
               image: inv.image ?? it.image,
@@ -3559,7 +3658,7 @@ const ShowBuilder = (props) => {
               // Persist the resolved extra delay so future re-syncs are exact.
               metaDelaySec: extraDelay,
               delay: extraDelay + itemDelay,
-            };
+            }, inv);
           })
         );
       }
@@ -4132,7 +4231,7 @@ const ShowBuilder = (props) => {
         merged.metaDelaySec = Number(item.metaDelaySec);
         merged.delay = merged.metaDelaySec + itemFuseLiftDelay(inv_item);
       }
-      return merged;
+      return applySegmentToCue(merged, inv_item);
     }));
   };
 
@@ -5642,6 +5741,9 @@ const ShowBuilder = (props) => {
                         aria-hidden
                       />
                       {label}
+                      {key === "showdetails" && showWarnings.length > 0 && (
+                        <WarningCountBadge count={showWarnings.length} />
+                      )}
                     </button>
                   );
                 })}
@@ -5767,6 +5869,7 @@ const ShowBuilder = (props) => {
               {activeTab === "showdetails" && (
                 <ShowStateHeader
                   items={items}
+                  warnings={showWarnings}
                   setItems={setItems}
                   refreshInventoryFnc={refreshInventory}
                   inventoryById={inventoryById}
