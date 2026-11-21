@@ -931,6 +931,14 @@ class BYHProtocolHandler:
                     self.latency_samples[ident] = samples
                 samples.append(value)
                 value = round(sum(samples) / len(samples))
+            elif abbr_key == 'c' and isinstance(value, (list, tuple)):
+                # 64-bit continuity masks go to the UI as decimal strings.
+                # JSON.parse turns a number into a double, which keeps only
+                # 53 bits; with 7+ boards (bit 55) the low bits round away
+                # before the UI's BigInt() ever sees them. BigInt("...")
+                # and int("...") are both exact.
+                value = [str(int(v)) if isinstance(v, (int, str)) else v
+                         for v in value]
             full_receiver[full_key] = value
         if 'pf' in abbr_dict:
             try:
