@@ -311,8 +311,8 @@ def prompt_ident(default: str) -> str:
     raw = input(f"Omni ident [default {default}]: ").strip()
     if not raw:
         return default
-    if len(raw) > 15:
-        raise SystemExit("[flash_omni] ident too long (max 15 chars).")
+    if len(raw) > 8:
+        raise SystemExit("[flash_omni] ident too long (max 8 chars).")
     if " " in raw:
         raise SystemExit("[flash_omni] ident must not contain spaces.")
     return raw
@@ -515,23 +515,8 @@ def open_serial_with_retry(port: str, *, retries: int = 30, delay_s: float = 0.5
     raise SystemExit(f"[flash_omni] could not open {port}: {last_err}")
 
 
-def read_until(ser: serial.Serial, needle: str, timeout_s: float) -> str:
-    """Read serial until `needle` appears or timeout. Returns accumulated text."""
-    deadline = time.monotonic() + timeout_s
-    buf = bytearray()
-    while time.monotonic() < deadline:
-        chunk = ser.read(256)
-        if chunk:
-            buf.extend(chunk)
-            if needle.encode() in buf:
-                return buf.decode(errors="replace")
-        else:
-            time.sleep(0.05)
-    return buf.decode(errors="replace")
-
-
 def read_until_any(ser: serial.Serial, needles: list[str], timeout_s: float) -> tuple[str, str | None]:
-    """Like read_until() but matches the first of multiple needles. Returns
+    """Read serial until the first of `needles` appears. Returns
     (accumulated_text, matched_needle_or_None_on_timeout)."""
     deadline = time.monotonic() + timeout_s
     buf = bytearray()
@@ -547,106 +532,145 @@ def read_until_any(ser: serial.Serial, needles: list[str], timeout_s: float) -> 
     return buf.decode(errors="replace"), None
 
 
-# Match the omni's boot banner line: "NODE_ID: <n>"
-NODE_ID_BANNER_RE = re.compile(r"NODE_ID:\s*(\d+)")
-IDENT_BANNER_RE   = re.compile(r"Ident:\s*(\S+)")
-BOARD_VERSION_BANNER_RE = re.compile(r"Board Version:\s*(\d+)")
+# Replies to the GETID / GETRF provisioning commands. Anchored to a line
+# start so "OK SETID NODE_ID=..." (the pre-restart ack) never matches.
+GETID_RE = re.compile(r"(?m)^NODE_ID=(\d+) IDENT=(\S*) BOARD_VERSION=(\d+)")
+GETRF_RE = re.compile(r"(?m)^RF_CHANNEL=(\d+) RF_SYSTEM_ID=(\d+)")
 
 
-def read_boot_banner(ser: serial.Serial, *, timeout_s: float = 12.0) -> tuple[str, int | None, str | None]:
-    """Wait for the boot banner. Looks for either the NODE_ID: line (which
-    setup() prints early) or the UNPROVISIONED prompt. Returns
-    (full_text, node_id_or_None, ident_or_None)."""
-    text, _ = read_until_any(ser, ["UNPROVISIONED", "SUCCESS: Omni started"], timeout_s)
-    sys.stdout.write(text)
-    sys.stdout.flush()
-    node_match  = NODE_ID_BANNER_RE.search(text)
-    ident_match = IDENT_BANNER_RE.search(text)
-    node_id = int(node_match.group(1)) if node_match else None
-    ident   = ident_match.group(1)     if ident_match else None
-    return text, node_id, ident
-
-
-def send_setid_and_confirm(
-    ser: serial.Serial,
-    node_id: int,
-    ident: str,
+def poll_command(
     port: str,
-    board_version: int | None = None,
-) -> None:
-    """Send SETID, optionally including board version, then confirm restart."""
-    board_arg = f" {board_version}" if board_version is not None else ""
-    cmd = f"SETID {node_id} {ident}{board_arg}\n".encode()
-    log(f"sending: {cmd.decode().strip()}")
-    ser.write(cmd)
-    ser.flush()
+    command: str,
+    reply_re: re.Pattern[str],
+    *,
+    timeout_s: float = 20.0,
+    resend_s: float = 1.0,
+) -> re.Match[str] | None:
+    """Send `command` over serial every `resend_s` until a line matching
+    `reply_re` comes back, or `timeout_s` passes.
 
-    ack_text, matched = read_until_any(
-        ser, ["OK SETID", "ERR SETID"], timeout_s=5.0
-    )
-    sys.stdout.write(ack_text)
-    sys.stdout.flush()
-    if matched != "OK SETID":
+    We used to wait for the omni's one-shot boot banner instead, but that
+    banner is printed ~100ms after reset -- before the host has re-opened
+    the re-enumerated USB-CDC port -- so it was usually lost. Whether a
+    late part of it still arrived depended on what was plugged in: with a
+    cue module the receiver's LED tests delay "SUCCESS: Omni started"
+    long enough to be seen; with nothing on the cue header the
+    board-count ADC reads high, the omni boots in dongle role, and that
+    path never prints UNPROVISIONED / SUCCESS at all. GETID / GETRF are
+    answered in every role (receiver loop and the dongle's provisioning
+    hook), so asking is reliable where listening wasn't.
+    """
+    deadline = time.monotonic() + timeout_s
+    ser: serial.Serial | None = None
+    buf = ""
+    next_send = 0.0
+    try:
+        while time.monotonic() < deadline:
+            if ser is None:
+                ser = open_serial_with_retry(port)
+            try:
+                now = time.monotonic()
+                if now >= next_send:
+                    ser.write(f"\n{command}\n".encode())
+                    ser.flush()
+                    next_send = now + resend_s
+                chunk = ser.read(256)
+            except (serial.SerialException, OSError):
+                # Port vanished mid-poll (chip still re-enumerating): reopen.
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+                ser = None
+                time.sleep(0.5)
+                continue
+            if chunk:
+                text = chunk.decode(errors="replace")
+                sys.stdout.write(text)
+                sys.stdout.flush()
+                buf = (buf + text)[-4096:]
+                m = reply_re.search(buf)
+                if m:
+                    return m
+    finally:
+        if ser is not None:
+            ser.close()
+    return None
+
+
+def wait_for_identity(port: str, *, timeout_s: float = 20.0) -> tuple[int, str, int] | None:
+    """Poll GETID until the omni answers. Returns (node_id, ident,
+    board_version), or None on timeout. node_id 0 = unprovisioned."""
+    log(f"waiting for omni on {port} to answer GETID...")
+    m = poll_command(port, "GETID", GETID_RE, timeout_s=timeout_s)
+    if m is None:
+        return None
+    return int(m.group(1)), m.group(2), int(m.group(3))
+
+
+def _send_restarting_command(port: str, command: str, ok: str, err_tag: str) -> None:
+    """Send a provisioning command that saves to NVS and restarts the omni.
+    Exits if the omni does not acknowledge it."""
+    ser = open_serial_with_retry(port)
+    try:
+        log(f"sending: {command}")
+        ser.write(f"\n{command}\n".encode())
+        ser.flush()
+        ack_text, matched = read_until_any(ser, [ok, err_tag], timeout_s=5.0)
+        sys.stdout.write(ack_text)
+        sys.stdout.flush()
+    finally:
         ser.close()
-        raise SystemExit("[flash_omni] omni did not acknowledge SETID.")
+    if matched != ok:
+        raise SystemExit(f"[flash_omni] omni did not acknowledge {command.split()[0]}.")
+    log(f"omni acknowledged {command.split()[0]}, waiting for restart...")
+    time.sleep(1.5)
 
-    ser.close()
-    log("omni acknowledged SETID, waiting for restart...")
-    time.sleep(1.0)
-    ser2 = open_serial_with_retry(port)
-    confirm_text, confirmed_id, confirmed_ident = read_boot_banner(ser2, timeout_s=12.0)
-    ser2.close()
-    board_match = BOARD_VERSION_BANNER_RE.search(confirm_text)
-    confirmed_board = int(board_match.group(1)) if board_match else None
 
-    board_matches = board_version is None or confirmed_board == board_version
-    if confirmed_id == node_id and confirmed_ident == ident and board_matches:
-        board_text = f" BOARD_VERSION={confirmed_board}" if confirmed_board is not None else ""
-        log(f"SUCCESS -- omni is now NODE_ID={node_id} IDENT={ident}{board_text}")
+def _require_alive(port: str) -> tuple[int, str, int]:
+    seen = wait_for_identity(port)
+    if seen is None:
+        raise SystemExit(
+            f"[flash_omni] omni on {port} never answered GETID.\n"
+            "  Check the port, close any other serial monitor, and replug the omni."
+        )
+    return seen
+
+
+def send_setid_and_confirm(port: str, node_id: int, ident: str, board_version: int | None = None) -> None:
+    """Send SETID, optionally including board version, then confirm with GETID
+    after the restart."""
+    board_arg = f" {board_version}" if board_version is not None else ""
+    _send_restarting_command(port, f"SETID {node_id} {ident}{board_arg}", "OK SETID", "ERR SETID")
+
+    seen = wait_for_identity(port)
+    if seen is None:
+        log("WARNING: omni didn't answer GETID after restart. Verify manually.")
+        return
+    seen_id, seen_ident, seen_board = seen
+    board_ok = board_version is None or seen_board == board_version
+    if seen_id == node_id and seen_ident == ident and board_ok:
+        log(f"SUCCESS -- omni is now NODE_ID={node_id} IDENT={ident} BOARD_VERSION={seen_board}")
     else:
         log(
-            f"WARNING: post-restart banner didn't fully confirm configuration "
-            f"(saw NODE_ID={confirmed_id} IDENT={confirmed_ident} "
-            f"BOARD_VERSION={confirmed_board}). Verify manually."
+            f"WARNING: omni reports NODE_ID={seen_id} IDENT={seen_ident} "
+            f"BOARD_VERSION={seen_board} after restart. Verify manually."
         )
 
 
 def set_board_version_and_confirm(port: str, board_version: int) -> None:
     """Set only the persisted hardware board version and verify the restart."""
-    log(f"opening {port} to set BOARD_VERSION={board_version}...")
-    ser = open_serial_with_retry(port)
-    cmd = f"\nSETBOARD {board_version}\n".encode()
-    log(f"sending: {cmd.decode().strip()}")
-    ser.write(cmd)
-    ser.flush()
-
-    ack_text, matched = read_until_any(
-        ser, ["OK SETBOARD", "ERR SETBOARD"], timeout_s=5.0
-    )
-    sys.stdout.write(ack_text)
-    sys.stdout.flush()
-    ser.close()
-    if matched != "OK SETBOARD":
-        raise SystemExit("[flash_omni] omni did not acknowledge SETBOARD.")
-
-    log("omni acknowledged SETBOARD, waiting for restart...")
-    time.sleep(1.0)
-    ser2 = open_serial_with_retry(port)
-    confirm_text, _, _ = read_boot_banner(ser2, timeout_s=12.0)
-    ser2.close()
-
-    board_match = BOARD_VERSION_BANNER_RE.search(confirm_text)
-    confirmed_board = int(board_match.group(1)) if board_match else None
-    if confirmed_board == board_version:
+    _require_alive(port)
+    _send_restarting_command(port, f"SETBOARD {board_version}", "OK SETBOARD", "ERR SETBOARD")
+    seen = wait_for_identity(port)
+    seen_board = seen[2] if seen else None
+    if seen_board == board_version:
         log(f"SUCCESS -- omni BOARD_VERSION={board_version}")
     else:
         log(
-            f"WARNING: post-restart banner reported BOARD_VERSION={confirmed_board}; "
+            f"WARNING: omni reported BOARD_VERSION={seen_board} after restart; "
             f"expected {board_version}. Verify manually."
         )
-
-
-RF_BANNER_RE = re.compile(r"RF_CHANNEL=(\d+) RF_SYSTEM_ID=(\d+)")
 
 
 def set_rf_and_confirm(port: str, channel: int, system_id: int) -> None:
@@ -654,31 +678,12 @@ def set_rf_and_confirm(port: str, channel: int, system_id: int) -> None:
     them with GETRF after the restart. They must match the dongle's
     `rf_channel` / `rf_system_id`, or the omni becomes unreachable."""
     if not (0 <= channel <= 125) or not (0 <= system_id <= 255):
-        raise SystemExit(f"[flash_omni] --rf needs channel 0-125 and system id 0-255")
-    log(f"opening {port} to set RF_CHANNEL={channel} RF_SYSTEM_ID={system_id}...")
-    ser = open_serial_with_retry(port)
-    cmd = f"\nSETRF {channel} {system_id}\n".encode()
-    log(f"sending: {cmd.decode().strip()}")
-    ser.write(cmd)
-    ser.flush()
-    ack_text, matched = read_until_any(ser, ["OK SETRF", "ERR SETRF"], timeout_s=5.0)
-    sys.stdout.write(ack_text)
-    sys.stdout.flush()
-    ser.close()
-    if matched != "OK SETRF":
-        raise SystemExit("[flash_omni] omni did not acknowledge SETRF (firmware too old?).")
-    log("omni acknowledged SETRF, waiting for restart...")
-    time.sleep(1.0)
-    ser2 = open_serial_with_retry(port)
-    try:
-        read_boot_banner(ser2, timeout_s=12.0)
-        ser2.write(b"\nGETRF\n")
-        ser2.flush()
-        text, _ = read_until_any(ser2, ["RF_SYSTEM_ID="], timeout_s=3.0)
-        text += ser2.read(ser2.in_waiting or 1).decode(errors="replace")
-    finally:
-        ser2.close()
-    m = RF_BANNER_RE.search(text)
+        raise SystemExit("[flash_omni] --rf needs channel 0-125 and system id 0-255")
+    _require_alive(port)
+    _send_restarting_command(
+        port, f"SETRF {channel} {system_id}", "OK SETRF", "ERR SETRF"
+    )
+    m = poll_command(port, "GETRF", GETRF_RE)
     if m and int(m.group(1)) == channel and int(m.group(2)) == system_id:
         log(f"SUCCESS -- omni RF_CHANNEL={channel} RF_SYSTEM_ID={system_id}")
     else:
@@ -686,46 +691,21 @@ def set_rf_and_confirm(port: str, channel: int, system_id: int) -> None:
 
 
 def post_flash_confirm_identity(port: str) -> tuple[int | None, str | None, int | None]:
-    """Open serial after a default (app-only) flash, read the boot banner,
-    return what NODE_ID/IDENT/board version the omni claims."""
-    log(f"opening {port} to read post-flash boot banner...")
-    ser = open_serial_with_retry(port)
-    try:
-        text, node_id, ident = read_boot_banner(ser, timeout_s=12.0)
-    finally:
-        ser.close()
-    board_match = BOARD_VERSION_BANNER_RE.search(text)
-    board_version = int(board_match.group(1)) if board_match else None
-    return node_id, ident, board_version
+    """After a default (app-only) flash, ask the omni what NODE_ID / IDENT /
+    board version it has."""
+    seen = wait_for_identity(port)
+    if seen is None:
+        return None, None, None
+    return seen
 
 
 def post_flash_provision(port: str, node_id: int, ident: str, board_version: int) -> None:
-    """Open serial after a --full flash, expect UNPROVISIONED banner, send
-    SETID, confirm restart with new identity."""
-    log(f"opening {port} to provision NODE_ID={node_id} IDENT={ident}...")
-    ser = open_serial_with_retry(port)
+    """After a --full or --set-id flash: wait for the omni to answer, then
+    send SETID and confirm the new identity after the restart."""
+    seen_id, seen_ident, _ = _require_alive(port)
+    log(f"omni is up (currently NODE_ID={seen_id} IDENT={seen_ident or '-'}); provisioning...")
+    send_setid_and_confirm(port, node_id, ident, board_version)
 
-    log("waiting for omni boot banner...")
-    text, node_id_seen, _ = read_boot_banner(ser, timeout_s=12.0)
-    if "UNPROVISIONED" not in text and node_id_seen != 0:
-        log(
-            "WARNING: didn't see the UNPROVISIONED banner after a --full flash. "
-            "Sending SETID anyway."
-        )
-
-    send_setid_and_confirm(ser, node_id, ident, port, board_version)
-
-
-def post_flash_reprovision(port: str, node_id: int, ident: str, board_version: int) -> None:
-    """For --set-id without --full. Wait for the boot banner (chip already
-    has firmware), then send SETID."""
-    log(f"opening {port} to re-provision as NODE_ID={node_id} IDENT={ident}...")
-    ser = open_serial_with_retry(port)
-
-    log("waiting for omni boot banner...")
-    read_boot_banner(ser, timeout_s=12.0)
-
-    send_setid_and_confirm(ser, node_id, ident, port, board_version)
 
 
 # ---------------------------------------------------------------------------
@@ -786,6 +766,8 @@ def collect_identity_prompts(args: argparse.Namespace) -> tuple[int, str, int]:
     if not (1 <= node_id <= 65535):
         raise SystemExit(f"[flash_omni] node_id out of range: {node_id}")
     ident = args.ident or prompt_ident(default=f"RX{node_id}")
+    if len(ident) > 8 or " " in ident:
+        raise SystemExit(f"[flash_omni] ident must be at most 8 chars with no spaces: {ident!r}")
     board_version = (
         args.board_version
         if args.board_version is not None
@@ -880,16 +862,15 @@ def _main(args: argparse.Namespace) -> int:
     if args.full:
         node_id, ident, board_version = collect_identity_prompts(args)
         run_esptool_flash(port, flash_pairs)
-        # A first-time flash leaves the chip with a fresh (empty) NVS,
-        # so it boots into UNPROVISIONED mode and we send SETID with the
-        # hardware board version in one transaction/restart.
+        # Send SETID with the hardware board version in one
+        # transaction/restart once the omni answers GETID.
         post_flash_provision(port, node_id, ident, board_version)
         return 0
 
     if args.set_id:
         node_id, ident, board_version = collect_identity_prompts(args)
         run_esptool_flash(port, flash_pairs)
-        post_flash_reprovision(port, node_id, ident, board_version)
+        post_flash_provision(port, node_id, ident, board_version)
         return 0
 
     # Default: app-only flash, no provisioning. Confirm post-flash that
@@ -899,7 +880,7 @@ def _main(args: argparse.Namespace) -> int:
 
     if seen_id is None:
         log(
-            "WARNING: didn't see NODE_ID in the boot banner. The omni may "
+            "WARNING: omni never answered GETID after flashing. It may "
             "not have started cleanly (corrupt partition table?). Try:\n"
             "        flash_omni.py --full"
         )

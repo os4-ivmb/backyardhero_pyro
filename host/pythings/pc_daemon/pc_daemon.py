@@ -16,7 +16,9 @@ from contextlib import closing
 from collections import deque
 
 from config_loader import load_system_config
-from protocol_handler.BYHProtocolHandler import BYHProtocolHandler, START_SEQUENCE_STEPS
+from protocol_handler.BYHProtocolHandler import (
+    BYHProtocolHandler, START_SEQUENCE_STEPS, RF433_REPEAT_DEFAULT, clamp_rf433_repeat,
+)
 from protocol_handler.CommandWindow import CommandWindow
 
 # Configuration
@@ -373,7 +375,11 @@ class FireworkDaemon:
         self.last_serial_sent = None
         self.is_armed = False
         self.start_sw_active = False
-        self.fire_repetition = 6
+        # How many times the dongle repeats each Bilusocn 433MHz frame
+        # (`433fire >>bits:N<<`). Each repeat is ~47ms of blocking airtime
+        # on the dongle, so this also sets the minimum spacing between
+        # back-to-back Bilusocn cues. Persisted as settings.rf433_repeat_ct.
+        self.rf433_repetition = RF433_REPEAT_DEFAULT
         self.led_brightness = 10
         self.bad_serial_ct = 0
         self.serial_baud = BAUD_RATE
@@ -706,7 +712,8 @@ class FireworkDaemon:
                 cfg_file = data.get('settings')
                 if(cfg_file):
                     self.led_brightness = int(cfg_file.get("led_brightness",50))
-                    self.fire_repetition = int(cfg_file.get("fire_repeat_ct",6))
+                    self.rf433_repetition = clamp_rf433_repeat(
+                        cfg_file.get("rf433_repeat_ct", RF433_REPEAT_DEFAULT))
                     self.led_handler.update("led_brightness", self.led_brightness)
 
 
@@ -1503,11 +1510,8 @@ class FireworkDaemon:
             elif command['type'] == 'set_debug_mode':
                 self.led_handler.update("debug_mode", int(command.get('debug_mode', 0)))
                 self.debug_mode = int(command.get('debug_mode', 0))
-            elif command['type'] == 'set_fire_repeat':
-                repeat_ct = int(command.get('repeat_ct', 6))
-                if(repeat_ct==0):
-                    repeat_ct=6
-                self.fire_repetition = repeat_ct
+            elif command['type'] == 'set_rf433_repeat':
+                self.rf433_repetition = clamp_rf433_repeat(command.get('repeat_ct'))
             elif command['type'] == 'set_gpio_override':
                 # Software override for a physical dongle switch input
                 # (arm / switch / manfire). `active` toggles the override
@@ -2145,7 +2149,7 @@ class FireworkDaemon:
             "dongle_board_version": self.dongle_board_version,
             "settings": {
                 "led_brightness": self.led_brightness,
-                "fire_repeat_ct": self.fire_repetition,
+                "rf433_repeat_ct": self.rf433_repetition,
                 "receiver_timeout_ms": self.led_handler.led_states.get("receiver_timeout_ms", 30000),
                 "command_response_timeout_ms": self.led_handler.led_states.get("command_response_timeout_ms", 100),
                 "clock_sync_interval_ms": self.led_handler.led_states.get("clock_sync_interval_ms", 2000),

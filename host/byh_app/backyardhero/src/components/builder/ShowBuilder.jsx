@@ -40,6 +40,7 @@ import SequenceEditor from "./SequenceEditor";
 import { AddInventoryForm } from "../inventory/InventoryManager";
 import { SegmentsBadge } from "../inventory/InventoryList";
 import { computeShowWarnings } from "@/util/showWarnings";
+import useStateFields from "@/store/useStateFields";
 import {
   getSegments, segmentLabel, segmentCueName, applySegmentToCue,
 } from "@/util/segments";
@@ -3563,9 +3564,17 @@ const ShowBuilder = (props) => {
   const [currentIndex, setCurrentIndex] = useState(50);
   const [itemsFixed, setItemsFixed] = useState(false);
   // Non-blocking authoring warnings (Show Details tab + its header badge).
+  // The Bilusocn spacing check needs the dongle's live repeat setting;
+  // without a daemon (cloud editor) it falls back to the default.
+  const rf433StateData = useStateFields(["fw_state.settings.rf433_repeat_ct"]);
+  const rf433RepeatCt = rf433StateData?.fw_state?.settings?.rf433_repeat_ct;
+  const bilusocnZones = useMemo(
+    () => new Set(showReceivers.filter(isBilusocnEntry).map((e) => String(e.id))),
+    [showReceivers]
+  );
   const showWarnings = useMemo(
-    () => computeShowWarnings(items, inventoryById),
-    [items, inventoryById]
+    () => computeShowWarnings(items, inventoryById, { bilusocnZones, rf433RepeatCt }),
+    [items, inventoryById, bilusocnZones, rf433RepeatCt]
   );
   const [activeTab, setActiveTab] = usePersistentState("byh.editor.activeTab", "target"); // "showdetails", "target", "racks", "inventory", "test", "layout"
   // Collapse the whole bottom tab panel (nav stays; content hides) so the

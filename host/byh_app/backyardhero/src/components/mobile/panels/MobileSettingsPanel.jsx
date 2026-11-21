@@ -99,7 +99,7 @@ function DongleSection() {
       <SettingCard title="Indicator LEDs" eyebrow="Display">
         <BrightnessSlider />
       </SettingCard>
-      <SettingCard title="Retransmit" eyebrow="Reliability">
+      <SettingCard title="Bilusocn repeats" eyebrow="433 MHz">
         <TransmitRepetitionCount />
       </SettingCard>
       <SettingCard title="Connection" eyebrow="USB or hub">

@@ -107,8 +107,28 @@ class START_SEQUENCE_STEPS(Enum):
     ABORTED = 7
     STOPPED = 8
 
+
+# Bilusocn 433MHz frame repeats per `433fire`. The dongle sends each 24-bit
+# frame (~35-37ms of PWM bits + 0.4ms stop + 10ms gap, so ~45-47ms) this
+# many times, blocking, so it also sets the minimum spacing between
+# back-to-back Bilusocn cues. Operator-tunable (settings.rf433_repeat_ct);
+# the UI mirrors these bounds in src/util/rf433.js.
+RF433_REPEAT_DEFAULT = 8
+RF433_REPEAT_MIN = 1
+RF433_REPEAT_MAX = 10
+
+
+def clamp_rf433_repeat(value):
+    """Coerce a requested repeat count into [MIN, MAX]; bad input -> default."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return RF433_REPEAT_DEFAULT
+    return max(RF433_REPEAT_MIN, min(RF433_REPEAT_MAX, n))
+
+
 class BSCFireTranslator:
-    def translate_zone_target_to_tx_pkg(zone, target, repetition=8):
+    def translate_zone_target_to_tx_pkg(zone, target, repetition=RF433_REPEAT_DEFAULT):
         actual_zone = zone
         if(isinstance(zone, str)):
             actual_zone = int(zone)
@@ -1507,12 +1527,16 @@ class BYHProtocolHandler:
 
         return False
 
+    def _rf433_repetition(self):
+        return clamp_rf433_repeat(getattr(self.parent, "rf433_repetition", RF433_REPEAT_DEFAULT))
+
     def fire_item(self, item):
         print(f"Issuing fire command for {item['id']} at {item['startTime']} with async_fire:{item['async_fire']}")
         if(item['async_fire']):
             print("Ignoring async fire item. It'll take care of it.")
         else:
-            msg = BSCFireTranslator.translate_zone_target_to_tx_pkg(item['zone'], item['target'])
+            msg = BSCFireTranslator.translate_zone_target_to_tx_pkg(
+                item['zone'], item['target'], self._rf433_repetition())
             # NB: no trailing " x" — the dongle's isValidMessage requires the
             # arg to be exactly ">>BITS:REPS<<"; a trailing token makes it end
             # with "<< x" and the dongle silently rejects it (replies "CV 433").
@@ -1527,7 +1551,7 @@ class BYHProtocolHandler:
         # we just translate (zone, target) into a TX packet and ship it.
         if kind == "bilusocn":
             try:
-                msg = BSCFireTranslator.translate_zone_target_to_tx_pkg(zone, target)
+                msg = BSCFireTranslator.translate_zone_target_to_tx_pkg(zone, target, self._rf433_repetition())
             except (TypeError, ValueError):
                 msg = None
             if msg:
@@ -1545,7 +1569,7 @@ class BYHProtocolHandler:
             print(f"Firing {zone}:{target} on {dev_id}")
             if(self.receivers[dev_id]['type'] == "BILUSOCN_433_TX_ONLY"):
                 print("Firing instant 433")
-                msg = BSCFireTranslator.translate_zone_target_to_tx_pkg(zone, target)
+                msg = BSCFireTranslator.translate_zone_target_to_tx_pkg(zone, target, self._rf433_repetition())
                 if(msg):
                     self.parent.send_serial_command(f"433fire {msg}")
                 else:

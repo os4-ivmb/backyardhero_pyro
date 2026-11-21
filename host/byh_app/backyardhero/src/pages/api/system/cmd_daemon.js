@@ -83,7 +83,7 @@ const VALIDATORS = {
   set_command_response_timeout: (b) => (isFiniteNumber(Number(b.timeout_ms)) ? null : 'set_command_response_timeout requires numeric "timeout_ms"'),
   set_clock_sync_interval: (b) => (isFiniteNumber(Number(b.interval_ms)) ? null : 'set_clock_sync_interval requires numeric "interval_ms"'),
   set_debug_mode: (b) => (isFiniteNumber(Number(b.debug_mode)) ? null : 'set_debug_mode requires numeric "debug_mode"'),
-  set_fire_repeat: (b) => (isFiniteNumber(Number(b.repeat_ct)) ? null : 'set_fire_repeat requires numeric "repeat_ct"'),
+  set_rf433_repeat: (b) => (isFiniteNumber(Number(b.repeat_ct)) ? null : 'set_rf433_repeat requires numeric "repeat_ct"'),
 
   set_gpio_override: (b) => {
     if (!['arm', 'switch', 'manfire'].includes(b.key)) {

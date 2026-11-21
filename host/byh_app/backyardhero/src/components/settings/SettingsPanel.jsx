@@ -217,7 +217,7 @@ function DongleTab() {
         <BrightnessSlider />
       </SettingCard>
 
-      <SettingCard title="Retransmit" eyebrow="Reliability">
+      <SettingCard title="Bilusocn repeats" eyebrow="433 MHz">
         <TransmitRepetitionCount />
       </SettingCard>
 
