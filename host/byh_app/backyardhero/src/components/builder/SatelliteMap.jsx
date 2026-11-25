@@ -346,9 +346,18 @@ export default function SatelliteMap({
   const [currentZoom, setCurrentZoom] = React.useState(zoom);
 
   return (
+    // `isolation: isolate` creates a stacking context so leaflet's internal
+    // pane/control z-indexes (400-1000) can't escape and paint over app
+    // modals (z-50) that open while the map is mounted.
     <div
       className={className}
-      style={{ height, width: "100%", borderRadius: 8, overflow: "hidden" }}
+      style={{
+        height,
+        width: "100%",
+        borderRadius: 8,
+        overflow: "hidden",
+        isolation: "isolate",
+      }}
     >
       <MapContainer
         center={initial}

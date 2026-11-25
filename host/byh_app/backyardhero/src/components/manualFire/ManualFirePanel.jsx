@@ -1,8 +1,7 @@
 import useStateFields from "@/store/useStateFields";
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import { FaKey, FaTriangleExclamation } from "react-icons/fa6";
-import { MdDragIndicator } from "react-icons/md";
 
 import { serverElapsedMs } from "@/store/useStateAppStore";
 import useAppStore from "@/store/useAppStore";
@@ -27,12 +26,9 @@ import {
 // condition.
 //
 // Two tabs split the firing surface by RF transport:
-//   - Native: every enabled receiver is on screen at once, with its cues,
-//     laid out across a firing field. The operator can drag each receiver
-//     to where that rack sits (left / center / right) so a manual sequence
-//     doesn't mean flipping a zone menu between shots. Positions persist
-//     locally. Until they're placed, receivers spread across the field in
-//     zone order.
+//   - Native: every enabled receiver is listed (filterable when there are
+//     many). Clicking one shows its fire grid with continuity / online /
+//     battery readouts. The selection persists locally.
 //   - Bilusocn / 433 MHz: one-way TX broadcast. There is no DB receiver
 //     row in the new world (Bilusocn zones live on shows now), so there's
 //     nothing to poll. Operator types a dipswitch zone (1-128) and we
@@ -44,8 +40,6 @@ import {
 //     isn't actually fire-capable.
 //   - Cue buttons use the dedicated `armed` treatment so the operator's
 //     mental model maps to "this is dangerous".
-//   - Dragging is a separate "Move receivers" mode. Cues don't fire while
-//     a receiver is being placed.
 // ---------------------------------------------------------------------------
 
 const EMPTY_RECEIVER_MAP = {};
@@ -156,24 +150,7 @@ function buildCueAssignmentMap(items) {
   }, {});
 }
 
-// Firing-field geometry. Cards are a fixed width (the receivers-tab card
-// is w-72) so a cue stays the same size no matter how the field is
-// stretched. Positions are stored as percentages of the field: x is the
-// card center, y is the card top. Only positions the operator has dragged
-// are persisted; everyone else is spread across the field in zone order.
-const FIELD_LAYOUT_KEY = "byh.manualFire.fieldLayout";
-const FIELD_CARD_WIDTH = 288;
-const FIELD_CARD_GAP = 16;
-const FIELD_EDGE = 16;
-const FIELD_AUDIENCE_PX = 40;
-// 5-wide cue grid, matching the receivers tab. h-14 rows + gap-1.5.
-const FIELD_CUE_COLS = 5;
-const FIELD_CUE_ROW_PX = 56;
-const FIELD_CUE_GAP_PX = 6;
-
-function clamp(n, min, max) {
-  return Math.min(max, Math.max(min, n));
-}
+const SELECTED_RECEIVER_KEY = "byh.manualFire.selectedReceiver";
 
 function compareZoneKeys(a, b) {
   const an = Number(a);
@@ -185,72 +162,6 @@ function compareZoneKeys(a, b) {
   return String(a).localeCompare(String(b));
 }
 
-function estimateCardHeight(cueCount) {
-  const rows = Math.max(1, Math.ceil((cueCount || 1) / FIELD_CUE_COLS));
-  const grid = rows * FIELD_CUE_ROW_PX + Math.max(0, rows - 1) * FIELD_CUE_GAP_PX;
-  // Header + card padding + a little slack so the last row isn't clipped.
-  return 76 + grid + 16;
-}
-
-function fieldHeightFor(zones, fieldWidth) {
-  const count = Math.max(zones.length, 1);
-  const width = Math.max(fieldWidth || 960, FIELD_CARD_WIDTH + FIELD_EDGE * 2);
-  const cols = Math.max(
-    1,
-    Math.min(
-      count,
-      Math.floor((width - FIELD_EDGE * 2 + FIELD_CARD_GAP) / (FIELD_CARD_WIDTH + FIELD_CARD_GAP)),
-    ),
-  );
-  const rows = Math.ceil(count / cols);
-  const tallest = Math.max(...zones.map((z) => estimateCardHeight(z.targets.length)), 180);
-  // Extra vertical room so a rack can sit forward or back of the others.
-  return rows * tallest + Math.max(0, rows - 1) * FIELD_CARD_GAP + 150;
-}
-
-function autoPosition(index, zones, fieldWidth, fieldHeight) {
-  const count = zones.length;
-  const width = Math.max(fieldWidth || 960, 1);
-  const height = Math.max(fieldHeight || 1, 1);
-  const cols = Math.max(
-    1,
-    Math.min(
-      count,
-      Math.floor((width - FIELD_EDGE * 2 + FIELD_CARD_GAP) / (FIELD_CARD_WIDTH + FIELD_CARD_GAP)),
-    ),
-  );
-  const col = index % cols;
-  const row = Math.floor(index / cols);
-  const inRow = Math.min(cols, count - row * cols);
-  const usable = Math.max(0, width - FIELD_CARD_WIDTH - FIELD_EDGE * 2);
-  const centerX = inRow <= 1
-    ? width / 2
-    : FIELD_EDGE + FIELD_CARD_WIDTH / 2 + (usable * col) / (inRow - 1);
-  const stride = Math.max(...zones.map((z) => estimateCardHeight(z.targets.length))) + FIELD_CARD_GAP;
-  const top = FIELD_EDGE + row * stride;
-  return {
-    x: (centerX / width) * 100,
-    y: (top / height) * 100,
-  };
-}
-
-function readSavedPos(layout, key) {
-  const pos = layout?.[key];
-  if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y)) return null;
-  return pos;
-}
-
-// Keep a card inside the field even if a saved percentage was recorded
-// against a taller field (fewer cues now, shorter stage).
-function placeOnField(pos, cueCount, fieldWidth, fieldHeight) {
-  if (!fieldWidth || !fieldHeight) return pos;
-  const halfPct = (FIELD_CARD_WIDTH / 2 / fieldWidth) * 100;
-  const maxTopPx = Math.max(0, fieldHeight - estimateCardHeight(cueCount) - FIELD_AUDIENCE_PX);
-  return {
-    x: clamp(pos.x, halfPct, Math.max(halfPct, 100 - halfPct)),
-    y: clamp(pos.y, 0, (maxTopPx / fieldHeight) * 100),
-  };
-}
 
 function receiverIsOnline(receiver, timeoutMs, stateData) {
   const lmt = receiver?.status?.lmt;
@@ -345,8 +256,60 @@ function FireCueButton({
   );
 }
 
-function ReceiverFireCard({
-  zoneKey,
+function continuitySummary(receiver, targets) {
+  let ok = 0;
+  let open = 0;
+  for (const target of targets) {
+    const c = cueHasContinuity(receiver, target);
+    if (c === true) ok += 1;
+    else if (c === false) open += 1;
+  }
+  return { ok, open, known: ok + open };
+}
+
+function ReceiverListRow({ entry, label, receiver, online, selected, onSelect }) {
+  const battery = batteryPercent(receiver);
+  const cont = continuitySummary(receiver, entry.targets);
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={selected}
+      className={cn(
+        "flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left transition-colors",
+        selected
+          ? "border-accent bg-accent/10"
+          : "border-border-subtle bg-surface-1 hover:border-border hover:bg-surface-2",
+        !online && !selected && "opacity-70",
+      )}
+    >
+      <Dot tone={online ? "ok" : "danger"} pulse={online} />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-semibold text-fg-primary">{label}</div>
+        <div className="truncate text-[11px] text-fg-muted">
+          Zone {entry.zone}
+          {label !== entry.id ? ` · ${entry.id}` : ""}
+          {` · ${entry.targets.length} cue${entry.targets.length === 1 ? "" : "s"}`}
+        </div>
+      </div>
+      <div className="shrink-0 text-right">
+        <div className={cn(
+          "text-[10px] font-medium uppercase tracking-wider",
+          online ? "text-ok-fg" : "text-danger-fg",
+        )}>
+          {online ? "Online" : "Offline"}
+        </div>
+        <div className="num text-[10px] text-fg-muted">
+          {cont.known > 0 ? `${cont.ok}/${entry.targets.length} cont` : null}
+          {cont.known > 0 && battery != null ? " · " : null}
+          {battery != null ? `${battery}%` : null}
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function ReceiverFireGrid({
   zone,
   label,
   receiverId,
@@ -355,67 +318,38 @@ function ReceiverFireCard({
   online,
   cueAssignmentMap,
   showCueAssignments,
-  arranging,
-  dragging,
   onFire,
-  className,
-  positioned = false,
-  style,
-  onDragStart,
-  onDragMove,
-  onDragEnd,
 }) {
   const battery = batteryPercent(receiver);
   return (
-    <div
-      data-fire-card={zoneKey}
-      className={cn(positioned ? "absolute w-72" : className)}
-      style={positioned ? style : undefined}
-    >
-    <Card
-      tone="raised"
-      padding="sm"
-      className={cn(
-        "relative flex flex-col gap-2",
-        !online && "opacity-60",
-        arranging && "ring-2 ring-accent/40",
-        dragging && "shadow-lg",
-      )}
-    >
+    <Card tone="armed" padding="md" className={cn("flex flex-col gap-3", !online && "opacity-70")}>
       <div className="flex items-start gap-2 min-w-0">
-        {arranging ? (
-          <MdDragIndicator className="mt-0.5 shrink-0 text-fg-muted" aria-hidden />
-        ) : (
-          <Dot tone={online ? "ok" : "danger"} pulse={online} className="mt-1.5" />
-        )}
+        <Dot tone={online ? "ok" : "danger"} pulse={online} className="mt-1.5" />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-semibold text-fg-primary">{label}</div>
-          <div className="truncate text-[11px] text-fg-muted">
+          <div className="truncate text-base font-semibold text-fg-primary">{label}</div>
+          <div className="truncate text-xs text-fg-muted">
             Zone {zone}
             {label !== receiverId ? ` · ${receiverId}` : ""}
           </div>
         </div>
         <div className="shrink-0 text-right">
           <div className={cn(
-            "text-[10px] font-medium uppercase tracking-wider",
+            "text-xs font-medium uppercase tracking-wider",
             online ? "text-ok-fg" : "text-danger-fg",
           )}>
             {online ? "Online" : "Offline"}
           </div>
           {battery != null ? (
-            <div className="num text-[10px] text-fg-muted">{battery}%</div>
+            <div className="num text-xs text-fg-muted">Battery {battery}%</div>
           ) : null}
         </div>
       </div>
-      <div className="grid grid-cols-5 gap-1.5">
+      <div className="grid grid-cols-4 sm:grid-cols-6 lg:grid-cols-8 gap-1.5">
         {targets.map((target, index) => {
           const continuity = cueHasContinuity(receiver, target);
           const assignedItem = showCueAssignments
             ? cueAssignmentMap[`${zone}:${target}`]
             : null;
-          const assignmentLabel = formatCueAssignment(assignedItem);
-          const assignmentType = formatCueType(assignedItem);
-          const assignmentImage = cueAssignmentImage(assignedItem);
           return (
             <FireCueButton
               key={`${target}-${index}`}
@@ -423,26 +357,24 @@ function ReceiverFireCard({
               target={target}
               disabled={!online}
               continuity={continuity}
-              assignmentLabel={assignmentLabel}
-              assignmentType={assignmentType}
-              assignmentImage={assignmentImage}
+              assignmentLabel={formatCueAssignment(assignedItem)}
+              assignmentType={formatCueType(assignedItem)}
+              assignmentImage={cueAssignmentImage(assignedItem)}
               onClick={() => onFire(zone, target, online)}
             />
           );
         })}
       </div>
-      {arranging ? (
-        <div
-          className="absolute inset-0 z-10 cursor-grab touch-none active:cursor-grabbing"
-          aria-label={`Drag ${label}`}
-          onPointerDown={(event) => onDragStart(event, zoneKey)}
-          onPointerMove={onDragMove}
-          onPointerUp={onDragEnd}
-          onPointerCancel={onDragEnd}
-        />
-      ) : null}
     </Card>
-    </div>
+  );
+}
+
+function receiverLabel(receiver, id) {
+  return (
+    receiver?.label ||
+    receiver?.status?.ident ||
+    receiver?.status?.node ||
+    id
   );
 }
 
@@ -455,229 +387,106 @@ function NativeManualFire({
   onFire,
 }) {
   const zones = useMemo(() => listNativeZones(receiverMap), [receiverMap]);
-  const [savedLayout, setSavedLayout] = usePersistentState(FIELD_LAYOUT_KEY, {}, { debounce: 200 });
-  const [arranging, setArranging] = useState(false);
-  const [draggingKey, setDraggingKey] = useState(null);
-  const [fieldWidth, setFieldWidth] = useState(0);
-  const fieldRef = useRef(null);
-  const dragRef = useRef(null);
+  const [selectedKey, setSelectedKey] = usePersistentState(SELECTED_RECEIVER_KEY, null);
+  const [query, setQuery] = useState("");
 
-  const hasCustomLayout = zones.some((zone) => readSavedPos(savedLayout, zone.key));
-  const fieldHeight = fieldHeightFor(zones, fieldWidth);
+  const rows = useMemo(
+    () => zones.map((entry) => {
+      const receiver = receiverMap?.[entry.id];
+      return {
+        entry,
+        receiver,
+        label: receiverLabel(receiver, entry.id),
+        online: receiverIsOnline(receiver, receiverTimeoutMs, stateData),
+      };
+    }),
+    [zones, receiverMap, receiverTimeoutMs, stateData],
+  );
 
-  useLayoutEffect(() => {
-    const el = fieldRef.current;
-    if (!el) return;
-    const measure = () => {
-      const width = el.clientWidth;
-      setFieldWidth((prev) => (prev === width ? prev : width));
-    };
-    measure();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(measure);
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [zones.length]);
+  const filteredRows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter(({ entry, label }) =>
+      [label, entry.id, `zone ${entry.zone}`, String(entry.zone)]
+        .some((s) => String(s).toLowerCase().includes(q)),
+    );
+  }, [rows, query]);
 
-  const beginDrag = (event, key) => {
-    if (!arranging) return;
-    if (event.button != null && event.button !== 0) return;
-    const field = fieldRef.current;
-    const card = event.currentTarget.closest("[data-fire-card]");
-    if (!field || !card) return;
-    event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const cardRect = card.getBoundingClientRect();
-    dragRef.current = {
-      key,
-      pointerId: event.pointerId,
-      offX: event.clientX - (cardRect.left + cardRect.width / 2),
-      offY: event.clientY - cardRect.top,
-      cardW: cardRect.width,
-      cardH: cardRect.height,
-    };
-    setDraggingKey(key);
-  };
+  const selected = rows.find((row) => row.entry.key === selectedKey) || null;
+  const onlineCount = rows.filter((row) => row.online).length;
 
-  const moveDrag = (event) => {
-    const drag = dragRef.current;
-    if (!drag || event.pointerId !== drag.pointerId) return;
-    const field = fieldRef.current;
-    if (!field) return;
-    const rect = field.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return;
-    const center = event.clientX - drag.offX - rect.left;
-    const top = event.clientY - drag.offY - rect.top;
-    const half = drag.cardW / 2;
-    const minCenter = half + 8;
-    const maxCenter = Math.max(minCenter, rect.width - half - 8);
-    const maxTop = Math.max(0, rect.height - drag.cardH - FIELD_AUDIENCE_PX);
-    const x = (clamp(center, minCenter, maxCenter) / rect.width) * 100;
-    const y = (clamp(top, 0, maxTop) / rect.height) * 100;
-    setSavedLayout((prev) => {
-      const base = prev && typeof prev === "object" && !Array.isArray(prev) ? prev : {};
-      const cur = base[drag.key];
-      if (cur && Math.abs(cur.x - x) < 0.05 && Math.abs(cur.y - y) < 0.05) return prev;
-      return { ...base, [drag.key]: { x, y } };
-    });
-  };
-
-  const endDrag = (event) => {
-    const drag = dragRef.current;
-    if (!drag || (event && event.pointerId !== drag.pointerId)) return;
-    dragRef.current = null;
-    setDraggingKey(null);
-  };
-
-  const resetLayout = () => {
-    dragRef.current = null;
-    setDraggingKey(null);
-    setArranging(false);
-    setSavedLayout({});
-  };
-
-  const stackZones = useMemo(() => {
-    // Phone has no field, so follow the same left-to-right / back-to-front
-    // order the desktop field would use, including any placed positions.
-    const nominalWidth = 1200;
-    const nominalHeight = fieldHeightFor(zones, nominalWidth);
-    const orderKey = (entry, index) => {
-      const pos = readSavedPos(savedLayout, entry.key)
-        || autoPosition(index, zones, nominalWidth, nominalHeight);
-      return pos.y * 1000 + pos.x;
-    };
-    return zones
-      .map((entry, index) => ({ entry, index }))
-      .sort((a, b) => orderKey(a.entry, a.index) - orderKey(b.entry, b.index))
-      .map(({ entry }) => entry);
-  }, [zones, savedLayout]);
-
-  const cardProps = (entry) => {
-    const receiver = receiverMap?.[entry.id];
-    const label =
-      receiver?.label ||
-      receiver?.status?.ident ||
-      receiver?.status?.node ||
-      entry.id;
-    return {
-      zoneKey: entry.key,
-      zone: entry.zone,
-      label,
-      receiverId: entry.id,
-      receiver,
-      targets: entry.targets,
-      online: receiverIsOnline(receiver, receiverTimeoutMs, stateData),
-      cueAssignmentMap,
-      showCueAssignments,
-      onFire,
-    };
-  };
-
-  const hint = arranging
-    ? "Drag each receiver to where that rack sits. Left and right are as you look toward the audience. Cues stay locked until you tap Done."
-    : hasCustomLayout
-    ? "Tap a cue to fire it. Receivers stay where you placed them."
-    : "Every active receiver is on the field, spread out by zone. Move them to match the yard, then tap a cue to fire.";
+  if (zones.length === 0) {
+    return (
+      <Card padding="lg" className="text-center">
+        <p className="text-sm text-fg-muted">
+          No active receivers. Enable one on the Receivers tab, then come back.
+        </p>
+      </Card>
+    );
+  }
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-xs text-fg-muted max-w-2xl">
-          <span className="md:hidden">
-            Every active receiver is listed with its cues. Tap a cue to fire it.
-          </span>
-          <span className="hidden md:inline">{hint}</span>
-          {showCueAssignments ? " Staged show assignments are shown on matching cues." : ""}
-          {" "}
-          A green dot is continuity. Red means the cue is open.
-        </p>
-        <div className="hidden md:flex items-center gap-2">
-          {hasCustomLayout ? (
-            <Button size="sm" variant="ghost" onClick={resetLayout}>
-              Reset positions
-            </Button>
-          ) : null}
-          <Button
-            size="sm"
-            variant={arranging ? "primary" : "outline"}
-            onClick={() => {
-              dragRef.current = null;
-              setDraggingKey(null);
-              setArranging((on) => !on);
-            }}
-          >
-            {arranging ? "Done" : "Move receivers"}
-          </Button>
-        </div>
-      </div>
+      <p className="text-xs text-fg-muted max-w-2xl">
+        Pick a receiver to show its cues, then tap a cue to fire it.
+        {showCueAssignments ? " Staged show assignments are shown on matching cues." : ""}
+        {" "}A green dot is continuity. Red means the cue is open.
+      </p>
 
-      {zones.length === 0 ? (
-        <Card padding="lg" className="text-center">
-          <p className="text-sm text-fg-muted">
-            No active receivers. Enable one on the Receivers tab, then come back.
-          </p>
-        </Card>
-      ) : (
-        <>
-          <div className="flex flex-col gap-4 md:hidden">
-            {stackZones.map((entry) => (
-              <ReceiverFireCard
-                key={entry.key}
-                {...cardProps(entry)}
-                arranging={false}
-                className="w-full"
+      <div className="grid gap-4 md:grid-cols-[18rem_minmax(0,1fr)]">
+        <div className="order-2 md:order-1 flex flex-col gap-2 min-w-0">
+          <div className="flex items-center justify-between text-[11px] text-fg-muted">
+            <span className="eyebrow">Receivers</span>
+            <span className="num">{onlineCount}/{rows.length} online</span>
+          </div>
+          {rows.length > 6 ? (
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Filter by name, ID or zone"
+              className="h-9 w-full rounded-sm bg-surface-1 border border-border px-2.5 text-sm text-fg-primary focus:border-accent"
+            />
+          ) : null}
+          <div className="flex flex-col gap-1.5 md:max-h-[70vh] md:overflow-y-auto md:pr-1">
+            {filteredRows.length === 0 ? (
+              <p className="px-1 py-2 text-xs text-fg-muted">No receivers match “{query}”.</p>
+            ) : filteredRows.map((row) => (
+              <ReceiverListRow
+                key={row.entry.key}
+                entry={row.entry}
+                label={row.label}
+                receiver={row.receiver}
+                online={row.online}
+                selected={row.entry.key === selectedKey}
+                onSelect={() => setSelectedKey(row.entry.key)}
               />
             ))}
           </div>
+        </div>
 
-          <div
-            ref={fieldRef}
-            className={cn(
-              "relative hidden w-full overflow-hidden rounded-md border border-border-subtle bg-surface-inset md:block",
-              arranging && "select-none ring-2 ring-accent/50",
-            )}
-            style={{ height: fieldHeight }}
-          >
-            <div
-              className="pointer-events-none absolute inset-y-0 left-1/2 z-0 w-px bg-border-subtle"
-              aria-hidden
+        {/* On phone the grid sits above the list so the selected
+            receiver's cues stay reachable without scrolling a long list. */}
+        <div className="order-1 md:order-2 min-w-0">
+          {selected ? (
+            <ReceiverFireGrid
+              zone={selected.entry.zone}
+              label={selected.label}
+              receiverId={selected.entry.id}
+              receiver={selected.receiver}
+              targets={selected.entry.targets}
+              online={selected.online}
+              cueAssignmentMap={cueAssignmentMap}
+              showCueAssignments={showCueAssignments}
+              onFire={onFire}
             />
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-40 flex h-9 items-end justify-between border-t border-border-subtle bg-surface-2/90 px-3 pb-1.5 text-[10px] font-medium uppercase tracking-wider text-fg-muted">
-              <span>Left</span>
-              <span>Audience</span>
-              <span>Right</span>
-            </div>
-            {zones.map((entry, index) => {
-              const width = fieldWidth || fieldRef.current?.clientWidth || 0;
-              const saved = readSavedPos(savedLayout, entry.key);
-              const pos = placeOnField(
-                saved || autoPosition(index, zones, width || 960, fieldHeight),
-                entry.targets.length,
-                width,
-                fieldHeight,
-              );
-              return (
-                <ReceiverFireCard
-                  key={entry.key}
-                  {...cardProps(entry)}
-                  arranging={arranging}
-                  dragging={draggingKey === entry.key}
-                  positioned
-                  style={{
-                    left: `${pos.x}%`,
-                    top: `${pos.y}%`,
-                    transform: "translateX(-50%)",
-                    zIndex: draggingKey === entry.key ? 30 : 1,
-                  }}
-                  onDragStart={beginDrag}
-                  onDragMove={moveDrag}
-                  onDragEnd={endDrag}
-                />
-              );
-            })}
-          </div>
-        </>
-      )}
+          ) : (
+            <Card padding="lg" className="hidden text-center md:block">
+              <p className="text-sm text-fg-muted">Select a receiver to show its fire grid.</p>
+            </Card>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -818,7 +627,7 @@ export default function ManualFirePanel() {
   return (
     <Section
       title="Manual fire"
-      description="Direct cue ignition. Every active receiver stays on screen, so a left–center–right sequence doesn't mean switching zones."
+      description="Direct cue ignition. Pick a receiver, then fire its cues."
       actions={
         keyTurned && armSwitchActive && !blocker
           ? <Badge tone="armed" pulse>Manual fire active</Badge>

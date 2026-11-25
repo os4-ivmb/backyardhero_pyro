@@ -193,7 +193,7 @@ function computeShots(item, firingProfiles, inventory) {
 const TimelineItem = memo(function TimelineItem({
   item, start, width, top, hasNoLength, labelMaxPx,
   barH, rowH, topPad, compactItems,
-  showZoneCue, showStartTime, showEndTime,
+  showZoneCue, showStartTime, showEndTime, groupMembers,
   isSelected, isDragging, isLocked, canDrag, isReadOnly,
   receiverLabels, firingProfiles, inventory, handlers,
 }) {
@@ -253,9 +253,21 @@ const TimelineItem = memo(function TimelineItem({
           >
             {item.name}
           </span>
-          {showZoneCue && (
-            <span className="shrink-0 rounded-xs bg-white/80 border border-white/40 px-1 py-px text-[10px] font-semibold leading-none text-black shadow-e2 whitespace-nowrap">
-              {receiverLabels?.[item.zone] || item.zone}:{item.target}
+          {showZoneCue &&
+            (groupMembers || [item]).map((m) => (
+              <span
+                key={m.id}
+                className="shrink-0 rounded-xs bg-white/80 border border-white/40 px-1 py-px text-[10px] font-semibold leading-none text-black shadow-e2 whitespace-nowrap"
+              >
+                {receiverLabels?.[m.zone] || m.zone}:{m.target}
+              </span>
+            ))}
+          {!showZoneCue && groupMembers && (
+            <span
+              className="shrink-0 px-1 text-[10px] font-mono leading-none bg-surface-base/85 text-fg-primary rounded-sm whitespace-nowrap"
+              title={`${groupMembers.length} cues grouped`}
+            >
+              {groupMembers.length} cues
             </span>
           )}
           {showStartTime && (
@@ -281,8 +293,8 @@ const TimelineItem = memo(function TimelineItem({
           {!isReadOnly && (
             <button
               type="button"
-              title="Remove item"
-              aria-label="Remove item"
+              title={groupMembers ? `Remove all ${groupMembers.length} grouped cues` : "Remove item"}
+              aria-label={groupMembers ? `Remove all ${groupMembers.length} grouped cues` : "Remove item"}
               className="shrink-0 inline-flex items-center justify-center h-4 w-4 rounded-xs leading-none text-white/80 bg-black/40 hover:bg-danger hover:text-danger-fg transition-colors"
               style={{ cursor: "pointer" }}
               onPointerDown={(e) => e.stopPropagation()}
@@ -578,6 +590,19 @@ const Timeline = memo((props) => {
 
   const handleMenuDelete = async (item) => {
     closeCtxMenu();
+    const members = membersOf(item);
+    if (members.length > 1) {
+      // A grouped bar removes every cue it stands for.
+      if (await asyncConfirm({
+        message: `Remove "${item.name}" from the show? This removes all ${members.length} grouped cues.`,
+        destructive: true,
+      })) {
+        const ids = new Set(members.map((m) => m.id));
+        setItems((prev) => prev.filter((it) => !ids.has(it.id)));
+        props.clearSelection?.();
+      }
+      return;
+    }
     if (props.onItemDelete) {
       props.onItemDelete(item);
       return;
@@ -600,7 +625,8 @@ const Timeline = memo((props) => {
     if (sec == null) return;
     // Keep the cue on-screen: clamp so it can't be pushed past the timeline end.
     const start = Math.max(0, Math.min(sec, maxTime - num(item.duration)));
-    setItems((prev) => prev.map((it) => (it.id === item.id ? { ...it, startTime: start } : it)));
+    const ids = new Set(membersOf(item).map((m) => m.id));
+    setItems((prev) => prev.map((it) => (ids.has(it.id) && !it.locked ? { ...it, startTime: start } : it)));
   };
 
   const handleEndAt = async (item) => {
@@ -617,7 +643,8 @@ const Timeline = memo((props) => {
     if (endSec == null) return;
     // Clamp to [0, maxTime - dur] so the cue stays within the timeline bounds.
     const newStart = Math.max(0, Math.min(endSec - dur, maxTime - dur));
-    setItems((prev) => prev.map((it) => (it.id === item.id ? { ...it, startTime: newStart } : it)));
+    const ids = new Set(membersOf(item).map((m) => m.id));
+    setItems((prev) => prev.map((it) => (ids.has(it.id) && !it.locked ? { ...it, startTime: newStart } : it)));
   };
 
   const handleSwapStart = (item) => {
@@ -633,7 +660,9 @@ const Timeline = memo((props) => {
 
   const handleToggleLock = (item) => {
     closeCtxMenu();
-    setItems((prev) => prev.map((it) => (it.id === item.id ? { ...it, locked: !it.locked } : it)));
+    const ids = new Set(membersOf(item).map((m) => m.id));
+    const lock = !item.locked;
+    setItems((prev) => prev.map((it) => (ids.has(it.id) ? { ...it, locked: lock } : it)));
   };
 
   // ---- Multi-selection context-menu actions --------------------------------
@@ -908,9 +937,16 @@ const Timeline = memo((props) => {
     pointerOnItemRef.current = true;
     if (item.locked) return;    // locked cues don't move
     const selected = props.selectedItems || [];
-    const isMulti = selected.length > 1 && selected.some((s) => s.id === item.id);
+    const members = membersOf(item);
+    const inSelection = selected.length > 1 && members.some((m) => selected.some((s) => s.id === m.id));
+    // A grouped bar always moves as a unit, so it rides the multi-drag path.
+    const isMulti = inSelection || members.length > 1;
     const orig = new Map();
-    if (isMulti) selected.forEach((s) => orig.set(s.id, num(s.startTime)));
+    if (inSelection) {
+      // Expand any grouped selections so their hidden members move too.
+      selected.forEach((s) => membersOf(s).forEach((m) => orig.set(m.id, num(m.startTime))));
+    }
+    members.forEach((m) => orig.set(m.id, num(m.startTime)));
     orig.set(item.id, num(item.startTime));
     lastDragBaseRef.current = null; // fresh gesture — first move always commits
     dragRef.current = {
@@ -969,10 +1005,13 @@ const Timeline = memo((props) => {
     const x0 = Math.min(m.x0, m.x1), x1 = Math.max(m.x0, m.x1);
     const y0 = Math.min(m.y0, m.y1), y1 = Math.max(m.y0, m.y1);
     const ids = new Set();
-    effectiveItems.forEach((it) => {
-      if (it.locked) return; // locked cues can't join a multi-selection
+    displayItems.forEach((it) => {
       const r = marqueeItemRect(it);
-      if (r.left <= x1 && r.right >= x0 && r.top <= y1 && r.bottom >= y0) ids.add(it.id);
+      if (!(r.left <= x1 && r.right >= x0 && r.top <= y1 && r.bottom >= y0)) return;
+      // A grouped bar selects every cue it stands for.
+      membersOf(it).forEach((m) => {
+        if (!m.locked) ids.add(m.id); // locked cues can't join a multi-selection
+      });
     });
     return ids;
   };
@@ -1452,6 +1491,38 @@ const Timeline = memo((props) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, dragOverride]);
 
+  // "Group duplicates" view option: the same piece placed several times at the
+  // exact same start (and duration), fired on different cues, collapses into a
+  // single bar. Purely a display grouping -- `items` is untouched. The first
+  // member is the representative that's laid out / rendered; `groupOf` maps
+  // every member id to the full member list so drag, delete, lock and timing
+  // actions can act on the whole group.
+  const [groupDuplicates, setGroupDuplicates] = usePersistentState(pkey("groupDuplicates"), false);
+  const { displayItems, groupOf } = useMemo(() => {
+    const groupOf = new Map();
+    if (!groupDuplicates) return { displayItems: effectiveItems, groupOf };
+    const byKey = new Map();
+    const displayItems = [];
+    effectiveItems.forEach((it) => {
+      const piece = it.itemId != null ? `id:${it.itemId}` : `name:${it.name}`;
+      const key = `${piece}|${it.type}|${num(it.startTime)}|${num(it.duration)}`;
+      const members = byKey.get(key);
+      if (members) {
+        members.push(it);
+      } else {
+        const fresh = [it];
+        byKey.set(key, fresh);
+        displayItems.push(it);
+      }
+    });
+    byKey.forEach((members) => {
+      if (members.length > 1) members.forEach((m) => groupOf.set(m.id, members));
+    });
+    return { displayItems, groupOf };
+  }, [effectiveItems, groupDuplicates]);
+  // Members of `item`'s group (just [item] when it isn't grouped).
+  const membersOf = (item) => groupOf.get(item.id) || [item];
+
   // Lane-stacking layout. Memoised on the inputs it actually depends on
   // (`effectiveItems` — items plus any live drag override — and the content
   // width that sets the no-length cue allowance) so it doesn't re-run on
@@ -1470,7 +1541,7 @@ const Timeline = memo((props) => {
     };
     const stacks = [];
     const rows = new Map();
-    effectiveItems.forEach((item) => {
+    displayItems.forEach((item) => {
       const start = num(item.startTime);
       const dur = effDur(item);
       let overlapIndex = 0;
@@ -1490,10 +1561,12 @@ const Timeline = memo((props) => {
       if (!stacks[overlapIndex]) stacks[overlapIndex] = [];
       stacks[overlapIndex].push(item);
       rows.set(item.id, overlapIndex);
+      // Grouped members share the representative's row (marquee hit-testing).
+      (groupOf.get(item.id) || []).forEach((m) => rows.set(m.id, overlapIndex));
     });
     return { stackedItems: stacks, rowOf: rows };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveItems, innerWidthPx]);
+  }, [displayItems, groupOf, innerWidthPx]);
 
   // cakeTypesWithFiringProfiles is a module-level helper (shared with computeShots).
 
@@ -1980,6 +2053,7 @@ const Timeline = memo((props) => {
                     { key: "zoneCue", label: "Show zone:cue", checked: showZoneCue, set: setShowZoneCue, title: "Show the zone:cue badge (e.g. RX142:1) on each item." },
                     { key: "startTime", label: "Show start time", checked: showStartTime, set: setShowStartTime, title: "Show each cue's start time on its label." },
                     { key: "endTime", label: "Show end time", checked: showEndTime, set: setShowEndTime, title: "Show each cue's end time on its label." },
+                    { key: "groupDuplicates", label: "Group duplicates", checked: groupDuplicates, set: setGroupDuplicates, title: "Show the same piece fired on several cues at the same time as one bar (each zone:cue shown as a pill). Removing it removes every grouped cue." },
                     { key: "compact", label: "Compact view", checked: compactItems, set: setCompactItems, title: "Smaller item bars. Off = taller bars with larger labels." },
                     { key: "scrollZoom", label: "Scroll zoom", checked: scrollZoom, set: setScrollZoom, title: "Scroll wheel zooms instead of panning (Shift pans, Alt scrolls vertically)." },
                     { key: "followPlayhead", label: "Follow playhead", checked: followPlayhead, set: setFollowPlayhead, title: "Keep the playhead framed during playback. Turns off when you scroll manually." },
@@ -2249,6 +2323,12 @@ const Timeline = memo((props) => {
             // Bound the label name to ~the cue's own width (min 90px).
             const labelMaxPx = Math.max((width / 100) * innerWidthPx, 90);
             const isLocked = !!item.locked;
+            const members = groupOf.get(item.id);
+            const sel = props.selectedItems || [];
+            const isSel = (m) =>
+              props.selectedItem?.id === m.id ||
+              sel.some((s) => s.id === m.id) ||
+              (marqueeIds ? marqueeIds.has(m.id) : false);
             return (
               <TimelineItem
                 key={item.id}
@@ -2265,11 +2345,8 @@ const Timeline = memo((props) => {
                 showZoneCue={showZoneCue}
                 showStartTime={showStartTime}
                 showEndTime={showEndTime}
-                isSelected={
-                  props.selectedItem?.id === item.id ||
-                  (props.selectedItems || []).some((s) => s.id === item.id) ||
-                  (marqueeIds ? marqueeIds.has(item.id) : false)
-                }
+                groupMembers={members}
+                isSelected={members ? members.some(isSel) : isSel(item)}
                 isDragging={draggingId === item.id}
                 isLocked={isLocked}
                 canDrag={!isReadOnly && !isLocked}
