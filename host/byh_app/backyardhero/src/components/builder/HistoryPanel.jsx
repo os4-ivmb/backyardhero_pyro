@@ -23,6 +23,8 @@ const computeChanges = (prev, next) => {
     ["target", "Target", false],
     ["delay", "Delay", true],
     ["metaDelaySec", "Meta delay", true],
+    ["noFuseDelay", "No fuse delay", false],
+    ["shellNumber", "Shell #", false],
     ["name", "Name", false],
     ["type", "Type", false],
   ];

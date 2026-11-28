@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from "react";
 import axios from "axios";
 import { MdEdit, MdMoreVert } from "react-icons/md";
-import { FaImage, FaVideo, FaChartLine, FaTriangleExclamation } from "react-icons/fa6";
+import { FaImage, FaVideo, FaChartLine, FaStopwatch, FaTriangleExclamation } from "react-icons/fa6";
 import { FaCheckCircle, FaUpload } from "react-icons/fa";
 import { FiPackage } from "react-icons/fi";
 import { LuBlocks } from "react-icons/lu";
@@ -16,6 +16,7 @@ import { asyncAlert } from "@/components/common/AsyncPrompt";
 import usePersistentState from "@/utils/usePersistentState";
 
 import ShotProfileModal from "./ShotProfileModal";
+import LiftDelayModal from "./LiftDelayModal";
 import ShellPackEditor from "./ShellPackEditor";
 import ImportCatalogModal from "./ImportCatalogModal";
 
@@ -74,6 +75,7 @@ export default function InventoryList({ inventory, setActiveItem, refreshInvento
   const [activeTab, setActiveTab] = useState("multishot");
   const [firingProfiles, setFiringProfiles] = useState({});
   const [profileItem, setProfileItem] = useState(null);
+  const [liftDelayItem, setLiftDelayItem] = useState(null);
   const [shellPackItem, setShellPackItem] = useState(null);
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [isBatchOpen, setIsBatchOpen] = useState(false);
@@ -329,7 +331,19 @@ export default function InventoryList({ inventory, setActiveItem, refreshInvento
                 <FaVideo aria-hidden />
               </a>
             ) : null}
-            {it.youtube_link && it.youtube_link.trim() !== "" ? (
+            {it.youtube_link && it.youtube_link.trim() !== "" && it.type === "AERIAL_SHELL" ? (
+              // Shells: estimate lift delay from the video instead of a shot profile.
+              <button
+                onClick={(e) => { e.stopPropagation(); setLiftDelayItem(it); }}
+                className={cn(
+                  "hover:brightness-125",
+                  Number(it.lift_delay) > 0 ? "text-accent" : "text-warn"
+                )}
+                title="Estimate lift delay from video"
+              >
+                <FaStopwatch aria-hidden />
+              </button>
+            ) : it.youtube_link && it.youtube_link.trim() !== "" ? (
               firingProfiles[it.id] ? (
                 <button
                   onClick={(e) => { e.stopPropagation(); setProfileItem(it); }}
@@ -591,6 +605,11 @@ export default function InventoryList({ inventory, setActiveItem, refreshInvento
         firingProfile={profileItem ? firingProfiles[profileItem.id] : null}
         onClose={() => setProfileItem(null)}
         onReprocessComplete={refreshProfiles}
+      />
+      <LiftDelayModal
+        isOpen={!!liftDelayItem}
+        item={liftDelayItem}
+        onClose={() => setLiftDelayItem(null)}
       />
       <ShellPackEditor
         isOpen={!!shellPackItem}

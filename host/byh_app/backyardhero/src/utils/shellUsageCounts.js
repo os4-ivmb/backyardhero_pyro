@@ -111,6 +111,13 @@ export function buildShellUsageCountsFromShowItems(items) {
   if (!items || !Array.isArray(items)) return counts;
 
   for (const item of items) {
+    // Aerial shells placed straight on the timeline (picked via the shell
+    // picker in the add-cue dialog) count per physical unit fired.
+    if (item.type === 'AERIAL_SHELL' && item.itemId != null) {
+      const n = Math.max(1, Math.floor(Number(item.multiple)) || 1);
+      for (let i = 0; i < n; i++) addUsage(counts, item.itemId, item.shellNumber ?? null);
+      continue;
+    }
     if (item.type !== 'RACK_SHELLS' || !item.fireableItem) continue;
     const fi = item.fireableItem;
 

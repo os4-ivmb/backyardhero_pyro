@@ -14,13 +14,25 @@ export default function CellShellSelector({
   inventory,
   isBatch = false,
   showItems,
-  racks
+  racks,
+  // Stacking override for hosts that open the picker over a z-indexed
+  // modal (the add-cue dialog sits at z 100+).
+  zIndex,
+  title,
+  selectLabel
 }) {
   const [selectedShellId, setSelectedShellId] = useState(cellData?.shellId || null);
   const [selectedShellNumber, setSelectedShellNumber] = useState(cellData?.shellNumber || null);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedColor, setSelectedColor] = useState(null);
   const [filterShellPackId, setFilterShellPackId] = useState('');
+  // "Direct" = the ignitor goes straight into the shell's lift charge rather
+  // than its time fuse. Only for unfused cells: a direct cell can't be on a
+  // fuse, and firing it skips the shell's fuse delay (lift delay only).
+  const [direct, setDirect] = useState(!!cellData?.direct);
+  // Shell descriptions are long; hide them by default to keep the list dense.
+  const [showDescriptions, setShowDescriptions] = useState(false);
+  const cellIsFused = !!cellData?.fuseId;
 
   // Get all aerial shells - include those with and without pack_shell_data
   const shellsWithPacks = useMemo(() => {
@@ -110,6 +122,17 @@ export default function CellShellSelector({
         return;
       }
 
+      // Filtering to a single pack: offer "any shell from this pack" first.
+      if (filterShellPackId) {
+        results.push({
+          item,
+          shell: null,
+          matchType: 'any',
+          colorCount: 0,
+          pinned: true
+        });
+      }
+
       // Search through each shell in the pack
       item.shells.forEach(shell => {
         let matches = true;
@@ -156,6 +179,10 @@ export default function CellShellSelector({
 
     // Sort by number of colors (lowest first), then by item name, then by shell number
     return results.sort((a, b) => {
+      // Pinned entries ("any shell" for the filtered pack) lead the list.
+      if (!!a.pinned !== !!b.pinned) {
+        return a.pinned ? -1 : 1;
+      }
       // First sort by color count
       if (a.colorCount !== b.colorCount) {
         return a.colorCount - b.colorCount;
@@ -188,7 +215,7 @@ export default function CellShellSelector({
   const showUsageCounts = showItems != null || (racks?.length ?? 0) > 0;
 
   const handleSelect = () => {
-    onSelect(selectedShellId, selectedShellNumber);
+    onSelect(selectedShellId, selectedShellNumber, direct && !cellIsFused);
   };
 
   const handleRemove = () => {
@@ -203,9 +230,12 @@ export default function CellShellSelector({
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50"
+      style={zIndex != null ? { zIndex } : undefined}
+    >
       <div className="bg-gray-800 text-white p-6 rounded shadow-lg w-[900px] max-h-[80vh] overflow-hidden relative z-50 flex flex-col">
-        <h2 className="text-xl mb-4">{isBatch ? 'Batch Assign Shell' : 'Select Shell'}</h2>
+        <h2 className="text-xl mb-4">{title || (isBatch ? 'Batch Assign Shell' : 'Select Shell')}</h2>
         
         {/* Filters */}
         <div className="mb-4 space-y-3">
@@ -272,17 +302,20 @@ export default function CellShellSelector({
         {/* Two Column Layout */}
         <div className="flex-1 grid grid-cols-2 gap-4 overflow-hidden">
           {/* Left Column: Shell List */}
-          <div className="overflow-y-auto border-r border-gray-700 pr-4">
-            <div className="space-y-2">
+          <div className="flex flex-col min-h-0 border-r border-gray-700 pr-4">
+            <div className="flex-1 overflow-y-auto space-y-1.5">
               {displayShells.length > 0 ? (
                 displayShells.map((result, idx) => {
-                  const isSelected = result.item.id === selectedShellId && 
+                  const isSelected = result.item.id === selectedShellId &&
                     (result.shell === null ? selectedShellNumber === null : result.shell?.number === selectedShellNumber);
                   const usageKey = shellPackShellKey(
                     result.item.id,
                     result.shell?.number ?? null
                   );
                   const usedTotal = showUsageCounts ? shellUsageCounts.get(usageKey) || 0 : null;
+                  const colors = result.shell?.colors || [];
+                  const effects = result.shell?.effects || [];
+                  const description = result.shell?.description;
 
                   return (
                     <div
@@ -291,55 +324,51 @@ export default function CellShellSelector({
                         setSelectedShellId(result.item.id);
                         setSelectedShellNumber(result.shell?.number || null);
                       }}
-                      className={`p-3 rounded cursor-pointer flex items-center justify-between gap-2 ${
-                        isSelected
-                          ? 'bg-blue-600'
-                          : 'bg-gray-700 hover:bg-gray-600'
+                      className={`px-2.5 py-1.5 rounded cursor-pointer ${
+                        isSelected ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'
                       }`}
                     >
-                      <div className="flex-1 min-w-0">
-                        <div className="font-semibold truncate">{result.item.name}</div>
-                        {result.shell ? (
-                          <>
-                            <div className="text-sm text-gray-300">
-                              Shell #{result.shell.number}
-                              {result.shell.description && ` - ${result.shell.description}`}
-                            </div>
-                            {result.shell.effects && result.shell.effects.length > 0 && (
-                              <div className="text-xs text-gray-400 mt-1">
-                                {result.shell.effects.join(', ')}
-                              </div>
-                            )}
-                          </>
-                        ) : (
-                          <div className="text-sm text-gray-300">ANY shell</div>
-                        )}
-                        {usedTotal !== null && (
-                          <div
-                            className={`text-xs mt-1 font-medium ${
-                              usedTotal > 0 ? 'text-amber-400' : 'text-gray-500'
-                            }`}
-                          >
-                            Used: {usedTotal}×
-                          </div>
-                        )}
-                      </div>
-                      <div className="flex gap-1 ml-2 flex-shrink-0">
-                        {result.shell?.colors && result.shell.colors.length > 0 ? (
-                          result.shell.colors.map((color, colorIdx) => (
+                      {/* Header: name | colors | shell # */}
+                      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+                        <div className="text-sm font-semibold truncate min-w-0">{result.item.name}</div>
+                        <div className="flex gap-1 justify-center">
+                          {colors.map((color, colorIdx) => (
                             <div
                               key={colorIdx}
-                              className="w-6 h-6 rounded border border-gray-600"
+                              className="w-4 h-4 rounded-sm border border-gray-600"
                               style={{ backgroundColor: color }}
                               title={color}
                             />
-                          ))
-                        ) : result.shell === null ? (
-                          <div className="text-xs text-gray-500">-</div>
-                        ) : (
-                          <div className="text-xs text-gray-500">No colors</div>
-                        )}
+                          ))}
+                        </div>
+                        <div className="text-xs font-mono text-right text-gray-300 whitespace-nowrap">
+                          {result.shell ? `#${result.shell.number}` : 'ANY'}
+                        </div>
                       </div>
+                      {showDescriptions && description && (
+                        <div className="text-xs text-gray-300 mt-0.5">{description}</div>
+                      )}
+                      {/* Effects + footer (used count, bottom right) */}
+                      {(effects.length > 0 || usedTotal !== null) && (
+                        <div className="flex items-end justify-between gap-2 mt-0.5">
+                          <div className="text-[11px] leading-tight text-gray-400 min-w-0">
+                            {effects.length > 0
+                              ? effects.join(', ')
+                              : result.shell === null
+                              ? 'Any shell from this pack'
+                              : ''}
+                          </div>
+                          {usedTotal !== null && (
+                            <div
+                              className={`text-[11px] leading-tight font-medium whitespace-nowrap ${
+                                usedTotal > 0 ? 'text-amber-400' : 'text-gray-500'
+                              }`}
+                            >
+                              Used {usedTotal}×
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })
@@ -349,6 +378,14 @@ export default function CellShellSelector({
                 </div>
               )}
             </div>
+            <label className="flex items-center gap-2 pt-2 mt-2 border-t border-gray-700 text-xs text-gray-300 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={showDescriptions}
+                onChange={(e) => setShowDescriptions(e.target.checked)}
+              />
+              Show descriptions
+            </label>
           </div>
 
           {/* Right Column: Selection Details */}
@@ -444,14 +481,40 @@ export default function CellShellSelector({
               </div>
             )}
 
+            {/* Direct fire (ignitor in the lift charge, no fuse) */}
+            <label
+              className={`mt-auto pt-4 flex items-start gap-2 text-sm select-none ${
+                cellIsFused ? 'text-gray-500 cursor-not-allowed' : 'text-gray-200 cursor-pointer'
+              }`}
+              title={cellIsFused ? 'This cell is on a fuse. Delete the fuse first to make it direct.' : undefined}
+            >
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={direct && !cellIsFused}
+                disabled={cellIsFused}
+                onChange={(e) => setDirect(e.target.checked)}
+              />
+              <span>
+                <span className="font-semibold">Direct</span> (ignitor in the lift charge)
+                <span className="block text-xs text-gray-400">
+                  {cellIsFused
+                    ? 'This cell is on a fuse. Delete the fuse first to make it direct.'
+                    : isBatch
+                    ? "Can't be fused. Fires with no fuse delay, only lift delay. Fused cells in the selection are left as-is."
+                    : "Can't be fused. Fires with no fuse delay, only lift delay."}
+                </span>
+              </span>
+            </label>
+
             {/* Action Buttons */}
-            <div className="flex gap-2 mt-auto pt-4 border-t border-gray-700">
+            <div className="flex gap-2 pt-4 mt-3 border-t border-gray-700">
               <button
                 onClick={handleSelect}
                 disabled={!selectedShellId}
                 className="flex-1 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed"
               >
-                {isBatch ? 'Assign to Selected Cells' : 'Select'}
+                {selectLabel || (isBatch ? 'Assign to Selected Cells' : 'Select')}
               </button>
               {!isBatch && cellData && cellData.shellId && (
                 <button

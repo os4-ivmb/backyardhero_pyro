@@ -280,7 +280,7 @@ export default function RackShellsSelector({ onSelect, onClose, items, inventory
                             : shell
                               ? `${shell.name}${cellData.shellNumber ? ` #${cellData.shellNumber}` : ''}${
                                   usedTotalCount > 0 ? ` — used ${usedTotalCount}× (racks + timeline)` : ''
-                                }`
+                                }${cellData.direct ? ' · Direct (no fuse delay)' : ''}`
                               : 'Empty'
                         }
                       >
@@ -290,6 +290,14 @@ export default function RackShellsSelector({ onSelect, onClose, items, inventory
                             title={`Placed on racks or scheduled ${usedTotalCount} time(s)`}
                           >
                             {usedTotalCount}
+                          </div>
+                        )}
+                        {hasShell && !isUsed && shell && cellData.direct && (
+                          <div
+                            className="absolute top-0 left-0 z-20 px-0.5 rounded-br bg-amber-400 text-[8px] font-bold leading-tight text-black"
+                            aria-label="Direct"
+                          >
+                            D
                           </div>
                         )}
                         {hasShell && !isUsed && shell && (

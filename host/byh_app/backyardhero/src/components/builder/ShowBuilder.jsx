@@ -57,6 +57,7 @@ import { normalizeYouTubeUrl } from "@/util/youtube";
 import { parseOptionalUnitCost } from "@/util/inventoryUnitCost";
 import usePersistentState from "@/utils/usePersistentState";
 import RackShellsSelector from "./RackShellsSelector";
+import CellShellSelector from "./CellShellSelector";
 import WaveSurfer from 'wavesurfer.js';
 import { analyzeAudioFile, bpmFromTapTimes } from "@/utils/bpmAnalyzer";
 import {
@@ -157,6 +158,30 @@ const SECTION_SELECT_TOOLTIP =
 
 // `stepLabel` (e.g. "step 3") switches the copy to manual-sequence wording and
 // hides the timeline-only start time.
+// Aerial shells rarely have a length in inventory; without one the timeline
+// draws them as "unknown length". Give such cues a 1s burst by default.
+const DEFAULT_AERIAL_SHELL_DURATION_SEC = 1;
+const withDefaultShellDuration = (cue) =>
+  cue && cue.type === "AERIAL_SHELL" && !(Number(cue.duration) > 0)
+    ? { ...cue, duration: DEFAULT_AERIAL_SHELL_DURATION_SEC }
+    : cue;
+
+// A pack shell's entry (colors / description) from an aerial shell inventory
+// item's metadata.pack_shell_data, or null.
+const packShellOf = (item, shellNumber) => {
+  if (!item || shellNumber == null) return null;
+  try {
+    const md = typeof item.metadata === "string" ? JSON.parse(item.metadata) : item.metadata;
+    return md?.pack_shell_data?.shells?.find((s) => s.number === shellNumber) || null;
+  } catch {
+    return null;
+  }
+};
+// Default cue label for an aerial shell: "<pack> #<n>" when a specific shell
+// is picked, else the pack name.
+const aerialShellLabel = (item, shellNumber) =>
+  item ? (shellNumber != null ? `${item.name} #${shellNumber}` : item.name) : "";
+
 const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, items, inventory, availableDevices, receiverLabels, showMetadata, editItem, presetItem, presetTarget, stepLabel = null }) => {
   // editItem present => the modal is editing an already-placed cue rather than
   // adding a new one. Same UI, but it pre-populates from the cue, keeps the
@@ -186,6 +211,14 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
   const [startAtText, setStartAtText] = useState("00:00.00");
   const [fireMultiple, setFireMultiple] = useState(false);
   const [multipleCount, setMultipleCount] = useState(2);
+  // Aerial shells only: the e-match goes straight into the lift charge instead
+  // of the shell's time fuse, so the cue fires with no fuse delay -- only the
+  // lift delay (plus any additional delay) remains.
+  const [noFuseDelay, setNoFuseDelay] = useState(false);
+  // Aerial shells are picked through the rack shell picker, which can also
+  // pin a specific shell from a pack (shellNumber; null = any shell).
+  const [shellNumber, setShellNumber] = useState(null);
+  const [shellPickerOpen, setShellPickerOpen] = useState(false);
   // Section of a segmented piece to place ("" = the entire piece).
   const [segmentId, setSegmentId] = useState("");
   const [error, setError] = useState(null);
@@ -195,6 +228,7 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
   const extraKeyRef = useRef(0);
 
   const supportsMultiple = MULTIPLE_FIRE_TYPES.has(selectedType) && !!selectedItem;
+  const isAerialShell = selectedItem?.type === "AERIAL_SHELL";
 
   // Seed the form from the cue being edited each time the modal opens (or the
   // target cue changes). Composite types (fused line, fused item line, rack
@@ -226,6 +260,8 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
     const m = Number(editItem.multiple) || 1;
     setFireMultiple(m > 1);
     setMultipleCount(m > 1 ? m : 2);
+    setNoFuseDelay(!!editItem.noFuseDelay);
+    setShellNumber(editItem.shellNumber ?? null);
     setError(null);
   }, [isOpen, editItem, inventory]);
 
@@ -300,6 +336,8 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
       setSegmentId("");
     }
     setMetaDelaySec(last.metaDelaySec);
+    setNoFuseDelay(!!last.noFuseDelay);
+    setShellNumber(last.shellNumber ?? null);
     setFireMultiple(last.fireMultiple);
     setMultipleCount(last.multipleCount);
     const routing = pickRouting(last.zone, last.target);
@@ -322,6 +360,8 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
     setSegmentId("");
     setFireMultiple(false);
     setMultipleCount(2);
+    setNoFuseDelay(false);
+    setShellNumber(null);
     setError(null);
   }, [isOpen, presetItem, isEdit]);
 
@@ -353,6 +393,8 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
     setMetaDuration(5);
     setFireMultiple(false);
     setMultipleCount(2);
+    setNoFuseDelay(false);
+    setShellNumber(null);
     setSegmentId("");
     setExtraRoutings([]);
     setError(null);
@@ -585,6 +627,8 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
         itemId: selectedItem?.id ?? null,
         label: selectedType === "GENERIC" ? metaLabel : "",
         metaDelaySec: Number(metaDelaySec) || 0,
+        noFuseDelay: isAerialShell && noFuseDelay,
+        shellNumber: isAerialShell ? shellNumber : null,
         metaDuration: Number(metaDuration) || 0,
         fireMultiple: supportsMultiple && fireMultiple,
         multipleCount,
@@ -598,7 +642,9 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
     if (selectedItem) {
       // For aerial shells, include both fuse_delay and lift_delay in the delay calculation
       // This matches the behavior for fused lines
-      const itemDelay = (selectedItem.fuse_delay || selectedItem.fuseDelay || 0) 
+      // "No fuse delay" (ignitor in the lift charge) drops the fuse term.
+      const skipFuse = isAerialShell && noFuseDelay;
+      const itemDelay = (skipFuse ? 0 : (selectedItem.fuse_delay || selectedItem.fuseDelay || 0))
         + (selectedItem.type === "AERIAL_SHELL" ? (selectedItem.lift_delay || 0) : 0);
 
       // Number of physical items fired together on this cue. Stored only when >1
@@ -613,20 +659,22 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
         ? applySegmentToCue({ segmentId: selectedSegment.id }, selectedItem)
         : {};
 
-      emit({ 
-        ...selectedItem, 
+      emit(withDefaultShellDuration({
+        ...selectedItem,
         startTime, 
         zone, 
         target,
         // The label field shows "Auto-fills from item name"; honour that on
         // save even if the operator never touched it.
-        name: metaLabel || autoSegmentLabel || selectedItem.name,
+        name: metaLabel || autoSegmentLabel || aerialShellLabel(selectedItem, shellNumber),
         metaDelaySec,
         delay: (metaDelaySec || 0) + itemDelay,
+        noFuseDelay: skipFuse || undefined,
+        shellNumber: isAerialShell && shellNumber != null ? shellNumber : undefined,
         itemId: selectedItem.id,
         ...(multiple > 1 ? { multiple } : {}),
         ...segFields,
-      });
+      }));
       onClose();
     } else if (fusedLine) {
       // Calculate lead-in fuse burn time
@@ -734,7 +782,10 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
         const cellData = fireableItem.cellData;
         const shell = inventory.find(item => item.id === cellData.shellId);
         if (shell) {
-          delay = (metaDelaySec || 0) + (shell.fuse_delay || 0) + (shell.lift_delay || 0);
+          // A direct cell has the ignitor in the lift charge: no fuse delay,
+          // only the lift delay.
+          const fuseDelay = cellData.direct ? 0 : (shell.fuse_delay || 0);
+          delay = (metaDelaySec || 0) + fuseDelay + (shell.lift_delay || 0);
           duration = (shell.duration || 2);
         }
       }
@@ -777,6 +828,8 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
     setMetaDuration(5);
     setFireMultiple(false);
     setMultipleCount(2);
+    setNoFuseDelay(false);
+    setShellNumber(null);
     setSegmentId("");
   };
 
@@ -831,12 +884,19 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
     setSelectedItem(null);
     setFireMultiple(false);
     setMultipleCount(2);
+    setNoFuseDelay(false);
+    setShellNumber(null);
     if (newType === "FUSED_SHELL_LINE") {
       setFusedBuilderOpen(true);
     } else if (newType === "FUSED_LINE") {
       setFusedItemBuilderOpen(true);
     } else if (newType === "RACK_SHELLS") {
       setIsRackShellsOpen(true);
+    } else if (newType === "AERIAL_SHELL") {
+      setFusedLine(null);
+      setFusedItemLine(null);
+      setRackShells(null);
+      setShellPickerOpen(true);
     } else {
       setFusedLine(null);
       setFusedItemLine(null);
@@ -1022,7 +1082,46 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
             </Card>
           )}
 
-          {showsInventoryList && (
+          {showsInventoryList && selectedType === "AERIAL_SHELL" && (
+            <Field label="Shell">
+              {selectedItem ? (
+                <Card tone="inset" padding="none">
+                  <div className="flex items-center justify-between gap-3 px-3 py-2">
+                    <div className="min-w-0">
+                      <div className="text-sm text-fg-primary truncate">{selectedItem.name}</div>
+                      <div className="text-2xs text-fg-muted">
+                        {(() => {
+                          const ps = packShellOf(selectedItem, shellNumber);
+                          if (shellNumber == null) return "Any shell from this pack";
+                          return `Shell #${shellNumber}${ps?.description ? ` · ${ps.description}` : ""}`;
+                        })()}
+                        {noFuseDelay ? " · Direct" : ""}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {(packShellOf(selectedItem, shellNumber)?.colors || []).map((c, i) => (
+                        <span
+                          key={i}
+                          className="inline-block w-4 h-4 rounded-xs border border-border"
+                          style={{ backgroundColor: c }}
+                          title={c}
+                        />
+                      ))}
+                      <Button size="sm" variant="outline" onClick={() => setShellPickerOpen(true)}>
+                        Change…
+                      </Button>
+                    </div>
+                  </div>
+                </Card>
+              ) : (
+                <Button variant="outline" onClick={() => setShellPickerOpen(true)}>
+                  Pick shell…
+                </Button>
+              )}
+            </Field>
+          )}
+
+          {showsInventoryList && selectedType !== "AERIAL_SHELL" && (
             <Field
               label="Item"
               hint={
@@ -1177,6 +1276,22 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
                 }
                 placeholder="5"
               />
+            </Field>
+          )}
+
+          {isAerialShell && (
+            <Field
+              label="Fuse delay"
+              hint={`Ignitor goes directly into the lift charge, skipping the shell's ${Number(selectedItem.fuse_delay || 0).toFixed(2)}s fuse. Only the ${Number(selectedItem.lift_delay || 0).toFixed(2)}s lift delay applies.`}
+            >
+              <label className="flex items-center gap-2 text-sm text-fg-secondary cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={noFuseDelay}
+                  onChange={(e) => setNoFuseDelay(e.target.checked)}
+                />
+                <span>No fuse delay (direct to lift)</span>
+              </label>
             </Field>
           )}
 
@@ -1356,6 +1471,48 @@ const AddItemModal = ({ isOpen, onClose, onAdd, startTime, insertMode = false, i
           onAdd={handleFusedItemLineAdd}
           inventory={inventory}
           initialLine={fusedItemLine}
+        />
+      )}
+
+      {/* Aerial shell picker (the rack shell picker, reused) */}
+      {shellPickerOpen && (
+        <CellShellSelector
+          isOpen
+          zIndex={130}
+          title="Select aerial shell"
+          selectLabel="Use shell"
+          cellData={
+            isAerialShell
+              ? { shellId: selectedItem.id, shellNumber, direct: noFuseDelay }
+              : null
+          }
+          inventory={inventory}
+          showItems={items}
+          onClose={() => setShellPickerOpen(false)}
+          onSelect={(shellId, pickedNumber, direct) => {
+            setShellPickerOpen(false);
+            if (shellId == null) {
+              // "Remove" in the picker clears the pick.
+              setSelectedItem(null);
+              setShellNumber(null);
+              setNoFuseDelay(false);
+              return;
+            }
+            const item = inventory.find((i) => i.id === shellId);
+            if (!item) return;
+            const nextNumber = pickedNumber ?? null;
+            // Keep an auto-filled label in sync; leave a custom one alone.
+            const prevAuto = selectedItem ? aerialShellLabel(selectedItem, shellNumber) : null;
+            setMetaLabel((prev) =>
+              !prev || prev === selectedItem?.name || prev === prevAuto
+                ? aerialShellLabel(item, nextNumber)
+                : prev
+            );
+            if (item.id !== selectedItem?.id) setSegmentId("");
+            setSelectedItem(item);
+            setShellNumber(nextNumber);
+            setNoFuseDelay(!!direct);
+          }}
         />
       )}
 
@@ -3251,6 +3408,11 @@ const SAVEABLE_ITEM_ATTRIBUTES = [
   // silently collapse the cue's firing delay to just the fuse/lift. See
   // handleSaveInventoryItem.
   "metaDelaySec",
+  // Aerial shell lit directly into the lift charge: its delay omits the
+  // shell's fuse delay (see itemFuseLiftDelay).
+  "noFuseDelay",
+  // Specific shell from an aerial shell pack (null/absent = any shell).
+  "shellNumber",
   // Marks a cue that originated from the show-import flow (see
   // util/showImport). Kept so the "Imported" badge survives a builder
   // re-save, since there is no dedicated DB column for the marker.
@@ -3279,7 +3441,7 @@ const coerceNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 const cueName = (it) => (it && it.name ? `“${it.name}”` : "cue");
 // Tracked fields whose change counts as an "edit" (beyond move/lock, handled
 // separately). Kept in sync with the History panel's diff view.
-const DIFF_FIELD_KEYS = ["duration", "zone", "target", "delay", "name", "type", "metaDelaySec", "stepId", "segmentId"];
+const DIFF_FIELD_KEYS = ["duration", "zone", "target", "delay", "name", "type", "metaDelaySec", "noFuseDelay", "shellNumber", "stepId", "segmentId"];
 const itemFieldsDiffer = (p, n) =>
   DIFF_FIELD_KEYS.some((k) => String(p[k] ?? "") !== String(n[k] ?? ""));
 // Firing order within manual-sequence steps (items-array order of cues that
@@ -3606,8 +3768,12 @@ const ShowBuilder = (props) => {
   // Create or update an inventory item from the inline form, mirroring the
   // Inventory page's normalization, then refresh so changes show immediately.
   // Fuse (+ lift, for aerial shells) delay contributed by an inventory item.
-  const itemFuseLiftDelay = (inv) =>
-    (Number(inv?.fuse_delay ?? inv?.fuseDelay ?? 0) || 0) +
+  // A cue flagged `noFuseDelay` (aerial shell lit straight into the lift
+  // charge) skips the fuse term.
+  const itemFuseLiftDelay = (inv, cue) =>
+    (inv?.type === "AERIAL_SHELL" && cue?.noFuseDelay
+      ? 0
+      : Number(inv?.fuse_delay ?? inv?.fuseDelay ?? 0) || 0) +
     (inv?.type === "AERIAL_SHELL" ? (Number(inv?.lift_delay ?? 0) || 0) : 0);
 
   const handleSaveInventoryItem = async (item) => {
@@ -3647,7 +3813,7 @@ const ShowBuilder = (props) => {
             if (it.itemId == null || Number(it.itemId) !== savedId) return it;
             const dur =
               inv.duration != null && inv.duration !== "" ? Number(inv.duration) : it.duration;
-            const itemDelay = itemFuseLiftDelay(inv);
+            const itemDelay = itemFuseLiftDelay(inv, it);
             // Preserve the operator's extra delay. Prefer the persisted
             // `metaDelaySec`; for legacy cues that predate it, back it out of
             // the cue's current total delay using the item's pre-edit
@@ -3655,7 +3821,7 @@ const ShowBuilder = (props) => {
             const extraDelay = Number.isFinite(Number(it.metaDelaySec))
               ? Number(it.metaDelaySec)
               : Math.max(0, (Number(it.delay) || 0) - preEditDelay);
-            return applySegmentToCue({
+            return withDefaultShellDuration(applySegmentToCue({
               ...it,
               color: inv.color ?? it.color,
               image: inv.image ?? it.image,
@@ -3667,7 +3833,7 @@ const ShowBuilder = (props) => {
               // Persist the resolved extra delay so future re-syncs are exact.
               metaDelaySec: extraDelay,
               delay: extraDelay + itemDelay,
-            }, inv);
+            }, inv));
           })
         );
       }
@@ -4238,9 +4404,9 @@ const ShowBuilder = (props) => {
       merged.lift_delay = inv_item.lift_delay ?? item.lift_delay;
       if (Number.isFinite(Number(item.metaDelaySec))) {
         merged.metaDelaySec = Number(item.metaDelaySec);
-        merged.delay = merged.metaDelaySec + itemFuseLiftDelay(inv_item);
+        merged.delay = merged.metaDelaySec + itemFuseLiftDelay(inv_item, item);
       }
-      return applySegmentToCue(merged, inv_item);
+      return withDefaultShellDuration(applySegmentToCue(merged, inv_item));
     }));
   };
 

@@ -229,7 +229,12 @@ def download_audio_from_youtube(youtube_url, start_sec, duration=None, temp_dir=
         'quiet': True,
         'no_warnings': True,
     }
-    
+    # Point yt-dlp's postprocessor at the ffmpeg we resolved. A Finder-launched
+    # macOS app has a minimal PATH without /opt/homebrew/bin, so yt-dlp's own
+    # PATH lookup fails even when find_ffmpeg() located it via the fallbacks.
+    if FFMPEG_PATH and os.path.isabs(FFMPEG_PATH):
+        ydl_opts['ffmpeg_location'] = os.path.dirname(FFMPEG_PATH)
+
     # If we have a start time, we'll need to extract a segment
     # yt-dlp doesn't directly support start times, so we'll download and trim
     try:

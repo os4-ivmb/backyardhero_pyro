@@ -182,7 +182,7 @@ function initializeDatabase(db) {
       x_spacing REAL NOT NULL CHECK(x_spacing >= 0),
       y_rows INTEGER NOT NULL CHECK(y_rows > 0),
       y_spacing REAL NOT NULL CHECK(y_spacing >= 0),
-      cells TEXT NOT NULL, -- JSON: { "x_y": { "shellId": number, "shellNumber": number, "fuseId": string|null } }
+      cells TEXT NOT NULL, -- JSON: { "x_y": { "shellId": number, "shellNumber": number, "fuseId": string|null, "direct"?: true } }
       fuses TEXT NOT NULL, -- JSON: { "fuseId": { "type": string, "leadIn": number, "cells": ["x_y", ...] } }
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
       FOREIGN KEY (show_id) REFERENCES Show(id) ON DELETE CASCADE

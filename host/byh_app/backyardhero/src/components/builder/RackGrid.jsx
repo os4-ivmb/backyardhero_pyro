@@ -90,6 +90,7 @@ export default function RackGrid({ rack, racks, inventory, onUpdate, showItems }
     const c = cells[cellKey(x, y)];
     return c && c.shellId != null;
   };
+  const cellIsDirect = (x, y) => !!cells[cellKey(x, y)]?.direct;
   const cellHasFuse = (x, y) => {
     const c = cells[cellKey(x, y)];
     return !!(c && c.fuseId);
@@ -142,32 +143,36 @@ export default function RackGrid({ rack, racks, inventory, onUpdate, showItems }
   };
 
   // -- Shells-mode handlers ------------------------------------------------
-  const handleShellSelected = (shellId, shellNumber) => {
+  // A direct cell (ignitor in the lift charge) is never on a fuse, so the
+  // flag only sticks to cells without a fuseId.
+  const cellFields = (key, shellId, shellNumber, direct) => {
+    const fuseId = cells[key]?.fuseId || null;
+    return {
+      shellId,
+      shellNumber: shellNumber || null,
+      fuseId,
+      ...(direct && !fuseId ? { direct: true } : {}),
+    };
+  };
+
+  const handleShellSelected = (shellId, shellNumber, direct) => {
     if (!clickedCell) return;
     const key = cellKey(clickedCell.x, clickedCell.y);
     const updatedCells = { ...cells };
     if (shellId === null) {
       delete updatedCells[key];
     } else {
-      updatedCells[key] = {
-        shellId,
-        shellNumber: shellNumber || null,
-        fuseId: cells[key]?.fuseId || null,
-      };
+      updatedCells[key] = cellFields(key, shellId, shellNumber, direct);
     }
     onUpdate({ ...rack, cells: updatedCells });
     setShowShellSelector(false);
     setClickedCell(null);
   };
 
-  const handleBatchAssign = (shellId, shellNumber) => {
+  const handleBatchAssign = (shellId, shellNumber, direct) => {
     const updatedCells = { ...cells };
     for (const key of selectedCells) {
-      updatedCells[key] = {
-        shellId,
-        shellNumber: shellNumber || null,
-        fuseId: cells[key]?.fuseId || null,
-      };
+      updatedCells[key] = cellFields(key, shellId, shellNumber, direct);
     }
     onUpdate({ ...rack, cells: updatedCells });
     setShowBatchModal(false);
@@ -321,6 +326,12 @@ export default function RackGrid({ rack, racks, inventory, onUpdate, showItems }
       // Disallow stealing cells from existing fuses -- it's almost
       // always a mistake. The user should explicitly delete the old
       // fuse first.
+      if (cells[key]?.direct) {
+        setChainWarning(
+          "That cell is direct-fired (ignitor in the lift charge) and can't be fused. Untick Direct in its shell picker first."
+        );
+        return;
+      }
       const otherFuseId = cells[key]?.fuseId;
       if (otherFuseId) {
         setChainWarning(
@@ -599,6 +610,7 @@ export default function RackGrid({ rack, racks, inventory, onUpdate, showItems }
               const inPending = isInPendingFuse(x, y);
               const hasShell = cellHasShell(x, y);
               const inFuse = cellHasFuse(x, y);
+              const isDirect = cellIsDirect(x, y);
               const isEditingThisFuse =
                 inFuse && editingFuseId && cellData?.fuseId === editingFuseId;
 
@@ -615,6 +627,8 @@ export default function RackGrid({ rack, racks, inventory, onUpdate, showItems }
               } else if (isEditingThisFuse) {
                 cellClasses +=
                   "border-warn ring-2 ring-warn/40 bg-warn-bg/30 ";
+              } else if (hasShell && isDirect) {
+                cellClasses += "border-dashed border-amber-400 bg-surface-3 ";
               } else if (hasShell) {
                 cellClasses += "border-border bg-surface-3 ";
               } else {
@@ -633,12 +647,20 @@ export default function RackGrid({ rack, racks, inventory, onUpdate, showItems }
                           cellData.shellNumber
                             ? ` #${cellData.shellNumber}`
                             : ""
-                        }`
+                        }${isDirect ? " · Direct (no fuse delay)" : ""}`
                       : "Empty"
                   }
                 >
                   {hasShell && (
                     <>
+                      {isDirect && (
+                        <div
+                          className="absolute top-0 right-0 px-0.5 text-[8px] font-bold leading-tight rounded-bl-sm bg-amber-400 text-black"
+                          aria-label="Direct"
+                        >
+                          D
+                        </div>
+                      )}
                       <div className="absolute inset-0 flex flex-col items-center justify-center text-xs text-fg-primary px-1">
                         <div className="text-[10px] leading-tight font-semibold">
                           {shell?.name?.substring(0, 7).toUpperCase()}

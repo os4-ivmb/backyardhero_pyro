@@ -75,9 +75,18 @@ function buildEnv(dirs, serialPort) {
   const runtimeCfg = loadRuntimeConfig();
   const ffmpegDir = path.dirname(resources.ffmpeg);
   const pathSep = isWin ? ';' : ':';
-  const augmentedPath = fs.existsSync(ffmpegDir)
-    ? `${ffmpegDir}${pathSep}${process.env.PATH || ''}`
-    : process.env.PATH || '';
+  const pathParts = (process.env.PATH || '').split(pathSep).filter(Boolean);
+  // A Finder/Dock-launched macOS app inherits launchd's minimal PATH
+  // (/usr/bin:/bin:/usr/sbin:/sbin), so Homebrew tools like ffmpeg/ffprobe
+  // are invisible to the Python services. Append the standard Homebrew dirs.
+  if (process.platform === 'darwin') {
+    for (const d of ['/opt/homebrew/bin', '/usr/local/bin']) {
+      if (!pathParts.includes(d) && fs.existsSync(d)) pathParts.push(d);
+    }
+  }
+  // A bundled ffmpeg (if shipped) takes precedence over anything on PATH.
+  if (fs.existsSync(ffmpegDir)) pathParts.unshift(ffmpegDir);
+  const augmentedPath = pathParts.join(pathSep);
 
   return {
     ...process.env,
